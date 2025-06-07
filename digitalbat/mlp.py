@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import tqdm
 import copy
+from sklearn.metrics import average_precision_score
 
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num):
@@ -95,7 +96,8 @@ class MLP(nn.Module):
         else: # no hidden layer
             self.layers.append(nn.Linear(input_dim, output_dim))
 
-        self.layers.append(ELU1())
+        # self.layers.append(ELU1())
+        self.layers.append(nn.Identity())
     
     def forward(self, x):
         # Pass the input through all layers
@@ -123,14 +125,16 @@ def model_train(
     model = model.to(device)
 
     # loss function and optimizer
-    loss_fn = nn.PoissonNLLLoss(log_input=False)  # binary cross entropy
+    # loss_fn = nn.PoissonNLLLoss(log_input=False)  # binary cross entropy
+    pos_weight = torch.tensor([19.0]).to(device)  # Assuming spike fraction ~5%, weight the positive class more, 95% / 5% = 19
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     batch_start = np.arange(0, len(X_train), batch_size)
  
     # Hold the best model
-    best_logl = - np.inf   # the best log likelihood, init to negative infinity
+    best_auprc = - np.inf   # the best area under the precision-recall curve, init to negative infinity
     best_weights = None
-    logl_vals = []
+    auprc_vals = []
  
     for epoch in range(n_epochs):
         model.train()
@@ -155,15 +159,61 @@ def model_train(
                 #     acc=acc
                 # )
         # evaluate accuracy at end of each epoch
-        model.eval()
-        X_val = X_val.float().to(device)
-        y_val = y_val.float().to(device)
-        y_pred = model(X_val)
-        logl =  -loss_fn(y_pred, y_val).detach().cpu().data.numpy() # (y_pred.round() == y_val).float().mean().detach().cpu().data.numpy()
-        logl_vals.append(logl)
-        if logl > best_logl:
-            best_logl = logl
-            best_weights = copy.deepcopy(model.state_dict())
+        if epoch % 5 == 0:
+            model.eval()
+            X_val = X_val.float().to(device)
+            y_val = y_val.float().to(device)
+            y_pred = model(X_val)
+            # logl =  -loss_fn(y_pred, y_val).detach().cpu().data.numpy() # (y_pred.round() == y_val).float().mean().detach().cpu().data.numpy()
+            y_true = y_val.detach().cpu().numpy()
+            y_pred = torch.sigmoid(y_pred).detach().cpu().numpy()
+            auprc_score = np.mean(auprc_per_unit(y_true, y_pred))
+            # auprc_score = average_precision_score(y_true.flatten(), y_pred.flatten())
+            auprc_vals.append(auprc_score)
+            if auprc_score > best_auprc:
+                best_auprc = auprc_score
+                best_weights = copy.deepcopy(model.state_dict())
     # restore model and return best accuracy
     model.load_state_dict(best_weights)
-    return best_logl, best_weights, logl_vals
+    return best_auprc, best_weights, auprc_vals
+
+
+def auprc_per_unit(
+    y_true_np: np.ndarray,  # shape: (batch_size, num_units)
+    y_pred_np: np.ndarray   # shape: (batch_size, num_units)
+) -> np.ndarray:
+    """
+    Compute the Area Under the Precision-Recall Curve (AUPRC) for each unit (column) independently.
+
+    Parameters:
+    ----------
+    y_true_np : np.ndarray
+        A 2D NumPy array of binary ground truth labels (0 or 1),
+        with shape (batch_size, number_of_units).
+
+    y_pred_np : np.ndarray
+        A 2D NumPy array of predicted probabilities (after sigmoid),
+        with shape (batch_size, number_of_units).
+
+    Returns:
+    -------
+    np.ndarray
+        A 1D NumPy array of AUPRC scores for each unit.
+        Units with no positive examples in `y_true_np` will have `np.nan`.
+    """
+
+    num_units = y_true_np.shape[1]
+    auprc_scores = []
+
+    for i in range(num_units):
+        y_true_unit = y_true_np[:, i]
+        y_pred_unit = y_pred_np[:, i]
+
+        if np.sum(y_true_unit) == 0:
+            # AUPRC is undefined when there are no positive samples
+            auprc_scores.append(np.nan)
+        else:
+            score = average_precision_score(y_true_unit, y_pred_unit)
+            auprc_scores.append(score)
+
+    return np.array(auprc_scores)
