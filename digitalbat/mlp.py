@@ -7,6 +7,8 @@ import tqdm
 import copy
 from sklearn.metrics import average_precision_score
 
+from .utils import corr
+
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num):
     """
@@ -116,6 +118,7 @@ def model_train(
     n_epochs=200, # # number of epochs to run
     batch_size=100,  # size of each batch
     lr=0.0001, # learning rate
+    pos_weight=1.0, # torch tensor, for nn.BCEWithLogitsLoss()
     verbose=False, # not display the progress
 ):
     """
@@ -126,7 +129,7 @@ def model_train(
 
     # loss function and optimizer
     # loss_fn = nn.PoissonNLLLoss(log_input=False)  # binary cross entropy
-    pos_weight = torch.tensor([19.0]).to(device)  # Assuming spike fraction ~5%, weight the positive class more, 95% / 5% = 19
+    pos_weight = pos_weight.to(device)  # Assuming spike fraction ~5%, weight the positive class more, 95% / 5% = 19
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     batch_start = np.arange(0, len(X_train), batch_size)
@@ -158,21 +161,31 @@ def model_train(
                 #     loss=float(loss).detach().cpu().data.numpy(),
                 #     acc=acc
                 # )
+
         # evaluate accuracy at end of each epoch
-        if epoch % 5 == 0:
-            model.eval()
-            X_val = X_val.float().to(device)
-            y_val = y_val.float().to(device)
-            y_pred = model(X_val)
-            # logl =  -loss_fn(y_pred, y_val).detach().cpu().data.numpy() # (y_pred.round() == y_val).float().mean().detach().cpu().data.numpy()
-            y_true = y_val.detach().cpu().numpy()
-            y_pred = torch.sigmoid(y_pred).detach().cpu().numpy()
-            auprc_score = np.mean(auprc_per_unit(y_true, y_pred))
-            # auprc_score = average_precision_score(y_true.flatten(), y_pred.flatten())
-            auprc_vals.append(auprc_score)
-            if auprc_score > best_auprc:
-                best_auprc = auprc_score
-                best_weights = copy.deepcopy(model.state_dict())
+        # if epoch % 5 == 0:
+        model.eval()
+        X_val = X_val.float().to(device)
+        y_val = y_val.float().to(device)
+        y_pred = model(X_val)
+        #
+        # logl =  -loss_fn(y_pred, y_val).detach().cpu().data.numpy() # (y_pred.round() == y_val).float().mean().detach().cpu().data.numpy()
+        #
+        # auprc_score = -loss_fn(y_pred, y_val).detach().cpu().numpy()
+        #
+        # y_true = y_val.detach().cpu().numpy()
+        # y_pred = torch.sigmoid(y_pred).detach().cpu().numpy()
+        # auprc_score = np.mean(auprc_per_unit(y_true, y_pred))
+        #
+        # auprc_score = average_precision_score(y_true.flatten(), y_pred.flatten())
+        #
+        auprc_score = corr(y_val.detach().cpu().numpy(), torch.sigmoid(y_pred).detach().cpu().numpy().round(), axis=0)
+        auprc_score = np.nanmean(auprc_score)
+        auprc_vals.append(auprc_score)
+        if auprc_score > best_auprc:
+            best_auprc = auprc_score
+            best_weights = copy.deepcopy(model.state_dict())
+
     # restore model and return best accuracy
     model.load_state_dict(best_weights)
     return best_auprc, best_weights, auprc_vals
