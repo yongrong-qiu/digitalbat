@@ -131,6 +131,7 @@ def model_train(
     # loss_fn = nn.PoissonNLLLoss(log_input=False)  # binary cross entropy
     pos_weight = pos_weight.to(device)  # Assuming spike fraction ~5%, weight the positive class more, 95% / 5% = 19
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # loss_fn = FocalLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     batch_start = np.arange(0, len(X_train), batch_size)
  
@@ -230,3 +231,18 @@ def auprc_per_unit(
             auprc_scores.append(score)
 
     return np.array(auprc_scores)
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits, targets):
+        probs = torch.sigmoid(logits)
+        ce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        p_t = probs * targets + (1 - probs) * (1 - targets)
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        focal_loss = alpha_t * (1 - p_t) ** self.gamma * ce_loss
+        return focal_loss.mean()
