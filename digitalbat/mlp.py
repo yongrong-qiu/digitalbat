@@ -7,6 +7,8 @@ import tqdm
 import copy
 from sklearn.metrics import average_precision_score
 
+from typing import List
+
 from .utils import corr
 
 
@@ -69,43 +71,87 @@ class ELU1(nn.Module):
 
     def forward(self, x, inplace=False, eps=0):
         return ELU1.elu1(x, inplace, eps)
-    
+
+
+class Sin(nn.Module):
+    """
+    The sine of the input
+    """
+
+    def forward(self, x):
+        return torch.sin(x)
+
 
 class MLP(nn.Module):
     """
-    MLP model with dynamically created linear layers based on input_dim and latent_dims_list.
+    Flexible MLP model with configurable hidden layers and activations.
+
+    Parameters
+    ----------
+    input_dim : int
+        Dimensionality of the input features.
+
+    output_dim : int
+        Dimensionality of the output.
+
+    latent_dims_list : List[int]
+        List of hidden layer sizes. If empty, the model becomes a single linear layer.
+
+    latent_activation : nn.Module
+        Activation function applied after each hidden layer (e.g., nn.ReLU(), nn.Tanh()).
+
+    final_activation : nn.Module
+        Activation function applied after the output layer (e.g., nn.Identity(), nn.Sigmoid()).
     """
-    def __init__(self, input_dim=10, output_dim=10, latent_dims_list=[100, 100], linear_flag=False):
+    def __init__(
+        self,
+        input_dim: int = 10,
+        output_dim: int = 10,
+        latent_dims_list: List[int] = [100, 100],
+        latent_activation: nn.Module = nn.ReLU(),
+        final_activation: nn.Module = nn.Identity(),
+    ):
         super().__init__()
 
-        # Create a list to hold all the layers
         self.layers = nn.ModuleList()
-        
-        if len(latent_dims_list)>0:
-            # Add the first layer (input_dim -> first latent dimension)
-            self.layers.append(nn.Linear(input_dim, latent_dims_list[0]))
-            self.layers.append(nn.ReLU()) if not linear_flag else self.layers.append(nn.Identity())
-            
-            # Add intermediate layers (latent_dim[i] -> latent_dim[i+1])
-            if len(latent_dims_list)>1:
-                for ii in range(len(latent_dims_list) - 1):
-                    self.layers.append(nn.Linear(latent_dims_list[ii], latent_dims_list[ii+1]))
-                    self.layers.append(nn.ReLU()) if not linear_flag else self.layers.append(nn.Identity())
-            
-            # Add the final output layer (last latent dimension -> output_dim)
-            self.layers.append(nn.Linear(latent_dims_list[-1], output_dim))
 
-        else: # no hidden layer
+        if latent_dims_list:
+            # Input layer: input_dim → first hidden layer
+            self.layers.append(nn.Linear(input_dim, latent_dims_list[0]))
+            self.layers.append(latent_activation)
+
+            # Hidden layers: hidden_i → hidden_{i+1}
+            for i in range(len(latent_dims_list) - 1):
+                self.layers.append(nn.Linear(latent_dims_list[i], latent_dims_list[i + 1]))
+                self.layers.append(latent_activation)
+
+            # Output layer: last hidden → output_dim
+            self.layers.append(nn.Linear(latent_dims_list[-1], output_dim))
+        else:
+            # No hidden layers: direct input → output
             self.layers.append(nn.Linear(input_dim, output_dim))
 
-        # self.layers.append(ELU1())
-        self.layers.append(nn.Identity())
-    
-    def forward(self, x):
-        # Pass the input through all layers
+        # Final activation (can be Identity, Sigmoid, etc.)
+        self.layers.append(final_activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the MLP.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (batch_size, input_dim)
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor of shape (batch_size, output_dim)
+        """
         for layer in self.layers:
             x = layer(x)
         return x
+
     
 
 def model_train(
