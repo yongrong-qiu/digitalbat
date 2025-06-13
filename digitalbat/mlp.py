@@ -6,8 +6,9 @@ import torch.optim as optim
 import tqdm
 import copy
 from sklearn.metrics import average_precision_score
+import math
 
-from typing import List
+from typing import List, Optional
 
 from .utils import corr
 
@@ -84,12 +85,12 @@ class Sin(nn.Module):
 
 class MLP(nn.Module):
     """
-    Flexible MLP model with configurable hidden layers and activations.
+    Flexible MLP model with optional Fourier features for spatial inputs.
 
     Parameters
     ----------
     input_dim : int
-        Dimensionality of the input features.
+        Original dimensionality of the input (e.g., 10).
 
     output_dim : int
         Dimensionality of the output.
@@ -98,10 +99,19 @@ class MLP(nn.Module):
         List of hidden layer sizes. If empty, the model becomes a single linear layer.
 
     latent_activation : nn.Module
-        Activation function applied after each hidden layer (e.g., nn.ReLU(), nn.Tanh()).
+        Activation function applied after each hidden layer (e.g., nn.ReLU()).
 
     final_activation : nn.Module
-        Activation function applied after the output layer (e.g., nn.Identity(), nn.Sigmoid()).
+        Activation function applied after the output layer (e.g., nn.Identity()).
+
+    use_fourier : bool
+        Whether to apply Fourier features to position inputs (dimensions 1–3).
+
+    fourier_features_dim : int
+        Number of Fourier frequencies for each positional input dimension.
+
+    fourier_scale : float
+        Scale factor for the Fourier feature frequencies.
     """
     def __init__(
         self,
@@ -110,49 +120,76 @@ class MLP(nn.Module):
         latent_dims_list: List[int] = [100, 100],
         latent_activation: nn.Module = nn.ReLU(),
         final_activation: nn.Module = nn.Identity(),
+        use_fourier: bool = False,
+        fourier_features_dim: int = 16,
+        fourier_scale: float = 10.0,
     ):
         super().__init__()
 
+        self.use_fourier = use_fourier
+        self.fourier_features_dim = fourier_features_dim
+        self.fourier_scale = fourier_scale
+
+        # Number of Fourier features added per input dimension
+        fourier_expand = 2 * fourier_features_dim if use_fourier else 0
+
+        # Dimensions 1-3 (positions) → add Fourier features
+        num_fourier_input_dims = 3 if use_fourier else 0
+        self.total_fourier_dim = num_fourier_input_dims * fourier_expand
+
+        self.input_dim_no_fourier = input_dim
+        self.effective_input_dim = input_dim - num_fourier_input_dims + self.total_fourier_dim
+
+        # Create learnable layers
         self.layers = nn.ModuleList()
 
         if latent_dims_list:
-            # Input layer: input_dim → first hidden layer
-            self.layers.append(nn.Linear(input_dim, latent_dims_list[0]))
+            self.layers.append(nn.Linear(self.effective_input_dim, latent_dims_list[0]))
             self.layers.append(latent_activation)
-
-            # Hidden layers: hidden_i → hidden_{i+1}
             for i in range(len(latent_dims_list) - 1):
                 self.layers.append(nn.Linear(latent_dims_list[i], latent_dims_list[i + 1]))
                 self.layers.append(latent_activation)
-
-            # Output layer: last hidden → output_dim
             self.layers.append(nn.Linear(latent_dims_list[-1], output_dim))
         else:
-            # No hidden layers: direct input → output
-            self.layers.append(nn.Linear(input_dim, output_dim))
+            self.layers.append(nn.Linear(self.effective_input_dim, output_dim))
 
-        # Final activation (can be Identity, Sigmoid, etc.)
         self.layers.append(final_activation)
+
+        # Register Fourier frequencies as buffers
+        if self.use_fourier:
+            freqs = torch.exp2(torch.arange(self.fourier_features_dim).float()) * self.fourier_scale
+            self.register_buffer("fourier_freqs", freqs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the MLP.
+        Forward pass through the model.
 
         Parameters
         ----------
         x : torch.Tensor
-            Input tensor of shape (batch_size, input_dim)
+            Shape (batch_size, input_dim)
 
         Returns
         -------
         torch.Tensor
-            Output tensor of shape (batch_size, output_dim)
+            Shape (batch_size, output_dim)
         """
+        if self.use_fourier:
+            # Extract spatial dimensions (1–3)
+            pos = x[:, 1:4]  # shape (B, 3)
+            freqs = self.fourier_freqs[None, None, :]  # shape (1, 1, F)
+            pos = pos[:, :, None] * freqs  # shape (B, 3, F)
+
+            pos_enc = torch.cat([torch.sin(pos), torch.cos(pos)], dim=-1)  # (B, 3, 2F)
+            pos_enc = pos_enc.flatten(1)  # shape (B, 3*2F)
+
+            # Concatenate: [flying | pos_enc | accel/gyro]
+            x = torch.cat([x[:, :1], pos_enc, x[:, 4:]], dim=-1)
+
         for layer in self.layers:
             x = layer(x)
         return x
 
-    
 
 def model_train(
     model, 
