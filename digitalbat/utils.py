@@ -1,7 +1,9 @@
 import numpy as np
 from scipy.signal import butter, filtfilt, hilbert
+from scipy.interpolate import interp1d
 from numpy.typing import ArrayLike
 from typing import Tuple, Union
+
 
 def bandpass_filter(signal, fs, band):
     """Bandpass filter a signal."""
@@ -30,7 +32,6 @@ def extract_band_power_per_bin(lfp, fs, band, bin_size_sec):
     
     return binned_power
 
-
 def corr(
     y1: ArrayLike, y2: ArrayLike, axis: Union[None, int, Tuple[int]] = -1, eps: int = 1e-8, **kwargs
 ) -> np.ndarray:
@@ -53,3 +54,37 @@ def corr(
     y1 = (y1 - y1.mean(axis=axis, keepdims=True)) / (y1.std(axis=axis, keepdims=True, ddof=0) + eps)
     y2 = (y2 - y2.mean(axis=axis, keepdims=True)) / (y2.std(axis=axis, keepdims=True, ddof=0) + eps)
     return (y1 * y2).mean(axis=axis, **kwargs)
+
+
+def interpolate_signal_with_nans(time_input, signal_input, time_output, kind='linear'):
+    """
+    Fill NaNs in signal_input using interpolation, then interpolate onto time_output.
+
+    Parameters:
+    - time_input: 1D array of original time points
+    - signal_input: 1D array of signal values at time_input (may contain NaNs)
+    - time_output: 1D array of desired time points for interpolation
+    - kind: interpolation kind ('linear', 'nearest', 'cubic', etc.)
+
+    Returns:
+    - signal_output: interpolated signal at time_output
+    """
+    # Ensure arrays are numpy arrays
+    time_input = np.asarray(time_input)
+    signal_input = np.asarray(signal_input)
+
+    # Step 1: Interpolate over NaNs in signal_input
+    valid = ~np.isnan(signal_input)
+    if np.sum(valid) < 2:
+        raise ValueError("Not enough valid points to interpolate.")
+
+    fill_interp = interp1d(time_input[valid], signal_input[valid], kind='linear', 
+                           bounds_error=False, fill_value='extrapolate')
+    signal_filled = fill_interp(time_input)
+
+    # Step 2: Interpolate to time_output
+    output_interp = interp1d(time_input, signal_filled, kind=kind,
+                             bounds_error=False, fill_value='extrapolate')
+    signal_output = output_interp(time_output)
+
+    return signal_output
