@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.interpolate import interp1d
+from sklearn.metrics import average_precision_score
 from numpy.typing import ArrayLike
 from typing import Tuple, Union
 
@@ -88,3 +89,43 @@ def interpolate_signal_with_nans(time_input, signal_input, time_output, kind='li
     signal_output = output_interp(time_output)
 
     return signal_output
+
+def auprc_per_unit(
+    y_true_np: np.ndarray,  # shape: (batch_size, num_units)
+    y_pred_np: np.ndarray   # shape: (batch_size, num_units)
+) -> np.ndarray:
+    """
+    Compute the Area Under the Precision-Recall Curve (AUPRC) for each unit (column) independently.
+
+    Parameters:
+    ----------
+    y_true_np : np.ndarray
+        A 2D NumPy array of binary ground truth labels (0 or 1),
+        with shape (batch_size, number_of_units).
+
+    y_pred_np : np.ndarray
+        A 2D NumPy array of predicted probabilities (after sigmoid),
+        with shape (batch_size, number_of_units).
+
+    Returns:
+    -------
+    np.ndarray
+        A 1D NumPy array of AUPRC scores for each unit.
+        Units with no positive examples in `y_true_np` will have `np.nan`.
+    """
+
+    num_units = y_true_np.shape[1]
+    auprc_scores = []
+
+    for i in range(num_units):
+        y_true_unit = y_true_np[:, i]
+        y_pred_unit = y_pred_np[:, i]
+
+        if np.sum(y_true_unit) == 0:
+            # AUPRC is undefined when there are no positive samples
+            auprc_scores.append(np.nan)
+        else:
+            score = average_precision_score(y_true_unit, y_pred_unit)
+            auprc_scores.append(score)
+
+    return np.array(auprc_scores)
