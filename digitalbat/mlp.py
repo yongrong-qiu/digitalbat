@@ -13,50 +13,80 @@ from typing import List, Optional
 from .utils import corr
 
 
-def data_prep_for_mlp(all_input, all_label, train_num, valid_num):
+def data_prep_for_mlp(all_input, all_label, train_num, valid_num, use_fourier=False):
     """
     Data preprocessing for MLP.
-    Args:
-        all_input: 2D numpy array with a shape of (num_of_data_points, num_of_input_features)
-        all_label: 2D numpy array with a shape of (num_of_data_points, num_of_output_dimensions)
-        train_num: number of data points for training
-        valid_num: number of data points for validation
 
-    Return:
-        Pytorch tensor for training models
-        
+    Args:
+        all_input: np.ndarray, shape (n_samples, n_features)
+            Full input data. Positions assumed to be in columns 1 to 3.
+        all_label: np.ndarray, shape (n_samples, n_outputs)
+            Corresponding labels.
+        train_num: int
+            Number of training samples.
+        valid_num: int
+            Number of validation samples.
+        use_fourier: bool, default=False
+            If True, normalize positions (columns 1–3) to [0, 1] range instead of std.
+
+    Returns:
+        Tuple of torch.Tensors:
+            train_input, valid_input, test_input,
+            train_label, valid_label, test_label
     """
 
-    # shuffle the data 
+    # Shuffle the data
     np.random.seed(100)
-    data_indice = np.random.choice(all_input.shape[0], all_input.shape[0], replace=False)
-    all_input = all_input[data_indice, :]
-    all_label = all_label[data_indice, :]
+    data_indices = np.random.permutation(all_input.shape[0])
+    all_input = all_input[data_indices]
+    all_label = all_label[data_indices]
 
-    # split the data to train, validation and test
-    train_input = all_input[:train_num, :]
-    train_label = all_label[:train_num, :]
-    valid_input = all_input[train_num : train_num + valid_num, :]
-    valid_label = all_label[train_num : train_num + valid_num, :]
-    test_input = all_input[train_num + valid_num :, :]
-    test_label = all_label[train_num + valid_num :, :]
+    # Split data
+    train_input = all_input[:train_num]
+    train_label = all_label[:train_num]
+    valid_input = all_input[train_num:train_num + valid_num]
+    valid_label = all_label[train_num:train_num + valid_num]
+    test_input = all_input[train_num + valid_num:]
+    test_label = all_label[train_num + valid_num:]
 
-    # numpy to torch
+    # Normalize input
+    if use_fourier:
+        # Normalize position dims (1:4) to [0, 1]
+        pos_min = train_input[:, 1:4].min(axis=0)
+        pos_max = train_input[:, 1:4].max(axis=0)
+        pos_range = pos_max - pos_min + 1e-8  # avoid div by zero
+
+        def normalize_pos(x):
+            x[:, 1:4] = (x[:, 1:4] - pos_min) / pos_range
+            return x
+
+        train_input = normalize_pos(train_input)
+        valid_input = normalize_pos(valid_input)
+        test_input = normalize_pos(test_input)
+
+        # Standardize other dims (0, 4:10)
+        keep_dims = [0] + list(range(4, all_input.shape[1]))
+        train_std = np.std(train_input[:, keep_dims], axis=0, keepdims=True)
+        train_input[:, keep_dims] /= train_std
+        valid_input[:, keep_dims] /= train_std
+        test_input[:, keep_dims] /= train_std
+    else:
+        # Standardize all dimensions
+        train_std = np.std(train_input, axis=0, keepdims=True)
+        train_input /= train_std
+        valid_input /= train_std
+        test_input /= train_std
+
+    # Convert to torch tensors
     train_input = torch.from_numpy(train_input).float()
-    train_label = torch.from_numpy(train_label).float()
     valid_input = torch.from_numpy(valid_input).float()
-    valid_label = torch.from_numpy(valid_label).float()
     test_input = torch.from_numpy(test_input).float()
+    train_label = torch.from_numpy(train_label).float()
+    valid_label = torch.from_numpy(valid_label).float()
     test_label = torch.from_numpy(test_label).float()
 
-    # normalize input
-    train_input_std = torch.std(train_input, dim=0, keepdim=True)
-    train_input = train_input/train_input_std
-    valid_input = valid_input/train_input_std
-    test_input = test_input/train_input_std
-
     return train_input, valid_input, test_input, train_label, valid_label, test_label
-    
+
     
 class ELU1(nn.Module):
     """
@@ -123,6 +153,7 @@ class MLP(nn.Module):
         use_fourier: bool = False,
         fourier_features_dim: int = 16,
         fourier_scale: float = 10.0,
+        dropout_prob: float = 0.0,
     ):
         super().__init__()
 
@@ -145,10 +176,14 @@ class MLP(nn.Module):
 
         if latent_dims_list:
             self.layers.append(nn.Linear(self.effective_input_dim, latent_dims_list[0]))
+            self.layers.append(nn.BatchNorm1d(latent_dims_list[0]))
             self.layers.append(latent_activation)
+            self.layers.append(nn.Dropout(dropout_prob))
             for i in range(len(latent_dims_list) - 1):
                 self.layers.append(nn.Linear(latent_dims_list[i], latent_dims_list[i + 1]))
+                self.layers.append(nn.BatchNorm1d(latent_dims_list[i + 1]))
                 self.layers.append(latent_activation)
+                self.layers.append(nn.Dropout(dropout_prob))
             self.layers.append(nn.Linear(latent_dims_list[-1], output_dim))
         else:
             self.layers.append(nn.Linear(self.effective_input_dim, output_dim))
