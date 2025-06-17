@@ -8,7 +8,7 @@ import copy
 from ..utility.utils import corr
 
 
-def model_train(
+def model_train_mlp(
     model, 
     X_train, # torch tensor
     y_train, # torch tensor
