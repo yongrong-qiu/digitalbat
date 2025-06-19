@@ -40,21 +40,21 @@ def data_prep_for_mlp(all_input, all_label, train_num, valid_num, use_fourier=Fa
 
     # Normalize input
     if use_fourier:
-        # Normalize position dims (1:4) to [0, 1]
-        pos_min = train_input[:, 1:4].min(axis=0)
-        pos_max = train_input[:, 1:4].max(axis=0)
+        # Normalize position dims (0:3) to [0, 1]
+        pos_min = train_input[:, 0:3].min(axis=0)
+        pos_max = train_input[:, 0:3].max(axis=0)
         pos_range = pos_max - pos_min + 1e-8  # avoid div by zero
 
         def normalize_pos(x):
-            x[:, 1:4] = (x[:, 1:4] - pos_min) / pos_range
+            x[:, 0:3] = (x[:, 0:3] - pos_min) / pos_range
             return x
 
         train_input = normalize_pos(train_input)
         valid_input = normalize_pos(valid_input)
         test_input = normalize_pos(test_input)
 
-        # Standardize other dims (0, 4:10)
-        keep_dims = [0] + list(range(4, all_input.shape[1]))
+        # Standardize other dims (0, 3:10)
+        keep_dims = list(range(3, all_input.shape[1]))
         train_std = np.std(train_input[:, keep_dims], axis=0, keepdims=True)
         train_input[:, keep_dims] /= train_std
         valid_input[:, keep_dims] /= train_std

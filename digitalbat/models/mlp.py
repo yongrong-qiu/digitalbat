@@ -101,16 +101,16 @@ class MLP(nn.Module):
             Shape (batch_size, output_dim)
         """
         if self.use_fourier:
-            # Extract spatial dimensions (1–3)
-            pos = x[:, 1:4]  # shape (B, 3)
+            # Extract spatial dimensions (0–2)
+            pos = x[:, 0:3]  # shape (B, 3)
             freqs = self.fourier_freqs[None, None, :]  # shape (1, 1, F)
             pos = pos[:, :, None] * freqs  # shape (B, 3, F)
 
             pos_enc = torch.cat([torch.sin(pos), torch.cos(pos)], dim=-1)  # (B, 3, 2F)
             pos_enc = pos_enc.flatten(1)  # shape (B, 3*2F)
 
-            # Concatenate: [flying | pos_enc | accel/gyro]
-            x = torch.cat([x[:, :1], pos_enc, x[:, 4:]], dim=-1)
+            # Concatenate: [pos_enc | flying (if used) | accel/gyro]
+            x = torch.cat([pos_enc, x[:, 3:]], dim=-1)
 
         for layer in self.layers:
             x = layer(x)
