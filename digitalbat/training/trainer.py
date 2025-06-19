@@ -6,6 +6,7 @@ import tqdm
 import copy
 
 from ..utility.utils import corr
+from ..models.layers import FocalLoss, BCEFocalCombinedLoss
 
 
 def model_train_mlp(
@@ -18,7 +19,7 @@ def model_train_mlp(
     n_epochs=200, # # number of epochs to run
     batch_size=100,  # size of each batch
     lr=0.0001, # learning rate
-    pos_weight=1.0, # torch tensor, for nn.BCEWithLogitsLoss()
+    pos_weight=torch.tensor(1.0), # torch tensor, for nn.BCEWithLogitsLoss()
     verbose=False, # not display the progress
 ):
     """
@@ -31,7 +32,13 @@ def model_train_mlp(
     # loss_fn = nn.PoissonNLLLoss(log_input=False)  # binary cross entropy
     pos_weight = pos_weight.to(device)  # Assuming spike fraction ~5%, weight the positive class more, 95% / 5% = 19
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    # loss_fn = FocalLoss()
+    # loss_fn = FocalLoss(alpha = 0.9, gamma = 2.0) 
+    # loss_fn = BCEFocalCombinedLoss(
+    #     alpha=0.25,     # aggressive positive emphasis
+    #     gamma=2.0,
+    #     focal_weight=0.99,   # focal 60%, BCE 40%
+    #     pos_weight=pos_weight,  # optional, helps with imbalance
+    # )
     optimizer = optim.Adam(model.parameters(), lr=lr)
     batch_start = np.arange(0, len(X_train), batch_size)
  
@@ -50,7 +57,7 @@ def model_train_mlp(
                 y_batch = y_train[start:start+batch_size].float().to(device)
                 # forward pass
                 y_pred = model(X_batch)
-                loss = loss_fn(y_pred, y_batch)
+                loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
                 # backward pass
                 optimizer.zero_grad()
                 loss.backward()
