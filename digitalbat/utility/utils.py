@@ -129,3 +129,29 @@ def auprc_per_unit(
             auprc_scores.append(score)
 
     return np.array(auprc_scores)
+
+def lowpass_filter(sig, cutoff=1.0, fs=100.0, order=4):
+    """
+    Apply a low-pass Butterworth filter to a 1D signal.
+
+    Parameters
+    ----------
+    sig : np.ndarray
+        Input 1D signal.
+    cutoff : float
+        Desired cutoff frequency in Hz.
+    fs : float
+        Sampling frequency in Hz.
+    order : int
+        Order of the Butterworth filter (higher = sharper cutoff).
+
+    Returns
+    -------
+    filtered : np.ndarray
+        Filtered signal.
+    """
+    nyq = 0.5 * fs                 # Nyquist frequency
+    normal_cutoff = cutoff / nyq  # Normalize cutoff frequency
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    filtered = filtfilt(b, a, sig)
+    return filtered
