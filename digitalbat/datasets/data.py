@@ -1,7 +1,12 @@
 import numpy as np
 import torch
+from scipy.io import loadmat
 import glob
+import h5py
+from scipy.stats import binned_statistic
+
 from ..utility.utils import bandpass_filter
+from ..utility.utils import interpolate_signal_with_nans
 
 
 class Data_Prep_for_Raw():
@@ -34,6 +39,9 @@ class Data_Prep_for_Raw():
         self.global_t_end = None
         self.all_time = None
 
+        self.all_behavior = None
+        self.all_spike = None
+        self.flight_ind = None
         self.spike_ratio = None # spike ratio for each unit after resampling
 
     def get_all_behavior(self):
@@ -43,7 +51,7 @@ class Data_Prep_for_Raw():
         If only_flight_flag, we only use the data during flight.
         """
         # behavior
-        bhvFile = glob.glob(parent_folder + '/Extracted_Behavior_*.mat')[0]
+        bhvFile = glob.glob(self.parent_folder + '/Extracted_Behavior_*.mat')[0]
         # the max of the speed is about 6 meters per second in the flight rooom # just apply a median filter
         bhv = loadmat(bhvFile)
         # print (f'bhv.keys(): {bhv.keys()}')
@@ -58,7 +66,7 @@ class Data_Prep_for_Raw():
 
         # IMU
         if self.use_IMU_flag:
-            imuFile = glob.glob(parent_folder + '/IMU_data.mat')[0]
+            imuFile = glob.glob(self.parent_folder + '/IMU_data.mat')[0]
             imu = loadmat(imuFile)
             NP_imu = imu['NP_imu']
             imu_acc = NP_imu[0][0]['acc']
@@ -69,7 +77,7 @@ class Data_Prep_for_Raw():
 
         # echolocation click
         if self.use_click_flag:
-            clickFile = glob.glob(parent_folder + '/Detected_Clicks_*.mat')[0]
+            clickFile = glob.glob(self.parent_folder + '/Detected_Clicks_*.mat')[0]
             click = loadmat(clickFile)
             # print (f'click.keys(): {click.keys()}')
 
@@ -82,21 +90,21 @@ class Data_Prep_for_Raw():
             # click_time.shape: (1444,), click_shape.shape: (1444, 96), click_amp.shape: (1444,)
 
         if self.use_LFP_flag:
-            bpcFile = glob.glob(parent_folder + '/BPC_Dataset_*.mat')[0]
+            bpcFile = glob.glob(self.parent_folder + '/BPC_Dataset_*.mat')[0]
             bpc = loadmat(bpcFile)
             # print (f'bpc.keys(): {bpc.keys()}')
             # so we use the 2 nearest neighbours of the channels (i.e. from channel 39 - 43)
             # then average across these 5 channels
             # be careful, some channels may have artifacts (2-second blanck) for the LFPs
-            lfpFile = glob.glob(parent_folder + '/LFP_probe*.mat')
+            lfpFile = glob.glob(self.parent_folder + '/LFP_probe*.mat')
 
             probeind = bpc['best_prb_ch'][0][0] - 1 # matlab starts from 1 but python start from 0
             file_path = lfpFile[probeind]
 
             with h5py.File(file_path, 'r') as ff:
                 # print("Top-level keys:")
-                for key in ff.keys():
-                    print(key)
+                # for key in ff.keys():
+                #     print(key)
                 red_out = ff['red_out']
                 # print("red_out type:", type(red_out))
                 # print("red_out keys (if group):", list(red_out.keys()))  # If it's a group
@@ -136,7 +144,7 @@ class Data_Prep_for_Raw():
         all_behavior = []
         for ii in range(bhv_r.shape[1]):
             temp = interpolate_signal_with_nans(bhv_t, bhv_r[:,ii], self.all_time)
-            print (f'temp.shape: {temp.shape}')
+            # print (f'temp.shape: {temp.shape}')
             all_behavior.append(temp)
 
         temp = interpolate_signal_with_nans(bhv_t, bhv_v_abs, self.all_time)
@@ -146,11 +154,11 @@ class Data_Prep_for_Raw():
         if self.use_IMU_flag:
             for ii in range(imu_acc.shape[1]):
                 temp = interpolate_signal_with_nans(imu_t, imu_acc[:,ii], self.all_time)
-                print (f'temp.shape: {temp.shape}')
+                # print (f'temp.shape: {temp.shape}')
                 all_behavior.append(temp)
             for ii in range(imu_gyr.shape[1]):
                 temp = interpolate_signal_with_nans(imu_t, imu_gyr[:,ii], self.all_time)
-                print (f'temp.shape: {temp.shape}')
+                # print (f'temp.shape: {temp.shape}')
                 all_behavior.append(temp)
 
         if self.use_LFP_flag:
@@ -168,15 +176,17 @@ class Data_Prep_for_Raw():
 
         # only use the flight data
         if self.only_flight_flag:
-            flight_ind = np.where(all_behavior[3]>0.0)[0]
+            self.flight_ind = np.where(all_behavior[3]>0.0)[0]
             # print (f'Ratio of flight: {len(flight_ind)/all_behavior.shape[1]}')
-            all_behavior = all_behavior[:, flight_ind]
+            all_behavior = all_behavior[:, self.flight_ind]
             # all_spike = all_spike[:, flight_ind]
             # remove flying dimension from the all_behavior
             all_behavior = np.delete(all_behavior, 3, axis=0)
             # print (f'all_behavior.shape: {all_behavior.shape}') 
+
+        self.all_behavior = all_behavior
         
-        return all_behavior
+        return self.all_behavior
 
     def get_all_spike(self):
         """
@@ -200,7 +210,7 @@ class Data_Prep_for_Raw():
         # print (f'len(su_good3_time): {len(su_good3_time)}, su_good3_time[3].shape: {su_good3_time[3].shape}')
 
         # merge units
-        mergesFile = glob.glob(parent_folder + '/merges_Dataset_*.mat')[0]
+        mergesFile = glob.glob(self.parent_folder + '/merges_Dataset_*.mat')[0]
         merges = loadmat(mergesFile)
         # here represents three probes; the first probe does not have any units need to be merged
         # for the second probe, the cluster_ids  of 170 and 176 needs to be merged
@@ -262,9 +272,9 @@ class Data_Prep_for_Raw():
 
         # only use the flight data
         if self.only_flight_flag:
-            flight_ind = np.where(all_behavior[3]>0.0)[0]
-            print (f'Ratio of flight: {len(flight_ind)/all_behavior.shape[1]}')
-            all_spike = all_spike[:, flight_ind]
+            # flight_ind = np.where(self.all_behavior[3]>0.0)[0]
+            # print (f'Ratio of flight: {len(flight_ind)/self.all_behavior.shape[1]}')
+            all_spike = all_spike[:, self.flight_ind]
             # print (f'all_spike.shape: {all_spike.shape}')
 
         # spike ratio for each neuron
