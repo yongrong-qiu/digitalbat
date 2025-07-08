@@ -148,7 +148,7 @@ class Data_Prep_for_Raw():
             all_behavior.append(temp)
 
         temp = interpolate_signal_with_nans(bhv_t, bhv_v_abs, self.all_time)
-        print (f'temp.shape: {temp.shape}')
+        # print (f'temp.shape: {temp.shape}')
         all_behavior.append(temp)
 
         if self.use_IMU_flag:
