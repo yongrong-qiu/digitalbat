@@ -12,6 +12,30 @@ from ..utility.utils import interpolate_signal_with_nans
 class Data_Prep_for_Raw():
     """
     Data preprocessing for the raw data, before transforming to torch tensor data.
+
+    Example code:
+        parent_folder = '/mnt/at-globusshare/Users/Yongrong/Dataset_3_14543_240419'
+        su_file_path = '/mnt/scratch09/yongrong/datahub/bat-intelligence/out_good_units_Dataset_3_14543_240419.mat'
+        use_IMU_flag = True,
+        use_click_flag = False,
+        use_LFP_flag = True,
+        use_ripple_flag = False,
+        only_flight_flag = True,
+        bin_width = 0.010 # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
+
+        data_prep_for_raw = Data_Prep_for_Raw(
+            parent_folder = parent_folder,
+            su_file_path = su_file_path,
+            use_IMU_flag = use_IMU_flag,
+            use_click_flag = use_click_flag,
+            use_LFP_flag = use_LFP_flag,
+            use_ripple_flag = use_ripple_flag,
+            only_flight_flag = only_flight_flag,
+            bin_width = bin_width, 
+        )
+        all_behavior = data_prep_for_raw.get_all_behavior()
+        all_spike = data_prep_for_raw.get_all_spike()
+        spike_ratio = data_prep_for_raw.spike_ratio
     """
     def __init__(
         self,
