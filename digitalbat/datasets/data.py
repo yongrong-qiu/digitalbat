@@ -307,7 +307,7 @@ class Data_Prep_for_Raw():
         return all_spike
 
 
-def data_prep_for_mlp(all_input, all_label, train_num, valid_num, use_fourier=False):
+def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=False, use_fourier=False):
     """
     Data preprocessing for MLP.
 
@@ -360,16 +360,18 @@ def data_prep_for_mlp(all_input, all_label, train_num, valid_num, use_fourier=Fa
 
         # Standardize other dims (0, 3:10)
         keep_dims = list(range(3, all_input.shape[1]))
+        train_mean = np.mean(train_input[:, keep_dims], axis=0, keepdims=True) if center_flag else 0.0
         train_std = np.std(train_input[:, keep_dims], axis=0, keepdims=True)
-        train_input[:, keep_dims] /= train_std
-        valid_input[:, keep_dims] /= train_std
-        test_input[:, keep_dims] /= train_std
+        train_input[:, keep_dims] = (train_input[:, keep_dims] - train_mean) / train_std
+        valid_input[:, keep_dims] = (valid_input[:, keep_dims] - train_mean) / train_std
+        test_input[:, keep_dims] = (test_input[:, keep_dims] - train_mean) / train_std
     else:
         # Standardize all dimensions
+        train_mean = np.mean(train_input, axis=0, keepdims=True) if center_flag else 0.0
         train_std = np.std(train_input, axis=0, keepdims=True)
-        train_input /= train_std
-        valid_input /= train_std
-        test_input /= train_std
+        train_input = (train_input - train_mean) / train_std
+        valid_input = (valid_input - train_mean) / train_std
+        test_input = (test_input - train_mean) / train_std
 
     # Convert to torch tensors
     train_input = torch.from_numpy(train_input).float()
