@@ -5,6 +5,7 @@ from captum.attr import IntegratedGradients
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import precision_recall_curve, auc
+import shap
 
 
 class InterpretModel(ABC):
@@ -213,3 +214,116 @@ class PermutationImportance(InterpretModel):
         ax.set_xlabel("Feature Index")
         ax.set_ylabel("Importance")
         ax.set_title(f"Permutation: Unit {self.target_index}")
+
+
+class ActivationMaximization(InterpretModel):
+    def __init__(self, model: nn.Module, device: str = 'cpu'):
+        super().__init__(model, device)
+        self.feature_importance: torch.Tensor | None = None
+        self.target_index: int | None = None
+        self.activations: torch.Tensor | None = None
+
+    def compute_feature_importance(self, target_index: int, input_dim: int, clamp_min: torch.Tensor, clamp_max: torch.Tensor, num_steps: int = 300) -> torch.Tensor:
+        """
+        Compute the input driving the activation optimally, so it is not really feature importance
+        """
+        # Start with a random input vector
+        # optimized_input = torch.randn((1, input_dim), device=self.device, requires_grad=True)
+        optimized_input = torch.empty(1, input_dim).uniform_(0.0, 1.0).to(self.device)
+        clamp_min_exp, clamp_max_exp = clamp_min.unsqueeze(0).to(self.device), clamp_max.unsqueeze(0).to(self.device)
+        optimized_input = clamp_min_exp + (clamp_max_exp - clamp_min_exp) * optimized_input
+        optimized_input.requires_grad_(True)
+        # Optimizer
+        optimizer = torch.optim.Adam([optimized_input], lr=0.1)
+        # Run optimization
+        activations = []
+        clamp_min, clamp_max = clamp_min.to(self.device), clamp_max.to(self.device)
+        # clamp_min, clamp_max = train_input.abs().min(dim=0).values.to(device), train_input.abs().max(dim=0).values.to(device)
+        for step in range(num_steps):
+            optimizer.zero_grad()
+            output = self.model(optimized_input)  # shape: [1, 205]
+            loss = -output[0, target_index] + 0.01 * optimized_input.norm()  # maximize activation of unit_idx, add regularization
+            loss.backward()
+            optimizer.step()
+            # Optional: constrain input to a valid range, e.g. [-3, 3]
+            with torch.no_grad():
+                optimized_input.clamp_(clamp_min, clamp_max)
+            activations.append(output.detach()[0, target_index].item())
+            # if step % 10 == 0:
+            #     print(f"Step {step}, Activation: {output[0, unit_idx].item():.4f}")
+
+        # Detach for inspection
+        feature_importance = optimized_input.detach().cpu().squeeze()
+
+        self.feature_importance = feature_importance
+        self.target_index = target_index
+        self.activations = torch.from_numpy(np.array(activations)) 
+
+        return self.feature_importance
+
+    def plot_feature_importance(self) -> None:
+        """
+        Plot the computed feature importance as a bar chart.
+        """
+        if self.feature_importance is None:
+            raise ValueError("No feature importance computed yet. Call compute_feature_importance() first.")
+
+        fig, ax = plt.subplots(figsize=(4, 1.5))
+        ax.bar(range(len(self.feature_importance)), self.feature_importance.cpu().numpy())
+        ax.set_xlabel("Feature Index")
+        ax.set_ylabel("Value")
+        ax.set_title(f"Activation maximization: Unit {self.target_index}")
+
+    def plot_activations(self) -> None:
+        """
+        Plot the activation against optimized steps.
+        """
+        if self.activations is None:
+            raise ValueError("No activation computed yet. Call compute_feature_importance() first.")
+
+        fig, ax = plt.subplots(figsize=(2, 2))
+        ax.plot(range(len(self.activations)), self.activations)
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Activation")
+
+
+class ShapAnalysis(InterpretModel):
+    def __init__(self, model: nn.Module, device: str = 'cpu'):
+        super().__init__(model, device)
+        self.feature_importance: torch.Tensor | None = None
+        self.target_index: int | None = None
+
+    def compute_feature_importance(self, target_index: int, background: torch.Tensor, test_samples: torch.Tensor) -> torch.Tensor:
+        """
+        Use shap to perform attribution analysis
+        """
+        # === Prepare data ===
+        # SHAP background (reference distribution)
+        background = background.to(self.device)
+        # Use different samples for attribution
+        test_samples = test_samples.to(self.device)
+        # === Initialize SHAP GradientExplainer ===
+        explainer = shap.GradientExplainer(self.model, background)
+        # === Compute SHAP values ===
+        # This returns a list of shape: len(shap_values_list)=100, shap_values_list[0].shape=(10,205)
+        shap_values_list = explainer.shap_values(test_samples)
+        # === Extract SHAP values for unit 3; Aggregate attributions ===
+        feature_importance = torch.from_numpy(np.abs(np.array(shap_values_list)[:, :, target_index]).mean(axis=0)) 
+
+        self.feature_importance = feature_importance
+        self.target_index = target_index
+
+        return self.feature_importance
+
+    def plot_feature_importance(self) -> None:
+        """
+        Plot the computed feature importance as a bar chart.
+        """
+        if self.feature_importance is None:
+            raise ValueError("No feature importance computed yet. Call compute_feature_importance() first.")
+
+        fig, ax = plt.subplots(figsize=(4, 1.5))
+        ax.bar(range(len(self.feature_importance)), self.feature_importance.cpu().numpy())
+        ax.set_xlabel("Feature Index")
+        ax.set_ylabel("Importance")
+        ax.set_title(f"Shap: Unit {self.target_index}")
