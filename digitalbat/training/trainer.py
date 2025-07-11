@@ -4,6 +4,7 @@ from torch import nn
 import torch.optim as optim
 import tqdm
 import copy
+from typing import Callable
 
 from ..utility.utils import corr
 from ..models.layers import FocalLoss, BCEFocalCombinedLoss
@@ -20,7 +21,8 @@ def model_train_mlp(
     batch_size=100,  # size of each batch
     lr=0.0001, # learning rate
     pos_weight=torch.tensor(1.0), # torch tensor, for nn.BCEWithLogitsLoss()
-    loss_fn: nn.Module | None = None,
+    loss_fn: nn.Module | None = None, 
+    valid_fn: Callable[[np.ndarray, np.ndarray], float] | None = None, # validation during training, larger number, better performance
     verbose=False, # not display the progress
 ):
     """
@@ -41,9 +43,17 @@ def model_train_mlp(
     if loss_fn is None:
         pos_weight = pos_weight.to(device)
         loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # Default if not provided
-
     loss_fn = loss_fn.to(device)  # Make sure the loss function is on the correct device
 
+    # Default validation function: corr
+    def default_valid_fn(y_true, y_pred):
+        """
+        y_true: 0 or 1.0
+        y_pred: logit
+        """
+        sigmoid = lambda xx: 1/(1 + np.exp(-xx))
+        return np.nanmean(corr(y_true, sigmoid(y_pred).round(), axis=0))
+    valid_fn = valid_fn or default_valid_fn
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
     batch_start = np.arange(0, len(X_train), batch_size)
@@ -51,7 +61,7 @@ def model_train_mlp(
     # Hold the best model
     best_auprc = - np.inf   # the best area under the precision-recall curve, init to negative infinity
     best_weights = None
-    auprc_vals = []
+    val_scores = []
  
     for epoch in range(n_epochs):
         model.train()
@@ -93,13 +103,16 @@ def model_train_mlp(
         #
         # auprc_score = average_precision_score(y_true.flatten(), y_pred.flatten())
         #
-        auprc_score = corr(y_val.detach().cpu().numpy(), torch.sigmoid(y_pred).detach().cpu().numpy().round(), axis=0)
-        auprc_score = np.nanmean(auprc_score)
-        auprc_vals.append(auprc_score)
-        if auprc_score > best_auprc:
-            best_auprc = auprc_score
+        # score = corr(y_val.detach().cpu().numpy(), torch.sigmoid(y_pred).detach().cpu().numpy().round(), axis=0)
+        # score = np.nanmean(score)
+        y_val_np = y_val.detach().cpu().numpy()
+        y_pred_np = y_pred.detach().cpu().numpy()
+        score = valid_fn(y_val_np, y_pred_np)
+        val_scores.append(score)
+        if score > best_auprc:
+            best_auprc = score
             best_weights = copy.deepcopy(model.state_dict())
 
     # restore model and return best accuracy
     model.load_state_dict(best_weights)
-    return best_auprc, best_weights, auprc_vals
+    return best_auprc, best_weights, val_scores

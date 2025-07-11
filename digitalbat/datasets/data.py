@@ -46,6 +46,7 @@ class Data_Prep_for_Raw():
         use_LFP_flag,
         use_ripple_flag,
         only_flight_flag,
+        spike_count_flag=False, # default: we use spiking event, not spike counts 
         bin_width=0.010, # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
     ):
         super().__init__()
@@ -56,6 +57,7 @@ class Data_Prep_for_Raw():
         self.use_LFP_flag = use_LFP_flag,
         self.use_ripple_flag = use_ripple_flag
         self.only_flight_flag = only_flight_flag
+        self.spike_count_flag = spike_count_flag
 
         # data resampling
         self.bin_width = bin_width
@@ -291,7 +293,8 @@ class Data_Prep_for_Raw():
                 spike_counts, _ = np.histogram(su_good_time[ii], bins=bin_edges)
                 all_spike.append(spike_counts)
         all_spike = np.array(all_spike)
-        all_spike = np.where(all_spike>0.0, 1.0, 0.0)
+        if not self.spike_count_flag:
+            all_spike = np.where(all_spike>0.0, 1.0, 0.0)
         # print (f'all_spike.shape: {all_spike.shape}') # all_spike.shape: (289, 524859)
 
         # only use the flight data
