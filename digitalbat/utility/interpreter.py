@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import precision_recall_curve, auc
 import shap
+from typing import Callable
 
 
 class InterpretModel(ABC):
@@ -156,7 +157,14 @@ class PermutationImportance(InterpretModel):
         self.feature_importance: torch.Tensor | None = None
         self.target_index: int | None = None
 
-    def compute_feature_importance(self, target_index: int, eval_input: torch.Tensor, eval_target: torch.Tensor, **kwargs) -> torch.Tensor:
+    def compute_feature_importance(
+        self, 
+        target_index: int, 
+        eval_input: torch.Tensor, 
+        eval_target: torch.Tensor, 
+        score_fn: Callable[[np.ndarray, np.ndarray], float] | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
         """
         Compute permutation-based feature importance, here we use AUPRC to measure the predictive performance
         """
@@ -164,16 +172,32 @@ class PermutationImportance(InterpretModel):
         # Use a subset of data for evaluation
         eval_input = eval_input.to(self.device)  # shape: [N, 10]
         eval_target = eval_target[:, target_index].to(self.device)  # shape: [N]
+
+        # default score function: AUPRC
+        def default_score_fn(y_true_np, y_pred_np):
+            """
+            y_true: 0 or 1.0
+            y_pred: logit
+            """
+            sigmoid = lambda xx: 1/(1 + np.exp(-xx))
+            precision, recall, thresholds = precision_recall_curve(y_true_np, sigmoid(y_pred_np))
+            return auc(recall, precision)
+        score_fn = score_fn or default_score_fn
+
         # === Baseline performance ===
         with torch.no_grad():
             base_output = self.model(eval_input)[:, target_index]
             # base_output = base_output.sigmoid()  # since we're using BCEWithLogitsLoss
             # base_score = torch.corrcoef(torch.stack([base_output, eval_target]))[0, 1].item()
             # Alternative: base_score = roc_auc_score(eval_target.cpu(), base_output.cpu())
-            y_val = eval_target.detach().cpu().numpy()
-            y_pred_score = torch.sigmoid(base_output).detach().cpu().numpy()
-            precision, recall, thresholds = precision_recall_curve(y_val, y_pred_score)
-            base_score = auc(recall, precision)
+            # y_val = eval_target.detach().cpu().numpy()
+            # y_pred_score = torch.sigmoid(base_output).detach().cpu().numpy()
+            # precision, recall, thresholds = precision_recall_curve(y_val, y_pred_score)
+            # base_score = auc(recall, precision)
+            y_val_np = eval_target.detach().cpu().numpy()
+            y_pred_np = base_output.detach().cpu().numpy()
+            base_score = score_fn(y_val_np, y_pred_np)
+
         # print(f"Baseline correlation (unit {unit_idx + 1}): {base_score:.4f}")
 
         # === Permutation Importance ===
@@ -185,12 +209,15 @@ class PermutationImportance(InterpretModel):
             permuted_input[:, i] = permuted_input[torch.randperm(len(permuted_input)), i]
             with torch.no_grad():
                 perm_output = self.model(permuted_input)[:, target_index]
-                y_val = eval_target.detach().cpu().numpy()
-                y_pred_score = torch.sigmoid(perm_output).detach().cpu().numpy()
-                precision, recall, thresholds = precision_recall_curve(y_val, y_pred_score)
-                perm_score = auc(recall, precision)
+                # y_val = eval_target.detach().cpu().numpy()
+                # y_pred_score = torch.sigmoid(perm_output).detach().cpu().numpy()
+                # precision, recall, thresholds = precision_recall_curve(y_val, y_pred_score)
+                # perm_score = auc(recall, precision)
                 # perm_score = torch.corrcoef(torch.stack([perm_output, eval_target]))[0, 1].item()
                 # Alternative: perm_score = roc_auc_score(eval_target.cpu(), perm_output.cpu())
+                y_val_np = eval_target.detach().cpu().numpy()
+                y_pred_np = perm_output.detach().cpu().numpy()
+                perm_score = score_fn(y_val_np, y_pred_np)
             importance = base_score - perm_score  # drop in performance
             importances.append(importance)
             # print(f"Feature {i}: Importance = {importance:.4f}")

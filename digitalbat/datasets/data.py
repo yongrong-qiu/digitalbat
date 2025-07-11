@@ -280,6 +280,7 @@ class Data_Prep_for_Raw():
                 su_goods_cluster_id[ii] = [cluster_id_list[i] for i in valid_indices]
 
         # bin spike times
+        # TODO: check the time alignment between behavior (by interpolation) and spike (by histogram)
         t_start = self.global_t_start - self.bin_width / 2
         t_end = np.ceil(self.global_t_end / self.bin_width) * self.bin_width
         bin_edges = np.arange(t_start, t_end + self.bin_width, self.bin_width)
