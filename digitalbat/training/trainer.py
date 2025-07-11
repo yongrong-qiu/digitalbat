@@ -20,6 +20,7 @@ def model_train_mlp(
     batch_size=100,  # size of each batch
     lr=0.0001, # learning rate
     pos_weight=torch.tensor(1.0), # torch tensor, for nn.BCEWithLogitsLoss()
+    loss_fn: nn.Module | None = None,
     verbose=False, # not display the progress
 ):
     """
@@ -30,8 +31,6 @@ def model_train_mlp(
 
     # loss function and optimizer
     # loss_fn = nn.PoissonNLLLoss(log_input=False)  # binary cross entropy
-    pos_weight = pos_weight.to(device)  # Assuming spike fraction ~5%, weight the positive class more, 95% / 5% = 19
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     # loss_fn = FocalLoss(alpha = 0.9, gamma = 2.0) 
     # loss_fn = BCEFocalCombinedLoss(
     #     alpha=0.25,     # aggressive positive emphasis
@@ -39,6 +38,13 @@ def model_train_mlp(
     #     focal_weight=0.99,   # focal 60%, BCE 40%
     #     pos_weight=pos_weight,  # optional, helps with imbalance
     # )
+    if loss_fn is None:
+        pos_weight = pos_weight.to(device)
+        loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # Default if not provided
+
+    loss_fn = loss_fn.to(device)  # Make sure the loss function is on the correct device
+
+
     optimizer = optim.Adam(model.parameters(), lr=lr)
     batch_start = np.arange(0, len(X_train), batch_size)
  
