@@ -163,6 +163,7 @@ class PermutationImportance(InterpretModel):
         eval_input: torch.Tensor, 
         eval_target: torch.Tensor, 
         score_fn: Callable[[np.ndarray, np.ndarray], float] | None = None,
+        permute_number: int = 1, # the number of permutation experiments
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -204,21 +205,24 @@ class PermutationImportance(InterpretModel):
         num_features = eval_input.shape[1]
         importances = []
         for i in range(num_features):
-            # Permute only feature i
-            permuted_input = eval_input.clone()
-            permuted_input[:, i] = permuted_input[torch.randperm(len(permuted_input)), i]
-            with torch.no_grad():
-                perm_output = self.model(permuted_input)[:, target_index]
-                # y_val = eval_target.detach().cpu().numpy()
-                # y_pred_score = torch.sigmoid(perm_output).detach().cpu().numpy()
-                # precision, recall, thresholds = precision_recall_curve(y_val, y_pred_score)
-                # perm_score = auc(recall, precision)
-                # perm_score = torch.corrcoef(torch.stack([perm_output, eval_target]))[0, 1].item()
-                # Alternative: perm_score = roc_auc_score(eval_target.cpu(), perm_output.cpu())
-                y_val_np = eval_target.detach().cpu().numpy()
-                y_pred_np = perm_output.detach().cpu().numpy()
-                perm_score = score_fn(y_val_np, y_pred_np)
-            importance = base_score - perm_score  # drop in performance
+            perm_scores = np.empty((permute_number))
+            for jj in range(permute_number):
+                # Permute only feature i
+                permuted_input = eval_input.clone()
+                permuted_input[:, i] = permuted_input[torch.randperm(len(permuted_input)), i]
+                with torch.no_grad():
+                    perm_output = self.model(permuted_input)[:, target_index]
+                    # y_val = eval_target.detach().cpu().numpy()
+                    # y_pred_score = torch.sigmoid(perm_output).detach().cpu().numpy()
+                    # precision, recall, thresholds = precision_recall_curve(y_val, y_pred_score)
+                    # perm_score = auc(recall, precision)
+                    # perm_score = torch.corrcoef(torch.stack([perm_output, eval_target]))[0, 1].item()
+                    # Alternative: perm_score = roc_auc_score(eval_target.cpu(), perm_output.cpu())
+                    y_val_np = eval_target.detach().cpu().numpy()
+                    y_pred_np = perm_output.detach().cpu().numpy()
+                    perm_score = score_fn(y_val_np, y_pred_np)
+                perm_scores[jj] = perm_score
+            importance = base_score - np.mean(perm_scores)  # drop in performance
             importances.append(importance)
             # print(f"Feature {i}: Importance = {importance:.4f}")
 
