@@ -333,13 +333,21 @@ class ShapAnalysis(InterpretModel):
         background = background.to(self.device)
         # Use different samples for attribution
         test_samples = test_samples.to(self.device)
-        # === Initialize SHAP GradientExplainer ===
-        explainer = shap.GradientExplainer(self.model, background)
+        # === Initialize SHAP Explainer ===
+        def model_target_index_numpy_mode(x):
+            if isinstance(x, np.ndarray):
+                x = torch.from_numpy(x).float()
+            x = x.to(self.device)
+            with torch.no_grad():
+                output = self.model(x)[:, target_index].unsqueeze(1)
+            return output.cpu().numpy()
+        explainer = shap.Explainer(model_target_index_numpy_mode, background.detach().cpu().numpy())
         # === Compute SHAP values ===
-        # This returns a list of shape: len(shap_values_list)=100, shap_values_list[0].shape=(10,205)
-        shap_values_list = explainer.shap_values(test_samples)
-        # === Extract SHAP values for unit 3; Aggregate attributions ===
-        feature_importance = torch.from_numpy(np.abs(np.array(shap_values_list)[:, :, target_index]).mean(axis=0)) 
+        # This returns a tuple of 3 elements: .values (shap value with a shape of num_of_samples by num_of_features), .base_values, .data
+        shap_explanation_tuple = explainer(test_samples.detach().cpu().numpy()) 
+        # print(f'shap_explanation_tuple: {shap_explanation_tuple}')
+        shap.plots.beeswarm(shap_explanation_tuple)
+        feature_importance = torch.from_numpy(np.abs(np.array(shap_explanation_tuple.values)[:, :]).mean(axis=0)) 
 
         self.feature_importance = feature_importance
         self.target_index = target_index
