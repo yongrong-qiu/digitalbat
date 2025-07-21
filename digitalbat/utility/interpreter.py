@@ -324,7 +324,13 @@ class ShapAnalysis(InterpretModel):
         self.feature_importance: torch.Tensor | None = None
         self.target_index: int | None = None
 
-    def compute_feature_importance(self, target_index: int, background: torch.Tensor, test_samples: torch.Tensor) -> torch.Tensor:
+    def compute_feature_importance(
+        self, 
+        target_index: int, 
+        background: torch.Tensor, 
+        test_samples: torch.Tensor,
+        shap_plot_flag: bool = False,
+    ) -> torch.Tensor:
         """
         Use shap to perform attribution analysis
         """
@@ -346,7 +352,8 @@ class ShapAnalysis(InterpretModel):
         # This returns a tuple of 3 elements: .values (shap value with a shape of num_of_samples by num_of_features), .base_values, .data
         shap_explanation_tuple = explainer(test_samples.detach().cpu().numpy()) 
         # print(f'shap_explanation_tuple: {shap_explanation_tuple}')
-        shap.plots.beeswarm(shap_explanation_tuple)
+        if shap_plot_flag:
+            shap.plots.beeswarm(shap_explanation_tuple)
         feature_importance = torch.from_numpy(np.abs(np.array(shap_explanation_tuple.values)[:, :]).mean(axis=0)) 
 
         self.feature_importance = feature_importance

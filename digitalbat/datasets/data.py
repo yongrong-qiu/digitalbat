@@ -63,7 +63,8 @@ class Data_Prep_for_Raw():
         self.bin_width = bin_width
         self.global_t_start = 0.0 + bin_width / 2
         self.global_t_end = None
-        self.all_time = None
+        self.all_time = None  # for 3D location, IMU
+        self.bin_edges = None  # for spike counts, LFP 
 
         self.all_behavior = None
         self.all_spike = None
@@ -164,7 +165,14 @@ class Data_Prep_for_Raw():
         # time resampling
         self.global_t_end = np.min([bhv_t[-1], imu_t[-1]]) if self.use_IMU_flag else bhv_t[-1]
         # print (f'global_t_end: {global_t_end}')
-        self.all_time =np.arange(self.global_t_start, self.global_t_end, self.bin_width)
+        all_time =np.arange(self.global_t_start, self.global_t_end, self.bin_width)
+        # bin spike times
+        bin_edges = np.append(all_time, all_time[-1] + self.bin_width) - self.bin_width/2
+        if self.global_t_end < bin_edges[-1]: # bin_edges out of the range
+            all_time = all_time[:-1]
+            bin_edges = bin_edges[:-1]
+        self.all_time = all_time
+        self.bin_edges = bin_edges
 
         # behavior resampling
         all_behavior = []
@@ -172,7 +180,7 @@ class Data_Prep_for_Raw():
             temp = interpolate_signal_with_nans(bhv_t, bhv_r[:,ii], self.all_time)
             # print (f'temp.shape: {temp.shape}')
             all_behavior.append(temp)
-
+        # flight status
         temp = interpolate_signal_with_nans(bhv_t, bhv_v_abs, self.all_time)
         # print (f'temp.shape: {temp.shape}')
         all_behavior.append(temp)
@@ -187,14 +195,18 @@ class Data_Prep_for_Raw():
                 # print (f'temp.shape: {temp.shape}')
                 all_behavior.append(temp)
 
+        if self.use_click_flag:
+            click_counts, _ = np.histogram(click_time, bins=self.bin_edges)
+            all_behavior.append(click_counts)
+
         if self.use_LFP_flag:
             # lfp_filter, beta_band: Compute mean power in each bin (vectorized); and align
             binned_power, _, _ = binned_statistic(
                 lfp_t_ds,                   # Time stamps
                 lfp_filter ** 2,            # Power
                 statistic='mean',
-                bins=np.append(self.all_time, self.all_time[-1] + self.bin_width) - self.bin_width/2,        # Bin edges
-                range=(self.all_time[0] - self.bin_width / 2, self.all_time[-1] + self.bin_width / 2)
+                bins=self.bin_edges,        # Bin edges
+                range=(self.bin_edges[0], self.bin_edges[-1]),
             )
             all_behavior.append(binned_power)
         all_behavior = np.array(all_behavior)
@@ -279,19 +291,12 @@ class Data_Prep_for_Raw():
                 su_goods_time[ii] = [time_list[i] for i in valid_indices]
                 su_goods_cluster_id[ii] = [cluster_id_list[i] for i in valid_indices]
 
-        # bin spike times
-        # TODO: check the time alignment between behavior (by interpolation) and spike (by histogram)
-        t_start = self.global_t_start - self.bin_width / 2
-        t_end = np.ceil(self.global_t_end / self.bin_width) * self.bin_width
-        bin_edges = np.arange(t_start, t_end + self.bin_width, self.bin_width)
-        bin_centers = bin_edges[:-1] + self.bin_width / 2
-
         # su_goods_time = [su_good1_time, su_good2_time, su_good3_time]
         all_spike = []
         for su_good_time in su_goods_time:
             for ii in range(len(su_good_time)):
                 # Bin the spike times
-                spike_counts, _ = np.histogram(su_good_time[ii], bins=bin_edges)
+                spike_counts, _ = np.histogram(su_good_time[ii], bins=self.bin_edges)
                 all_spike.append(spike_counts)
         all_spike = np.array(all_spike)
         if not self.spike_count_flag:
