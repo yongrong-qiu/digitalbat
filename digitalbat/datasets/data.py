@@ -55,7 +55,7 @@ class Data_Prep_for_Raw():
         self.su_file_path = su_file_path
         self.use_IMU_flag = use_IMU_flag
         self.use_click_flag = use_click_flag
-        self.use_LFP_flag = use_LFP_flag,
+        self.use_LFP_flag = use_LFP_flag
         self.use_ripple_flag = use_ripple_flag
         self.only_flight_flag = only_flight_flag
         self.no_3d_location = no_3d_location
@@ -211,6 +211,7 @@ class Data_Prep_for_Raw():
                 range=(self.bin_edges[0], self.bin_edges[-1]),
             )
             all_behavior.append(binned_power)
+            
         all_behavior = np.array(all_behavior)
         # print (f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (11, 524859)
 
