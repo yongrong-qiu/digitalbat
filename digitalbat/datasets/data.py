@@ -46,6 +46,7 @@ class Data_Prep_for_Raw():
         use_LFP_flag,
         use_ripple_flag,
         only_flight_flag,
+        no_3d_location=False, # default: we use 3d locations
         spike_count_flag=False, # default: we use spiking event, not spike counts 
         bin_width=0.010, # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
     ):
@@ -57,6 +58,7 @@ class Data_Prep_for_Raw():
         self.use_LFP_flag = use_LFP_flag,
         self.use_ripple_flag = use_ripple_flag
         self.only_flight_flag = only_flight_flag
+        self.no_3d_location = no_3d_location
         self.spike_count_flag = spike_count_flag
 
         # data resampling
@@ -220,6 +222,11 @@ class Data_Prep_for_Raw():
             # all_spike = all_spike[:, flight_ind]
             # remove flying dimension from the all_behavior
             all_behavior = np.delete(all_behavior, 3, axis=0)
+            # print (f'all_behavior.shape: {all_behavior.shape}') 
+
+        # not use 3d location
+        if self.no_3d_location:
+            all_behavior = np.delete(all_behavior, [0,1,2], axis=0)
             # print (f'all_behavior.shape: {all_behavior.shape}') 
 
         self.all_behavior = all_behavior
