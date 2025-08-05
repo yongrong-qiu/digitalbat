@@ -2,6 +2,7 @@ import numpy as np
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.interpolate import interp1d
 from sklearn.metrics import average_precision_score
+from scipy.ndimage import gaussian_filter
 from numpy.typing import ArrayLike
 from typing import Tuple, Union
 
@@ -155,3 +156,81 @@ def lowpass_filter(sig, cutoff=1.0, fs=100.0, order=4):
     b, a = butter(order, normal_cutoff, btype='low', analog=False)
     filtered = filtfilt(b, a, sig)
     return filtered
+
+
+def generate_2d_rate_map(
+    loc_xx: np.ndarray,  # 1D array of x-coordinates of the animal's location over time
+    loc_yy: np.ndarray,  # 1D array of y-coordinates of the animal's location over time
+    unit_spike_count: np.ndarray,  # 1D array of spike counts for one neuron at each time point
+    loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
+    dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
+):
+    """
+    Compute the 2D rate map of a neuron by binning the 2D location space and calculating 
+    the firing rate (in spikes per second) as spike count divided by time spent in each spatial bin.
+
+    Args:
+        loc_xx (np.ndarray): 1D array of x-coordinates of the animal's position.
+        loc_yy (np.ndarray): 1D array of y-coordinates of the animal's position.
+        unit_spike_count (np.ndarray): 1D array of spike counts (e.g., 0, 1, 2) for a neuron at each time point.
+        loc_bin_width (float): Width of spatial bins in both x and y directions.
+        dt (float): Time interval (in seconds) between each recorded location sample.
+
+    Returns:
+        rate_map (np.ndarray): 2D array representing the firing rate (spikes per second) in each spatial bin.
+        smoothed_rate_map (np.ndarray): Gaussian-smoothed version of the rate map.
+
+    Example usage:
+        from digitalbat.utility.utils import generate_2d_rate_map
+        loc_xx = np.copy(all_behavior[0,:])
+        loc_yy = np.copy(all_behavior[1,:])
+        unit_spike_count = all_spike[249,:]
+        loc_bin_width = 0.3 # the bin width for the location space
+        dt = np.copy(bin_width)  # time interval for each data point (in seconds)
+
+        rate_map, smoothed_rate_map = generate_2d_rate_map(
+            loc_xx=loc_xx,
+            loc_yy=loc_yy,
+            unit_spike_count=unit_spike_count,
+            loc_bin_width=loc_bin_width,
+            dt=dt,
+        )
+
+        # Plot both unsmoothed and smoothed maps
+        fig, axs = plt.subplots(1, 2, figsize=(8, 3))
+        im0 = axs[0].imshow(rate_map.T, origin='lower',
+                            extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                            aspect='auto', cmap='hot_r')
+        axs[0].set_title("Unsmoothed Rate Map")
+        axs[0].set_xlabel("X position")
+        axs[0].set_ylabel("Y position")
+        plt.colorbar(im0, ax=axs[0], label="spikes/s")
+        im1 = axs[1].imshow(smoothed_rate_map.T, origin='lower',
+                            extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                            aspect='auto', cmap='hot_r')
+        axs[1].set_title("Smoothed Rate Map (Gaussian)")
+        axs[1].set_xlabel("X position")
+        axs[1].set_ylabel("Y position")
+        plt.colorbar(im1, ax=axs[1], label="spikes/s")
+        plt.tight_layout()
+    """
+
+    # Define bin edges in x and y directions
+    x_edges = np.arange(np.min(loc_xx), np.max(loc_xx) + loc_bin_width, loc_bin_width)
+    y_edges = np.arange(np.min(loc_yy), np.max(loc_yy) + loc_bin_width, loc_bin_width)
+    # Compute occupancy: number of time points spent in each spatial bin
+    occupancy, _, _ = np.histogram2d(loc_xx, loc_yy, bins=[x_edges, y_edges])
+    # Convert occupancy count to time (in seconds)
+    occupancy_time = occupancy * dt
+    # Compute total spike count in each bin (weighted histogram)
+    spike_map, _, _ = np.histogram2d(loc_xx, loc_yy, bins=[x_edges, y_edges], weights=unit_spike_count)
+    # Compute firing rate: spike count / occupancy time
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rate_map = np.divide(spike_map, occupancy_time)
+        rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
+
+    # Apply Gaussian smoothing to the rate map
+    sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
+    smoothed_rate_map = gaussian_filter(rate_map, sigma=sigma)
+
+    return rate_map, smoothed_rate_map
