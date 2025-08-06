@@ -233,4 +233,4 @@ def generate_2d_rate_map(
     sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
     smoothed_rate_map = gaussian_filter(rate_map, sigma=sigma)
 
-    return rate_map, smoothed_rate_map
+    return x_edges, y_edges, rate_map, smoothed_rate_map

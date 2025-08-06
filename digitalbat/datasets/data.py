@@ -399,3 +399,121 @@ def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=Fa
     test_label = torch.from_numpy(test_label).float()
 
     return train_input, valid_input, test_input, train_label, valid_label, test_label
+
+
+class Data_Prep_for_MLP():
+    """
+    Data preprocessing for MLP.
+
+    Args:
+        all_input: np.ndarray, shape (n_samples, n_features)
+            Full input data. Positions assumed to be in columns 1 to 3.
+        all_label: np.ndarray, shape (n_samples, n_outputs)
+            Corresponding labels.
+        train_num: int
+            Number of training samples.
+        valid_num: int
+            Number of validation samples.
+        use_fourier: bool, default=False
+            If True, normalize positions (columns 1–3) to [0, 1] range instead of std.
+
+    Returns:
+        Tuple of torch.Tensors:
+            train_input, valid_input, test_input,
+            train_label, valid_label, test_label
+    """
+
+    def __init__(
+        self,
+        all_input: np.ndarray,
+        all_label: np.ndarray,
+        train_num: int,
+        valid_num: int,
+        center_flag: bool = False, 
+        use_fourier: bool = False,
+    ):
+        super().__init__()
+        self.all_input = all_input
+        self.all_label = all_label
+        self.train_num = train_num
+        self.valid_num = valid_num
+        self.center_flag = center_flag
+        self.use_fourier = use_fourier
+        self.train_mean = None
+        self.train_std = None
+
+    def __call__(self):
+        # Shuffle the data
+        np.random.seed(100)
+        data_indices = np.random.permutation(self.all_input.shape[0])
+        all_input = self.all_input[data_indices]
+        all_label = self.all_label[data_indices]
+
+        # Split data
+        train_input = all_input[:self.train_num]
+        train_label = all_label[:self.train_num]
+        valid_input = all_input[self.train_num : self.train_num + self.valid_num]
+        valid_label = all_label[self.train_num : self.train_num + self.valid_num]
+        test_input = all_input[self.train_num + self.valid_num : ]
+        test_label = all_label[self.train_num + self.valid_num : ]
+
+        # Normalize input
+        if self.use_fourier:
+            # Normalize position dims (0:3) to [0, 1]
+            pos_min = train_input[:, 0:3].min(axis=0)
+            pos_max = train_input[:, 0:3].max(axis=0)
+            pos_range = pos_max - pos_min + 1e-8  # avoid div by zero
+
+            def normalize_pos(x):
+                x[:, 0:3] = (x[:, 0:3] - pos_min) / pos_range
+                return x
+
+            train_input = normalize_pos(train_input)
+            valid_input = normalize_pos(valid_input)
+            test_input = normalize_pos(test_input)
+
+            # Standardize other dims (0, 3:10)
+            keep_dims = list(range(3, all_input.shape[1]))
+            train_mean = np.mean(train_input[:, keep_dims], axis=0, keepdims=True) if self.center_flag else 0.0
+            train_std = np.std(train_input[:, keep_dims], axis=0, keepdims=True)
+            train_input[:, keep_dims] = (train_input[:, keep_dims] - train_mean) / train_std
+            valid_input[:, keep_dims] = (valid_input[:, keep_dims] - train_mean) / train_std
+            test_input[:, keep_dims] = (test_input[:, keep_dims] - train_mean) / train_std
+            self.train_mean = train_mean
+            self.train_std = train_std
+
+        else:
+            # Standardize all dimensions
+            train_mean = np.mean(train_input, axis=0, keepdims=True) if self.center_flag else 0.0
+            train_std = np.std(train_input, axis=0, keepdims=True)
+            train_input = (train_input - train_mean) / train_std
+            valid_input = (valid_input - train_mean) / train_std
+            test_input = (test_input - train_mean) / train_std
+            self.train_mean = train_mean
+            self.train_std = train_std
+
+        # Convert to torch tensors
+        train_input = torch.from_numpy(train_input).float()
+        valid_input = torch.from_numpy(valid_input).float()
+        test_input = torch.from_numpy(test_input).float()
+        train_label = torch.from_numpy(train_label).float()
+        valid_label = torch.from_numpy(valid_label).float()
+        test_label = torch.from_numpy(test_label).float()
+
+        return train_input, valid_input, test_input, train_label, valid_label, test_label
+
+    def all_data_prep(self):
+        """
+        Prepare all data for model prediction
+        """
+        
+        # TODO: self.use_fourier
+        all_input_model = (self.all_input - self.train_mean) / self.train_std
+        all_input_model = torch.from_numpy(all_input_model).float()
+        all_label_model = torch.from_numpy(self.all_label).float()
+        
+        return all_input_model, all_label_model
+
+
+
+
