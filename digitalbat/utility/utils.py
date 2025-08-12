@@ -3,6 +3,11 @@ from scipy.signal import butter, filtfilt, hilbert
 from scipy.interpolate import interp1d
 from sklearn.metrics import average_precision_score
 from scipy.ndimage import gaussian_filter
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import pdist, squareform
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+
 from numpy.typing import ArrayLike
 from typing import Tuple, Union
 
@@ -270,3 +275,236 @@ def poisson_fraction_deviance_explained(y_true: np.ndarray, y_pred: np.ndarray) 
 
     # Return fraction deviance explained
     return 1 - dev_model / (dev_null + 1e-6 )
+
+
+# ---------------------------------------------------------------------
+# Utility function: Arc length computation
+# ---------------------------------------------------------------------
+def arclength(x, y, z):
+    """
+    Compute arc length of a 3D curve using linear interpolation.
+
+    Parameters
+    ----------
+    x, y, z : array-like
+        Coordinates of the curve.
+
+    Returns
+    -------
+    total_length : float
+        Total length of the curve.
+    seglen : np.ndarray
+        Length of each segment (starting with 0 for the first point).
+    """
+    diffs = np.sqrt(np.diff(x) ** 2 + np.diff(y) ** 2 + np.diff(z) ** 2)
+    seglen = np.concatenate(([0], diffs))
+    return np.sum(diffs), seglen
+
+
+# ---------------------------------------------------------------------
+# Utility function: Exact Fréchet distance between two curves
+# ---------------------------------------------------------------------
+def frechet_distance(P, Q):
+    """
+    Compute the discrete Fréchet distance between two curves P and Q.
+
+    Parameters
+    ----------
+    P, Q : np.ndarray of shape (m, d) and (n, d)
+        Curves represented as sequences of points in d-dimensional space.
+
+    Returns
+    -------
+    dist : float
+        The Fréchet distance.
+    """
+    # Cache for dynamic programming
+    ca = np.full((len(P), len(Q)), -1.0)
+
+    def _c(i, j):
+        """Recursive helper function."""
+        if ca[i, j] > -1:
+            return ca[i, j]
+        d = np.linalg.norm(P[i] - Q[j])
+        if i == 0 and j == 0:
+            ca[i, j] = d
+        elif i > 0 and j == 0:
+            ca[i, j] = max(_c(i - 1, 0), d)
+        elif i == 0 and j > 0:
+            ca[i, j] = max(_c(0, j - 1), d)
+        elif i > 0 and j > 0:
+            ca[i, j] = max(min(_c(i - 1, j),
+                               _c(i - 1, j - 1),
+                               _c(i, j - 1)), d)
+        else:
+            ca[i, j] = float("inf")
+        return ca[i, j]
+
+    return _c(len(P) - 1, len(Q) - 1)
+
+
+# ---------------------------------------------------------------------
+# Main class for clustering flights
+# ---------------------------------------------------------------------
+class FlightClusters:
+    def __init__(self, r_vector, f_vector, Fs, 
+                 ds_clus=7, pca_features=False, frechet_clus=False, k_means=False, 
+                 alpha=1.1, reassign=True, N_min=5, ignore_z=False, calc_length=False):
+        """
+        Parameters
+        ----------
+        r_vector : array-like, shape (time, 3)
+            3D positions over time.
+        f_vector : array-like, shape (time,)
+            Binary flying/not flying indicator (1 = flying, 0 = not flying).
+        Fs : float
+            Sampling frequency (Hz).
+        ds_clus : int
+            Number of points to downsample each trajectory for clustering.
+        pca_features : bool
+            Whether to apply PCA before clustering.
+        frechet_clus : bool
+            If True, use Fréchet distance for clustering.
+        k_means : bool
+            If True, use K-means clustering instead of hierarchical clustering.
+        alpha : float
+            Linkage distance threshold for hierarchical clustering.
+        reassign : bool
+            Placeholder for potential re-assignment logic.
+        N_min : int
+            Minimum number of flights per cluster (not enforced in current version).
+        ignore_z : bool
+            If True, ignore Z-coordinate in clustering.
+        calc_length : bool
+            If True, compute trajectory lengths and durations.
+        """
+        self.r_vector = np.asarray(r_vector)
+        self.f_vector = np.asarray(f_vector).astype(int)
+        self.Fs = Fs
+        self.ds_clus = ds_clus
+        self.pca_features = pca_features
+        self.frechet_clus = frechet_clus
+        self.k_means = k_means
+        self.alpha = alpha
+        self.reassign = reassign
+        self.N_min = N_min
+        self.ignore_z = ignore_z
+        self.calc_length = calc_length
+
+        self.results = {}
+
+    def compute(self):
+        """Main computation method: segment flights, downsample, cluster."""
+        r, f, Fs = self.r_vector, self.f_vector, self.Fs
+
+        # -----------------------------------------------------------------
+        # Flight segmentation: find start and stop indices for each flight
+        # -----------------------------------------------------------------
+        num_flights = np.sum(np.diff(f) > 0)
+        f_start = np.where(np.diff(f) > 0)[0] + 1
+        f_stop = np.where(np.diff(f) < 0)[0]
+
+        # Velocity vector and magnitude
+        v = np.vstack(([0, 0, 0], np.diff(r, axis=0) * Fs))
+        v_abs = np.linalg.norm(v, axis=1)
+
+        # Allocate arrays for storing flight data
+        max_len = np.max(f_stop - f_start) + 1
+        all_flights = np.full((3, max_len, num_flights), np.nan)
+        all_flights_vel = np.full((1, max_len, num_flights), np.nan)
+        all_flights_ds = np.full((3, self.ds_clus, num_flights), np.nan)
+
+        # -----------------------------------------------------------------
+        # Extract and downsample each flight
+        # -----------------------------------------------------------------
+        for nf in range(num_flights):
+            idx = slice(f_start[nf], f_stop[nf] + 1)
+            traj = r[idx, :].T  # shape (3, n_points)
+            vel = v_abs[idx]
+
+            # Store full trajectories
+            all_flights[:, :traj.shape[1], nf] = traj
+            all_flights_vel[0, :len(vel), nf] = vel
+
+            # Downsample to fixed number of points
+            interp_idx = np.linspace(0, traj.shape[1] - 1, self.ds_clus)
+            for dim in range(3):
+                f_interp = interp1d(np.arange(traj.shape[1]), traj[dim, :], kind='linear')
+                all_flights_ds[dim, :, nf] = f_interp(interp_idx)
+
+        # -----------------------------------------------------------------
+        # Prepare features for clustering
+        # -----------------------------------------------------------------
+        if not self.frechet_clus:
+            # Flatten downsampled data: shape (num_flights, ds_clus*3)
+            X = np.reshape(np.transpose(all_flights_ds, (2, 1, 0)), (num_flights, -1))
+        else:
+            # Keep the 3D structure for Fréchet distance
+            X = np.transpose(all_flights_ds, (2, 1, 0))  # shape: (num_flights, ds_clus, 3)
+
+        # Optionally remove Z-coordinate
+        if self.ignore_z:
+            if self.frechet_clus:
+                X[:, :, 2] = 0
+            else:
+                X[:, 2::3] = 0
+
+        # Optionally reduce dimensionality with PCA
+        if self.pca_features and not self.frechet_clus:
+            pca = PCA(n_components=4)
+            X = pca.fit_transform(X)
+
+        # -----------------------------------------------------------------
+        # Clustering
+        # -----------------------------------------------------------------
+        if self.k_means and not self.frechet_clus:
+            idx = KMeans(n_clusters=15).fit_predict(X)
+        else:
+            if not self.frechet_clus:
+                # Standard distance: standardized Euclidean
+                weights = np.tile(np.ones(self.ds_clus), 3)
+                Y = pdist(X, metric='seuclidean', V=weights)
+                Y /= self.ds_clus
+            else:
+                # Compute full pairwise Fréchet distance matrix
+                n = X.shape[0]
+                dist_matrix = np.zeros((n, n))
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        dist = frechet_distance(X[i], X[j])
+                        dist_matrix[i, j] = dist
+                        dist_matrix[j, i] = dist
+                Y = squareform(dist_matrix)
+
+            # Hierarchical clustering
+            Z = linkage(Y, method='single')
+            idx = fcluster(Z, t=self.alpha, criterion='distance')
+
+        # -----------------------------------------------------------------
+        # Build results dictionary
+        # -----------------------------------------------------------------
+        self.results = {
+            'id': idx,
+            'strt_frame': f_start,
+            'stop_frame': f_stop,
+            'pos': all_flights,
+            'vel': all_flights_vel,
+            'Fs': Fs,
+            'N': num_flights,
+            'ds_pos': all_flights_ds
+        }
+
+        # Optionally compute flight lengths and durations
+        if self.calc_length:
+            lengths = np.zeros(num_flights)
+            durs = np.zeros(num_flights)
+            for i in range(num_flights):
+                mask = ~np.isnan(all_flights[0, :, i])
+                traj = all_flights[:, mask, i].T
+                length, seglen = arclength(traj[:, 0], traj[:, 1], traj[:, 2])
+                lengths[i] = length
+                durs[i] = (f_stop[i] - f_start[i]) / Fs
+            self.results['length'] = lengths
+            self.results['dur'] = durs
+
+        return self.results
