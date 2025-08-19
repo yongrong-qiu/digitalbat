@@ -429,6 +429,7 @@ class Data_Prep_for_MLP():
         all_label: np.ndarray,
         train_num: int,
         valid_num: int,
+        shuffle_flag: bool = True, 
         center_flag: bool = False, 
         use_fourier: bool = False,
     ):
@@ -437,6 +438,7 @@ class Data_Prep_for_MLP():
         self.all_label = all_label
         self.train_num = train_num
         self.valid_num = valid_num
+        self.shuffle_flag = shuffle_flag
         self.center_flag = center_flag
         self.use_fourier = use_fourier
         self.train_mean = None
@@ -444,10 +446,14 @@ class Data_Prep_for_MLP():
 
     def __call__(self):
         # Shuffle the data
-        np.random.seed(100)
-        data_indices = np.random.permutation(self.all_input.shape[0])
-        all_input = self.all_input[data_indices]
-        all_label = self.all_label[data_indices]
+        if self.shuffle_flag:
+            np.random.seed(100)
+            data_indices = np.random.permutation(self.all_input.shape[0])
+            all_input = self.all_input[data_indices]
+            all_label = self.all_label[data_indices]
+        else:
+            all_input = np.copy(self.all_input)
+            all_label = np.copy(self.all_label)
 
         # Split data
         train_input = all_input[:self.train_num]
