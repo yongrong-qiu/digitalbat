@@ -485,7 +485,7 @@ class FlightClusters:
         # -----------------------------------------------------------------
         self.results = {
             'id': idx,
-            'strt_frame': f_start,
+            'start_frame': f_start,
             'stop_frame': f_stop,
             'pos': all_flights,
             'vel': all_flights_vel,
