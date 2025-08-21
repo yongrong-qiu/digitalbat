@@ -7,6 +7,7 @@ from scipy.stats import binned_statistic
 
 from ..utility.utils import bandpass_filter
 from ..utility.utils import interpolate_signal_with_nans
+from ..utility.utils import FlightClusters
 
 
 class Data_Prep_for_Raw():
@@ -49,6 +50,7 @@ class Data_Prep_for_Raw():
         no_3d_location=False, # default: we use 3d locations
         spike_count_flag=False, # default: we use spiking event, not spike counts 
         bin_width=0.010, # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
+        flight_cluster_alpha=0.8, # alpha for flight clustering
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -71,7 +73,17 @@ class Data_Prep_for_Raw():
         self.all_behavior = None
         self.all_spike = None
         self.flight_ind = None
+        self.all_time_flight = None # after interpolation (binning), the time of each data point during flight
         self.spike_ratio = None # spike ratio for each unit after resampling
+
+        self.flight_cluster_alpha = flight_cluster_alpha
+        self.flight_cluster_results = None
+        self.all_behavior_cluster = None
+        self.all_spike_cluster = None
+
+        # internal state flag to enforce call order inside the class
+        self._behavior_ready = False  
+        self._spike_ready = False
 
     def get_all_behavior(self):
         """
@@ -218,7 +230,7 @@ class Data_Prep_for_Raw():
         # only use the flight data
         if self.only_flight_flag:
             self.flight_ind = np.where(all_behavior[3]>0.0)[0]
-            # print (f'Ratio of flight: {len(flight_ind)/all_behavior.shape[1]}')
+            self.all_time_flight = self.all_time[self.flight_ind]
             all_behavior = all_behavior[:, self.flight_ind]
             # all_spike = all_spike[:, flight_ind]
             # remove flying dimension from the all_behavior
@@ -231,6 +243,8 @@ class Data_Prep_for_Raw():
             # print (f'all_behavior.shape: {all_behavior.shape}') 
 
         self.all_behavior = all_behavior
+
+        self._behavior_ready = True
         
         return self.all_behavior
 
@@ -238,6 +252,9 @@ class Data_Prep_for_Raw():
         """
         Get the single-unit spikes 
         """
+        if not self._behavior_ready:
+            raise RuntimeError("You must run get_all_behavior() before get_all_spike().")
+
         su_good = loadmat(self.su_file_path)
 
         su_good1_cluster_id = np.array([x[0][0,0] for x in su_good['out_good_units1']['cluster_id']])
@@ -321,7 +338,113 @@ class Data_Prep_for_Raw():
         # spike ratio for each neuron
         self.spike_ratio = np.sum((all_spike>0) * 1.0, axis=1)/all_spike.shape[1]
 
-        return all_spike
+        self.all_spike = all_spike
+
+        self._spike_ready = True
+
+        return self.all_spike
+    
+    def get_flight_cluster(self):
+        """
+        Perform flight clustering
+
+        Plot intermediate flight clustering results:
+            tempid = 9
+            tempr = flight_cluster_results['pos'][:, :, np.where(flight_cluster_results['id']==tempid)[0]]
+            fig, ax = plt.subplots(ncols=3, figsize=(8, 2))
+            for ii in range(tempr.shape[2]):
+                ax[0].plot(tempr[0,:,ii], tempr[1,:,ii])
+                ax[0].set_xlabel('X')
+                ax[0].set_ylabel('Y')
+                ax[0].set_xlim(bhv['r_lim'][0])
+                ax[0].set_ylim(bhv['r_lim'][1])
+                ax[0].set_title(f'Cluster {tempid}; Raw data')
+                ax[1].plot(tempr[0,:,ii], tempr[2,:,ii])
+                ax[1].set_xlabel('X')
+                ax[1].set_ylabel('Z')
+                ax[1].set_xlim(bhv['r_lim'][0])
+                ax[1].set_ylim(bhv['r_lim'][2])
+                ax[2].plot(tempr[1,:,ii], tempr[2,:,ii])
+                ax[2].set_xlabel('Y')
+                ax[2].set_ylabel('Z')
+                ax[2].set_xlim(bhv['r_lim'][1])
+                ax[2].set_ylim(bhv['r_lim'][2])
+
+            start_time = bhv_t[flight_cluster_results['start_frame'][np.where(flight_cluster_results['id']==tempid)[0]]]
+            stop_time = bhv_t[flight_cluster_results['stop_frame'][np.where(flight_cluster_results['id']==tempid)[0]]]
+            fig, ax = plt.subplots(ncols=3, figsize=(8, 2))
+            for ii in range(tempr.shape[2]):
+                tempind = np.where((all_time_flight>=start_time[ii]) & (all_time_flight<=stop_time[ii]))[0]
+                ax[0].plot(all_behavior[0, tempind], all_behavior[1, tempind])
+                ax[0].set_xlabel('X')
+                ax[0].set_ylabel('Y')
+                ax[0].set_xlim(bhv['r_lim'][0])
+                ax[0].set_ylim(bhv['r_lim'][1])
+                ax[0].set_title(f'After interpolation')
+                ax[1].plot(all_behavior[0, tempind], all_behavior[2, tempind])
+                ax[1].set_xlabel('X')
+                ax[1].set_ylabel('Z')
+                ax[1].set_xlim(bhv['r_lim'][0])
+                ax[1].set_ylim(bhv['r_lim'][2])
+                ax[2].plot(all_behavior[1, tempind], all_behavior[2, tempind])
+                ax[2].set_xlabel('Y')
+                ax[2].set_ylabel('Z')
+                ax[2].set_xlim(bhv['r_lim'][1])
+                ax[2].set_ylim(bhv['r_lim'][2])
+
+            ncols = tempr.shape[2]
+            vmin, vmax = np.min(all_spike), 10
+            fig, ax = plt.subplots(ncols=ncols, figsize=(ncols*1.5, 2))
+            for ii in range(ncols):
+                tempind = np.where((all_time_flight>=start_time[ii]) & (all_time_flight<=stop_time[ii]))[0]
+                im = ax[ii].matshow(all_spike[:, tempind], vmin=vmin, vmax=vmax, cmap='hot_r')
+                ax[ii].set_aspect(0.15)
+                ax[ii].set_title(f'Repeat {ii}')
+            ax[0].set_xlabel('Time frame')
+            ax[0].set_ylabel('Unit')
+            plt.colorbar(im, ax=ax[ii], label="spikes/s")
+        """
+        if not self._spike_ready:
+            raise RuntimeError('You must run get_all_behavior() and get_all_spike() before get_flight_cluster().')
+        
+        bhvFile = glob.glob(self.parent_folder + '/Extracted_Behavior_*.mat')[0]
+        bhv = loadmat(bhvFile)
+        bhv_t = bhv['t'][0,:]
+
+        # Cluster Flights (see Forli and Yartsev, Nature 2023 for details on the hierarchical clustering procedure)
+        # Similar to Line 196 in NP_Bat_Demo.m
+        if 'Dataset_2' in self.parent_folder: # More liberal clustering for Field Station Dataset
+            self.flight_cluster_alpha = 1.2
+        flight_clusters = FlightClusters(r_vector=bhv['r'], f_vector=bhv['bflying'][:,0], Fs=bhv['Fs'][0][0], frechet_clus=True, alpha=self.flight_cluster_alpha)
+        self.flight_cluster_results = flight_clusters.compute()
+        unique_ids = np.unique(self.flight_cluster_results['id'])
+        while len(unique_ids)==1 and self.flight_cluster_alpha<1.5: # Try increasing the clustering param if only 1 cluster
+            self.flight_cluster_alpha = self.flight_cluster_alpha + 0.1
+            flight_clusters = FlightClusters(r_vector=bhv['r'], f_vector=bhv['bflying'][:,0], Fs=bhv['Fs'][0][0], frechet_clus=True, alpha=self.flight_cluster_alpha)
+            self.flight_cluster_results = flight_clusters.compute()
+            unique_ids = np.unique(self.flight_cluster_results['id'])
+
+        # for each flight cluster type, we only use one repeat to train and evaluate the model
+        # TODO: for each flight cluster type, we use the mean of the repeats to evaluate the model
+        all_behavior_cluster = []
+        all_spike_cluster = []
+        for tempid in unique_ids:
+            start_time = bhv_t[self.flight_cluster_results['start_frame'][np.where(self.flight_cluster_results['id']==tempid)[0]]]
+            stop_time = bhv_t[self.flight_cluster_results['stop_frame'][np.where(self.flight_cluster_results['id']==tempid)[0]]]
+            tempind = np.where((self.all_time_flight>=start_time[0]) & (self.all_time_flight<=stop_time[0]))[0]
+            if len(tempind): # exclude the flight behavior beyond all_time_flight, e.g., at the very beginning of the session
+                all_behavior_cluster.append(self.all_behavior[:, tempind])
+                all_spike_cluster.append(self.all_spike[:, tempind])
+    
+        # shuffle all flights
+        np.random.seed(100)
+        np.random.shuffle(all_behavior_cluster)
+        np.random.shuffle(all_spike_cluster)
+
+        self.all_behavior_cluster = all_behavior_cluster
+        self.all_spike_cluster = all_spike_cluster
+
+        return self.all_behavior_cluster, self.all_spike_cluster
 
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=False, use_fourier=False):
