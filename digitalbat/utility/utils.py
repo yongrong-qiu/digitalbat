@@ -240,7 +240,6 @@ def generate_2d_rate_map(
 
     return x_edges, y_edges, rate_map, smoothed_rate_map
 
-import numpy as np
 
 def poisson_fraction_deviance_explained(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """
