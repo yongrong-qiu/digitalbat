@@ -79,6 +79,7 @@ class Data_Prep_for_Raw():
         self.flight_cluster_alpha = flight_cluster_alpha
         self.flight_cluster_results = None
         self.all_behavior_cluster = None
+        self.all_behavior_type = None  
         self.all_spike_cluster = None
 
         # internal state flag to enforce call order inside the class
@@ -428,23 +429,27 @@ class Data_Prep_for_Raw():
         # TODO: for each flight cluster type, we use the mean of the repeats to evaluate the model
         all_behavior_cluster = []
         all_spike_cluster = []
+        all_behavior_type = []
         for tempid in unique_ids:
             start_time = bhv_t[self.flight_cluster_results['start_frame'][np.where(self.flight_cluster_results['id']==tempid)[0]]]
             stop_time = bhv_t[self.flight_cluster_results['stop_frame'][np.where(self.flight_cluster_results['id']==tempid)[0]]]
-            tempind = np.where((self.all_time_flight>=start_time[0]) & (self.all_time_flight<=stop_time[0]))[0]
-            if len(tempind): # exclude the flight behavior beyond all_time_flight, e.g., at the very beginning of the session
-                all_behavior_cluster.append(self.all_behavior[:, tempind])
-                all_spike_cluster.append(self.all_spike[:, tempind])
+            for ii in range(len(start_time)):
+                tempind = np.where((self.all_time_flight>=start_time[ii]) & (self.all_time_flight<=stop_time[ii]))[0]
+                if len(tempind): # exclude the flight behavior beyond all_time_flight, e.g., at the very beginning of the session
+                    all_behavior_cluster.append(self.all_behavior[:, tempind])
+                    all_behavior_type.append(tempid)
+                    all_spike_cluster.append(self.all_spike[:, tempind])
     
-        # shuffle all flights
-        np.random.seed(100)
-        np.random.shuffle(all_behavior_cluster)
-        np.random.shuffle(all_spike_cluster)
+        # # shuffle all flights
+        # np.random.seed(100)
+        # np.random.shuffle(all_behavior_cluster)
+        # np.random.shuffle(all_spike_cluster)
 
         self.all_behavior_cluster = all_behavior_cluster
+        self.all_behavior_type = all_behavior_type
         self.all_spike_cluster = all_spike_cluster
-
-        return self.all_behavior_cluster, self.all_spike_cluster
+        
+        return self.all_behavior_cluster, self.all_behavior_type, self.all_spike_cluster
 
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=False, use_fourier=False):
