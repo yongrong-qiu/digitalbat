@@ -51,6 +51,9 @@ class Data_Prep_for_Raw():
         spike_count_flag=False, # default: we use spiking event, not spike counts 
         bin_width=0.010, # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
         flight_cluster_alpha=0.8, # alpha for flight clustering
+        type_train_num=1,  # for splitting flight clustering data
+        type_valid_num=1,  # for splitting flight clustering data
+        special_id_count_thresh=3,  # for splitting flight clustering data
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -62,6 +65,9 @@ class Data_Prep_for_Raw():
         self.only_flight_flag = only_flight_flag
         self.no_3d_location = no_3d_location
         self.spike_count_flag = spike_count_flag
+        self.type_train_num = type_train_num
+        self.type_valid_num = type_valid_num
+        self.special_id_count_thresh = special_id_count_thresh
 
         # data resampling
         self.bin_width = bin_width
@@ -78,13 +84,22 @@ class Data_Prep_for_Raw():
 
         self.flight_cluster_alpha = flight_cluster_alpha
         self.flight_cluster_results = None
-        self.all_behavior_cluster = None
-        self.all_behavior_type = None  
-        self.all_spike_cluster = None
+        self.all_behavior_cluster = None  # a list of arrays, each array contains behavior for each trajectory
+        self.all_behavior_type = None  # a list of trajectory clustering types
+        self.all_spike_cluster = None  # a list of arrays, each array contains neuronal activity for each trajectory
+
+        # after flight clustering, split the trajectories for training, evaluation and test
+        self.behavior_train = None
+        self.behavior_valid = None
+        self.behavior_test = None
+        self.spike_train = None
+        self.spike_valid = None
+        self.spike_test = None
 
         # internal state flag to enforce call order inside the class
         self._behavior_ready = False  
         self._spike_ready = False
+        self._flight_cluster_ready = False
 
     def get_all_behavior(self):
         """
@@ -448,8 +463,69 @@ class Data_Prep_for_Raw():
         self.all_behavior_cluster = all_behavior_cluster
         self.all_behavior_type = all_behavior_type
         self.all_spike_cluster = all_spike_cluster
+
+        self._flight_cluster_ready = True
         
         return self.all_behavior_cluster, self.all_behavior_type, self.all_spike_cluster
+    
+    def split_flight_cluster(self):
+        """
+        After performing flight clustering, we split trajectories for training, validation and test
+        """
+        if not self._flight_cluster_ready:
+            raise RuntimeError('You must run get_flight_cluster() before running split_flight_cluster().')
+
+        # After flight clustering, some types have multiple repeats while others have only one repeat
+        # There are several ways to use the data for modeling.
+        # We use some types to train the model and other types to validate and test the model. One way is to
+        # use only one repeat from all types.
+        # Or: we use all types to train the model and use the other repeats of certain types to validate and 
+        # test the model
+        # for each special_id, we use 'type_train_num' repeat for training, 'type_valid_num' for validation, others for test
+        assert self.special_id_count_thresh > self.type_train_num + self.type_valid_num
+        unique_ids, id_counts = np.unique(self.all_behavior_type, return_counts=True)
+        # print(f'unique_ids: {unique_ids}')  # unique_ids: [ 1  2  3  4  5  6  7  8  9 10 11 12 13 15 16 17 18 19 20 21]
+        # print(f'id_counts: {id_counts}')  # id_counts: [2 1 9 1 1 1 1 1 8 2 1 1 1 1 1 1 1 1 1 1]
+        # special_ids would be used for model training, validation and test
+        special_ids = unique_ids[np.where(id_counts>=(self.special_id_count_thresh ))[0]]
+        # print(f'special_ids: {special_ids}')  # special_ids: [3 9]
+
+        behavior_train, behavior_valid, behavior_test = [], [], []
+        spike_train, spike_valid, spike_test = [], [], []
+        for ii in range(len(self.all_behavior_type)):
+            if self.all_behavior_type[ii] not in special_ids:
+                behavior_train.append(self.all_behavior_cluster[ii])
+                spike_train.append(self.all_spike_cluster[ii])
+        for unique_id in special_ids:
+            tempinds = np.where(np.array(self.all_behavior_type)==unique_id)[0]
+            for jj in range(len(tempinds)):
+                if jj < self.type_train_num:
+                    behavior_train.append(self.all_behavior_cluster[tempinds[jj]])
+                    spike_train.append(self.all_spike_cluster[tempinds[jj]])
+                elif jj < self.type_train_num + self.type_valid_num:
+                    behavior_valid.append(self.all_behavior_cluster[tempinds[jj]])
+                    spike_valid.append(self.all_spike_cluster[tempinds[jj]])
+                else:
+                    behavior_test.append(self.all_behavior_cluster[tempinds[jj]])
+                    spike_test.append(self.all_spike_cluster[tempinds[jj]])
+
+        # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
+        # print(len(spike_train), len(spike_valid), len(spike_test))  # 22 2 13
+        # shuffle the training trajectories
+        np.random.seed(100)
+        np.random.shuffle(behavior_train)
+        np.random.seed(100)
+        np.random.shuffle(spike_train)
+        self.behavior_train = np.hstack(behavior_train)
+        self.behavior_valid = np.hstack(behavior_valid)
+        self.behavior_test = np.hstack(behavior_test)
+        self.spike_train = np.hstack(spike_train)
+        self.spike_valid = np.hstack(spike_valid)
+        self.spike_test = np.hstack(spike_test)
+        # print(behavior_train.shape, behavior_valid.shape, behavior_test.shape)  # (3, 981) (3, 40) (3, 260)
+        # print(spike_train.shape, spike_valid.shape, spike_test.shape)  # (289, 981) (289, 40) (289, 260)
+
+        return self.behavior_train, self.behavior_valid, self.behavior_test, self.spike_train, self.spike_valid, self.spike_test
 
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=False, use_fourier=False):
