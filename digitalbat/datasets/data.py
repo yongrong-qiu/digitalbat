@@ -41,7 +41,7 @@ class Data_Prep_for_Raw():
     def __init__(
         self,
         parent_folder,
-        su_file_path,
+        su_file_path,  # a list of strings
         use_IMU_flag,
         use_click_flag,
         use_LFP_flag,
@@ -271,22 +271,14 @@ class Data_Prep_for_Raw():
         if not self._behavior_ready:
             raise RuntimeError("You must run get_all_behavior() before get_all_spike().")
 
-        su_good = loadmat(self.su_file_path)
-
-        su_good1_cluster_id = np.array([x[0][0,0] for x in su_good['out_good_units1']['cluster_id']])
-        # print (f'len(su_good1_cluster_id): {len(su_good1_cluster_id)}, su_good1_cluster_id: {su_good1_cluster_id}')
-        su_good1_time = [x[0][:,0]/1e6 for x in su_good['out_good_units1']['spikeTimes_usec']]
-        # print (f'len(su_good1_time): {len(su_good1_time)}, su_good1_time[3].shape: {su_good1_time[3].shape}')
-
-        su_good2_cluster_id = np.array([x[0][0,0] for x in su_good['out_good_units2']['cluster_id']])
-        # print (f'len(su_good2_cluster_id): {len(su_good2_cluster_id)}, su_good2_cluster_id: {su_good2_cluster_id}')
-        su_good2_time = [x[0][:,0]/1e6 for x in su_good['out_good_units2']['spikeTimes_usec']]
-        # print (f'len(su_good2_time): {len(su_good2_time)}, su_good2_time[3].shape: {su_good2_time[3].shape}')
-
-        su_good3_cluster_id = np.array([x[0][0,0] for x in su_good['out_good_units3']['cluster_id']])
-        # print (f'len(su_good3_cluster_id): {len(su_good3_cluster_id)}, su_good3_cluster_id: {su_good3_cluster_id}')
-        su_good3_time = [x[0][:,0]/1e6 for x in su_good['out_good_units3']['spikeTimes_usec']]
-        # print (f'len(su_good3_time): {len(su_good3_time)}, su_good3_time[3].shape: {su_good3_time[3].shape}')
+        su_goods_cluster_id = []
+        su_goods_time = []
+        for temppath in self.su_file_path:
+            su_good = loadmat(temppath)
+            temp_cluster_id = np.array([x[0][0,0] for x in su_good['out_Gunits']['cluster_id']])
+            temp_good1_time = [x[0][:,0]/1e6 for x in su_good['out_Gunits']['spikeTimes_usec']]
+            su_goods_cluster_id.append(temp_cluster_id)
+            su_goods_time.append(temp_good1_time)
 
         # merge units
         mergesFile = glob.glob(self.parent_folder + '/merges_Dataset_*.mat')[0]
@@ -298,8 +290,6 @@ class Data_Prep_for_Raw():
 
         refractory = 0.001 # refractory period of 1 ms
         probe_num = 3 # three probes
-        su_goods_cluster_id = [su_good1_cluster_id, su_good2_cluster_id, su_good3_cluster_id]
-        su_goods_time = [su_good1_time, su_good2_time, su_good3_time]
         for ii in range(probe_num):
             if len(merges['merges'][ii][0]):
                 cluster_ids = merges['merges'][ii][0][0][0][0] # # array of unit IDs to merge
