@@ -41,7 +41,7 @@ class Data_Prep_for_Raw():
     def __init__(
         self,
         parent_folder,
-        su_file_path,  # a list of strings
+        su_file_path,  
         use_IMU_flag,
         use_click_flag,
         use_LFP_flag,
@@ -57,7 +57,7 @@ class Data_Prep_for_Raw():
     ):
         super().__init__()
         self.parent_folder = parent_folder
-        self.su_file_path = su_file_path
+        self.su_file_path = glob.glob(su_file_path)  # a list of strings
         self.use_IMU_flag = use_IMU_flag
         self.use_click_flag = use_click_flag
         self.use_LFP_flag = use_LFP_flag
@@ -119,7 +119,10 @@ class Data_Prep_for_Raw():
         bhv_v_abs = bhv['bflying'][:,0] # 'v_abs'
         # bhv_v_abs[np.where(bhv_v_abs > bhv_thresh)] = bhv_thresh
         bhv_r = bhv['r']
-        bhv_t = bhv['t'][0,:] # np.arange(len(bhv_v_abs))/bhv['Fs'][0]
+        if 'Dataset_2' in self.parent_folder:
+            bhv_t = bhv['t'][:,0]
+        else:
+            bhv_t = bhv['t'][0,:] # np.arange(len(bhv_v_abs))/bhv['Fs'][0]
 
         # IMU
         if self.use_IMU_flag:
@@ -289,7 +292,7 @@ class Data_Prep_for_Raw():
         # we use refractory period of 1 ms to merge two very closed spikes 
 
         refractory = 0.001 # refractory period of 1 ms
-        probe_num = 3 # three probes
+        probe_num = len(self.su_file_path) # three probes
         for ii in range(probe_num):
             if len(merges['merges'][ii][0]):
                 cluster_ids = merges['merges'][ii][0][0][0][0] # # array of unit IDs to merge
@@ -415,7 +418,10 @@ class Data_Prep_for_Raw():
         
         bhvFile = glob.glob(self.parent_folder + '/Extracted_Behavior_*.mat')[0]
         bhv = loadmat(bhvFile)
-        bhv_t = bhv['t'][0,:]
+        if 'Dataset_2' in self.parent_folder:
+            bhv_t = bhv['t'][:,0]
+        else:
+            bhv_t = bhv['t'][0,:] 
 
         # Cluster Flights (see Forli and Yartsev, Nature 2023 for details on the hierarchical clustering procedure)
         # Similar to Line 196 in NP_Bat_Demo.m
