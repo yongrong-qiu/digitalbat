@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch.utils.data import Dataset, DataLoader
 from scipy.io import loadmat
 import glob
 import h5py
@@ -721,5 +722,40 @@ class Data_Prep_for_MLP():
         return all_input_model, all_label_model
 
 
+class BehaviorSpikeDataset():
+    def __init__(
+        self, 
+        behavior, 
+        spike, 
+        behavior_mean=None, 
+        behavior_std=None, 
+        center_flag=True,
+    ):
+        """
+        behavior: numpy array of shape (N, num_feature_channels)
+        spike: numpy array of shape (N, num_neurons)
+        behavior_mean: numpy array of shape (num_feature_channels,) or None
+        behavior_std: numpy array of shape (num_feature_channels,) or None
+        center: if True, (behavior - mean) / std, else behavior / std
+        """
+        behavior = torch.from_numpy(behavior).float()
+        spike = torch.from_numpy(spike).float()
+
+        if behavior_std is not None:
+            behavior_std = torch.from_numpy(behavior_std).float()
+            if behavior_mean is not None and center_flag:
+                behavior_mean = torch.from_numpy(behavior_mean).float()
+                behavior = (behavior - behavior_mean) / behavior_std
+            else:
+                behavior = behavior / behavior_std
+
+        self.behavior = behavior
+        self.spike = spike
+
+    def __len__(self):
+        return len(self.behavior)
+    
+    def __getitem__(self, idx):
+        return self.behavior[idx], self.spike[idx]
 
 
