@@ -1,6 +1,7 @@
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
+from torch.utils.data.sampler import SubsetRandomSampler
 from scipy.io import loadmat
 import glob
 import h5py
@@ -757,5 +758,137 @@ class BehaviorSpikeDataset():
     
     def __getitem__(self, idx):
         return self.behavior[idx], self.spike[idx]
+
+
+class SubsetSequentialSampler(Sampler):
+    def __init__(self, indices):
+        """
+        Adapted from: 
+        https://github.com/yongrong-qiu/neuralpredictors/blob/2b420058b2c0c029842ba739829114ddfa0f8b50/neuralpredictors/data/samplers.py#L36
+
+        Samples elements sequentially from a given list of indices, without replacement.
+        Arguments:
+            indices (list): a list of indices
+        """
+        self.indices = indices
+
+    def __iter__(self):
+        return (self.indices[i] for i in range(len(self.indices)))
+
+    def __len__(self):
+        return len(self.indices)
+
+
+def bat_data_loader(
+    session_names,
+    use_IMU_flag = False,  # True
+    use_click_flag = False, # True
+    use_LFP_flag = False,  # True
+    use_ripple_flag = False,
+    only_flight_flag = True,  # True
+    no_3d_location = False, # False
+    spike_count_flag = True,
+    bin_width = 0.10, # 0.10, in seconds
+    type_train_num=1,  # for splitting flight clustering data
+    type_valid_num=1,  # for splitting flight clustering data
+    special_id_count_thresh=3,  # for splitting flight clustering data
+    shuffle_flag=False, # shuffle the training data
+):
+    """
+    Dataloaders for multiple sessions of bat data.
+    Returns a dictionary of dataloaders.
+    """
+    
+    dataloaders_combined = {}
+
+    for session_id, session_name in enumerate(session_names):
+        parent_folder = '/mnt/at-globusshare/Users/Yongrong/' + session_name
+        su_file_path = '/mnt/at-globusshare/Users/Yongrong/To_transfer/out_Gunits_probe*_' + session_name + '.mat'
+        data_prep_for_raw = Data_Prep_for_Raw(
+            parent_folder = parent_folder,
+            su_file_path = su_file_path,
+            use_IMU_flag = use_IMU_flag,
+            use_click_flag = use_click_flag,
+            use_LFP_flag = use_LFP_flag,
+            use_ripple_flag = use_ripple_flag,
+            only_flight_flag = only_flight_flag,
+            no_3d_location = no_3d_location,
+            spike_count_flag = spike_count_flag,
+            bin_width = bin_width, 
+            type_train_num = type_train_num,
+            type_valid_num = type_valid_num,
+            special_id_count_thresh = special_id_count_thresh,
+        )
+        all_behavior = data_prep_for_raw.get_all_behavior()
+        all_spike = data_prep_for_raw.get_all_spike()
+        spike_ratio = data_prep_for_raw.spike_ratio
+        # print(f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (3, 2820), 3 represents behavior features
+        # print(f'all_spike.shape: {all_spike.shape}') # all_spike.shape: (95, 2820), 95 represents number of units
+        # print(f'spike_ratio.shape: {spike_ratio.shape}') # spike_ratio.shape: (95,)
+
+        # flight cluster
+        all_behavior_cluster, all_behavior_type, all_spike_cluster = data_prep_for_raw.get_flight_cluster()
+        # split the flight-cluster data
+        behavior_train, behavior_valid, behavior_test, spike_train, spike_valid, spike_test = data_prep_for_raw.split_flight_cluster()
+        # print(behavior_train.shape, behavior_valid.shape, behavior_test.shape)  # (3, 843) (3, 229) (3, 1732), 3 represents behavior features
+        # print(spike_train.shape, spike_valid.shape, spike_test.shape)  # (95, 843) (95, 229) (95, 1732), 95 represents number of units
+
+        # pytorch dataset and dataloaders
+        dataloaders = {}
+        # train
+        data_input = np.copy(behavior_train.T)
+        data_output = np.copy(spike_train.T)
+        behavior_mean = np.mean(data_input, axis=0, keepdims=True)
+        behavior_std = np.std(data_input, axis=0, keepdims=True)
+        ind = list(range(data_input.shape[0]))
+        dat = BehaviorSpikeDataset(
+            behavior = data_input,
+            spike = data_output,
+            behavior_mean = behavior_mean,
+            behavior_std = behavior_std,
+        )
+        dataloaders['train'] = DataLoader(
+            dat,
+            # TODO: use random sampler, but still keep the order within each trajectory
+            sampler = SubsetRandomSampler(ind) if shuffle_flag else SubsetSequentialSampler(ind),
+            batch_size = data_input.shape[0],
+        )
+        # validation
+        data_input = np.copy(behavior_valid.T)
+        data_output = np.copy(spike_valid.T)
+        ind = list(range(data_input.shape[0]))
+        dat = BehaviorSpikeDataset(
+            behavior = data_input,
+            spike = data_output,
+            behavior_mean = behavior_mean,
+            behavior_std = behavior_std,
+        )
+        dataloaders['valid'] = DataLoader(
+            dat,
+            sampler = SubsetSequentialSampler(ind),
+            batch_size = data_input.shape[0],
+        )
+        # test
+        data_input = np.copy(behavior_test.T)
+        data_output = np.copy(spike_test.T)
+        ind = list(range(data_input.shape[0]))
+        dat = BehaviorSpikeDataset(
+            behavior = data_input,
+            spike = data_output,
+            behavior_mean = behavior_mean,
+            behavior_std = behavior_std,
+        )
+        dataloaders['test'] = DataLoader(
+            dat,
+            sampler = SubsetSequentialSampler(ind),
+            batch_size = data_input.shape[0],
+        )
+
+        for k,v in dataloaders.items():
+            if k not in dataloaders_combined.keys():
+                dataloaders_combined[k] = {}
+            dataloaders_combined[k][session_name] = v
+
+    return dataloaders_combined
 
 
