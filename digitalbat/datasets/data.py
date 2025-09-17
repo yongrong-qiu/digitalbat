@@ -796,10 +796,11 @@ def bat_data_loader(
 ):
     """
     Dataloaders for multiple sessions of bat data.
-    Returns a dictionary of dataloaders.
+    Returns a dictionary of dataloaders, behavior_dim, and a dictionary of spiking unit numbers for each session.
     """
     
     dataloaders_combined = {}
+    unit_num_dict = {}
 
     for session_id, session_name in enumerate(session_names):
         parent_folder = '/mnt/at-globusshare/Users/Yongrong/' + session_name
@@ -819,12 +820,14 @@ def bat_data_loader(
             type_valid_num = type_valid_num,
             special_id_count_thresh = special_id_count_thresh,
         )
+
         all_behavior = data_prep_for_raw.get_all_behavior()
         all_spike = data_prep_for_raw.get_all_spike()
         spike_ratio = data_prep_for_raw.spike_ratio
         # print(f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (3, 2820), 3 represents behavior features
         # print(f'all_spike.shape: {all_spike.shape}') # all_spike.shape: (95, 2820), 95 represents number of units
         # print(f'spike_ratio.shape: {spike_ratio.shape}') # spike_ratio.shape: (95,)
+        
 
         # flight cluster
         all_behavior_cluster, all_behavior_type, all_spike_cluster = data_prep_for_raw.get_flight_cluster()
@@ -832,6 +835,9 @@ def bat_data_loader(
         behavior_train, behavior_valid, behavior_test, spike_train, spike_valid, spike_test = data_prep_for_raw.split_flight_cluster()
         # print(behavior_train.shape, behavior_valid.shape, behavior_test.shape)  # (3, 843) (3, 229) (3, 1732), 3 represents behavior features
         # print(spike_train.shape, spike_valid.shape, spike_test.shape)  # (95, 843) (95, 229) (95, 1732), 95 represents number of units
+
+        behavior_dim = behavior_train.shape[0]
+        unit_num_dict[session_name] = spike_train.shape[0]
 
         # pytorch dataset and dataloaders
         dataloaders = {}
@@ -889,6 +895,6 @@ def bat_data_loader(
                 dataloaders_combined[k] = {}
             dataloaders_combined[k][session_name] = v
 
-    return dataloaders_combined
+    return dataloaders_combined, behavior_dim, unit_num_dict
 
 
