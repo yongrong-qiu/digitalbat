@@ -175,7 +175,7 @@ def bat_mlp_trainer(
                 X_batch = batch[0].to(device)
                 y_batch = batch[1].to(device)
                 # forward pass
-                y_pred = model(X_batch)
+                y_pred = model(session_name, X_batch)
                 loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
                 # backward pass
                 optimizer.zero_grad()
@@ -191,7 +191,7 @@ def bat_mlp_trainer(
             for batch_id, batch in enumerate(session_data):
                 X_val = batch[0].to(device)
                 y_val = batch[1].to(device)
-                y_pred = model(X_val)
+                y_pred = model(session_name, X_val)
                 y_val_np = y_val.detach().cpu().numpy()
                 y_pred_np = y_pred.detach().cpu().numpy()
                 temp_scores = valid_fn(y_val_np, y_pred_np) # an array of scores for spiking units in one batch data within one session of data

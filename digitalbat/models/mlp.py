@@ -165,23 +165,21 @@ class Bat_MLP(nn.Module):
                 self.layers.append(latent_activation)
                 self.layers.append(nn.Dropout(dropout_prob))
             
-            readout = nn.ModuleDict({
-                session_name: nn.Linear(latent_dims_list[-1], unit_num)
-                for session_name, unit_num in output_dim_dict.items()
-            })
-            self.layers.append(readout)
+            readout_in_dim = latent_dims_list[-1]
 
         else:
-            readout = nn.ModuleDict({
-                session_name: nn.Linear(input_dim, unit_num)
-                for session_name, unit_num in output_dim_dict.items()
-            })
-            self.layers.append(readout)
+            readout_in_dim = input_dim
 
-        self.layers.append(final_activation)
+        # session-specific readouts
+        self.readouts = nn.ModuleDict({
+            session_name: nn.Linear(readout_in_dim, unit_num)
+            for session_name, unit_num in output_dim_dict.items()
+        })
+
+        self.final_activation = final_activation
 
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, session_name: str, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the model.
 
@@ -198,5 +196,7 @@ class Bat_MLP(nn.Module):
 
         for layer in self.layers:
             x = layer(x)
+        x = self.readouts[session_name](x)
+        x = self.final_activation(x)
 
         return x
