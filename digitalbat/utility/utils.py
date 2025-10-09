@@ -167,6 +167,8 @@ def generate_2d_rate_map(
     loc_xx: np.ndarray,  # 1D array of x-coordinates of the animal's location over time
     loc_yy: np.ndarray,  # 1D array of y-coordinates of the animal's location over time
     unit_spike_count: np.ndarray,  # 1D array of spike counts for one neuron at each time point
+    loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
+    loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
 ):
@@ -221,8 +223,12 @@ def generate_2d_rate_map(
     """
 
     # Define bin edges in x and y directions
-    x_edges = np.arange(np.min(loc_xx), np.max(loc_xx) + loc_bin_width, loc_bin_width)
-    y_edges = np.arange(np.min(loc_yy), np.max(loc_yy) + loc_bin_width, loc_bin_width)
+    if loc_xx_lim is not None and loc_yy_lim is not None:
+        x_edges = np.arange(loc_xx_lim[0], loc_xx_lim[1] + loc_bin_width, loc_bin_width)
+        y_edges = np.arange(loc_yy_lim[0], loc_yy_lim[1] + loc_bin_width, loc_bin_width)
+    else:
+        x_edges = np.arange(np.min(loc_xx), np.max(loc_xx) + loc_bin_width, loc_bin_width)
+        y_edges = np.arange(np.min(loc_yy), np.max(loc_yy) + loc_bin_width, loc_bin_width)
     # Compute occupancy: number of time points spent in each spatial bin
     occupancy, _, _ = np.histogram2d(loc_xx, loc_yy, bins=[x_edges, y_edges])
     # Convert occupancy count to time (in seconds)

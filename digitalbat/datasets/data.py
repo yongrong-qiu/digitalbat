@@ -78,6 +78,7 @@ class Data_Prep_for_Raw():
         self.all_time = None  # for 3D location, IMU
         self.bin_edges = None  # for spike counts, LFP 
 
+        self.r_lim = None # boundaries of the room/outdoor arena
         self.all_behavior = None
         self.all_spike = None
         self.flight_ind = None
@@ -125,6 +126,8 @@ class Data_Prep_for_Raw():
             bhv_t = bhv['t'][:,0]
         else:
             bhv_t = bhv['t'][0,:] # np.arange(len(bhv_v_abs))/bhv['Fs'][0]
+        # boundaries of the room/outdoor arena
+        self.r_lim = bhv['r_lim']
 
         # IMU
         if self.use_IMU_flag:
@@ -799,8 +802,15 @@ def bat_data_loader(
     Returns a dictionary of dataloaders, behavior_dim, and a dictionary of spiking unit numbers for each session.
     """
     
-    dataloaders_combined = {}
-    unit_num_dict = {}
+    dataloaders_combined = {} # combined dataloaders for train, valid, test and for different sessions
+    unit_num_dict = {} # a dictionary of unit/neuron numbers for each session
+    # a dictionary of other meta information for each session, including 
+    # "r_lim" (boundaries of the room/outdoor areana)
+    # "behavior_mean" and "behavior_std" (for data preprocessing before feeding into the model)
+    meta_info_dict = {} 
+    meta_info_dict['r_lim'] = {}
+    meta_info_dict['behavior_mean'] = {}
+    meta_info_dict['behavior_std'] = {}
 
     for session_id, session_name in enumerate(session_names):
         parent_folder = '/mnt/at-globusshare/Users/Yongrong/' + session_name
@@ -820,8 +830,9 @@ def bat_data_loader(
             type_valid_num = type_valid_num,
             special_id_count_thresh = special_id_count_thresh,
         )
-
+        
         all_behavior = data_prep_for_raw.get_all_behavior()
+        meta_info_dict['r_lim'][session_name] = data_prep_for_raw.r_lim
         all_spike = data_prep_for_raw.get_all_spike()
         spike_ratio = data_prep_for_raw.spike_ratio
         # print(f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (3, 2820), 3 represents behavior features
@@ -846,6 +857,8 @@ def bat_data_loader(
         data_output = np.copy(spike_train.T)
         behavior_mean = np.mean(data_input, axis=0, keepdims=True)
         behavior_std = np.std(data_input, axis=0, keepdims=True)
+        meta_info_dict['behavior_mean'][session_name] = behavior_mean
+        meta_info_dict['behavior_std'][session_name] = behavior_std
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
             behavior = data_input,
@@ -895,6 +908,6 @@ def bat_data_loader(
                 dataloaders_combined[k] = {}
             dataloaders_combined[k][session_name] = v
 
-    return dataloaders_combined, behavior_dim, unit_num_dict
+    return dataloaders_combined, behavior_dim, unit_num_dict, meta_info_dict
 
 
