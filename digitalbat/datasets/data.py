@@ -748,6 +748,7 @@ class BehaviorSpikeDataset():
         behavior_mean=None, 
         behavior_std=None, 
         center_flag=True,
+        spike_std=None,
     ):
         """
         behavior: numpy array of shape (N, num_feature_channels)
@@ -766,6 +767,10 @@ class BehaviorSpikeDataset():
                 behavior = (behavior - behavior_mean) / behavior_std
             else:
                 behavior = behavior / behavior_std
+
+        if spike_std is not None:
+            spike_std = torch.from_numpy(spike_std).float()
+            spike = spike/(spike_std + 1e-6)
 
         self.behavior = behavior
         self.spike = spike
@@ -826,6 +831,7 @@ def bat_data_loader(
     meta_info_dict['r_lim'] = {}
     meta_info_dict['behavior_mean'] = {}
     meta_info_dict['behavior_std'] = {}
+    meta_info_dict['spike_std'] = {}
 
     for session_id, session_name in enumerate(session_names):
         parent_folder = '/mnt/at-globusshare/Users/Yongrong/' + session_name
@@ -872,14 +878,17 @@ def bat_data_loader(
         data_output = np.copy(spike_train.T)
         behavior_mean = np.mean(data_input, axis=0, keepdims=True)
         behavior_std = np.std(data_input, axis=0, keepdims=True)
+        spike_std = np.std(data_output, axis=0, keepdims=True)
         meta_info_dict['behavior_mean'][session_name] = behavior_mean
         meta_info_dict['behavior_std'][session_name] = behavior_std
+        meta_info_dict['spike_std'][session_name] = spike_std
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
             behavior = data_input,
             spike = data_output,
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
+            # spike_std = spike_std,
         )
         dataloaders['train'] = DataLoader(
             dat,
@@ -896,6 +905,7 @@ def bat_data_loader(
             spike = data_output,
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
+            # spike_std = spike_std,
         )
         dataloaders['valid'] = DataLoader(
             dat,
@@ -911,6 +921,7 @@ def bat_data_loader(
             spike = data_output,
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
+            # spike_std = spike_std,
         )
         dataloaders['test'] = DataLoader(
             dat,
