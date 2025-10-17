@@ -205,3 +205,74 @@ def bat_mlp_trainer(
     # restore model and return best accuracy
     model.load_state_dict(best_weights)
     return best_score, best_weights, val_scores
+
+def bat_mlp_behavior_trainer(
+    model, 
+    dataloaders, 
+    device,
+    n_epochs=200, # # number of epochs to run
+    lr=0.0001, # learning rate
+    loss_fn: nn.Module | None = None, 
+    valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None, 
+    # verbose=False, # not display the progress
+):
+    """
+    Model training for the model Bat_MLP_Behavior()
+    Arguments:
+        valid_fn: validation during training, larger number, better performance
+                  Compared to the valid_fn used for bat_mlp_trainer(), here we return an array of minus squared difference values for each time point and behavior_feature, without average.
+                  e.g., valid_fn=lambda y_true, y_pred: -(y_true - y_pred)**2
+                  y_true.shape: (N, behavior_feature)
+                  Here we add "minus" as we want to use model with higher score
+    """
+
+    model = model.to(device)
+    loss_fn = loss_fn.to(device)  # Make sure the loss function is on the correct device
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+ 
+    # Hold the best model
+    best_score = - np.inf   
+    best_weights = None
+    val_scores = []
+ 
+    for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
+        model.train()
+        for session_name, session_data in dataloaders['train'].items():
+            # print(session_name, session_data)
+            for batch_id, batch in enumerate(session_data):
+                # print(batch[0].shape, batch[1].shape) # (N, behavior_feature), (N, spiking_unit_number)
+                # take a batch
+                X_batch = batch[1].to(device) # use spikes as model input
+                y_batch = batch[0].to(device)
+                # forward pass
+                y_pred = model(session_name, X_batch)
+                loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
+                # backward pass
+                optimizer.zero_grad()
+                loss.backward()
+                # update weights
+                optimizer.step()
+
+        # evaluate accuracy at end of each epoch
+        model.eval()
+        temp_scores_list = []
+        for session_name, session_data in dataloaders['valid'].items():
+            # print(session_name, session_data)
+            for batch_id, batch in enumerate(session_data):
+                X_val = batch[1].to(device) # # use spikes as model input
+                y_val = batch[0].to(device)
+                y_pred = model(session_name, X_val)
+                y_val_np = y_val.detach().cpu().numpy()
+                y_pred_np = y_pred.detach().cpu().numpy()
+                temp_scores = valid_fn(y_val_np, y_pred_np) # an array of scores for spiking units in one batch data within one session of data
+                temp_scores_list.append(temp_scores)
+        val_score = np.nanmean(np.vstack(temp_scores_list))
+        val_scores.append(val_score)
+        if val_score > best_score:
+            best_score = val_score
+            best_weights = copy.deepcopy(model.state_dict())
+
+    # restore model and return best accuracy
+    model.load_state_dict(best_weights)
+    return best_score, best_weights, val_scores
