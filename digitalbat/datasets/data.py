@@ -743,20 +743,24 @@ class Data_Prep_for_MLP():
 class BehaviorSpikeDataset():
     def __init__(
         self, 
-        behavior, 
-        spike, 
+        samples,
+        # behavior, 
+        # spike, 
         behavior_mean=None, 
         behavior_std=None, 
         center_flag=True,
         spike_std=None,
     ):
         """
-        behavior: numpy array of shape (N, num_feature_channels)
-        spike: numpy array of shape (N, num_neurons)
+        sample: a tuple of (behavior, spike)
+            behavior: numpy array of shape (N, num_feature_channels)
+            spike: numpy array of shape (N, num_neurons)
         behavior_mean: numpy array of shape (num_feature_channels,) or None
         behavior_std: numpy array of shape (num_feature_channels,) or None
         center: if True, (behavior - mean) / std, else behavior / std
         """
+        if len(samples) == 2:
+            (behavior, spike) = samples
         behavior = torch.from_numpy(behavior).float()
         spike = torch.from_numpy(spike).float()
 
@@ -884,8 +888,9 @@ def bat_data_loader(
         meta_info_dict['spike_std'][session_name] = spike_std
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            behavior = data_input,
-            spike = data_output,
+            samples = (data_input, data_output),
+            # behavior = data_input,
+            # spike = data_output,
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
@@ -901,8 +906,9 @@ def bat_data_loader(
         data_output = np.copy(spike_valid.T)
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            behavior = data_input,
-            spike = data_output,
+            samples = (data_input, data_output),
+            # behavior = data_input,
+            # spike = data_output,
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
@@ -917,8 +923,9 @@ def bat_data_loader(
         data_output = np.copy(spike_test.T)
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            behavior = data_input,
-            spike = data_output,
+            samples = (data_input, data_output),
+            # behavior = data_input,
+            # spike = data_output,
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
