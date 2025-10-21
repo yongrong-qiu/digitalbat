@@ -531,6 +531,71 @@ class Data_Prep_for_Raw():
             # print(np.hstack(spike_train).shape, np.hstack(spike_valid).shape, np.hstack(spike_test).shape)  # (289, 981) (289, 40) (289, 260)
 
         return (self.samples_train, self.samples_valid, self.samples_test)
+    
+    @staticmethod
+    def _split_each_trajectory(
+        behavior_list,
+        spike_list,
+        window_size=20,
+        stride=20,
+        pad_on_short=True,
+        pad_mode="right",   # "right" (append pad) or "left" (prepend pad)
+    ):
+        """
+        For a single session, split each flight trajectory into multiple samples .
+        - behavior_list: list of arrays, each (3, T_k); k: trajectory index
+        - spike_list: list of arrays, each (Y, T_k) -- same Y across this session
+        - returns:
+            samples: a tuple of three lists b_window_list, s_window_list, mask_list
+                     each list contains multiple numpy arrays: b_window shape (3, window_size), s_window shape (Y, window_size)
+                    mask shape (window_size,) bool (True for real timesteps)
+        Notes:
+        - padding values are zeros 
+        - if pad_on_short=False, short trajectories are ignored
+        """
+        assert len(behavior_list) == len(spike_list)
+
+        b_window_list, s_window_list, mask_list = [], [], []
+
+        for b_raw, s_raw in zip(behavior_list, spike_list): 
+            TT = b_raw.shape[1]
+
+            if TT >= window_size:
+                for start in range(0, TT - window_size +1, stride):
+                    b_window = b_raw[:, start: start + window_size].astype(np.float32)
+                    s_window = s_raw[:, start: start + window_size].astype(np.float32)
+                    mask = np.ones(window_size, dtype=bool)
+                    b_window_list.append(b_window)
+                    s_window_list.append(s_window)
+                    mask_list.append(mask)
+                # optionally, you may also include the last shorter tail (not done here)
+
+            else:
+                if not pad_on_short:
+                    continue
+                # create padded arrays
+                if pad_mode == 'right':
+                    b_pad = np.zeros((b_raw.shape[0], window_size), dtype=np.float32)
+                    s_pad = np.zeros((s_raw.shape[0], window_size), dtype=np.float32)
+                    b_pad[:, :TT] = b_raw
+                    s_pad[:, :TT] = s_raw
+                    mask = np.zeros(window_size, dtype=bool)
+                    mask[:TT] = True
+                elif pad_mode == 'left':
+                    b_pad = np.zeros((b_raw.shape[0], window_size), dtype=np.float32)
+                    s_pad = np.zeros((s_raw.shape[0], window_size), dtype=np.float32)
+                    b_pad[:, window_size-TT:] = b_raw
+                    s_pad[:, window_size-TT:] = s_raw
+                    mask = np.zeros(window_size, dtype=bool)
+                    mask[window_size-TT:] = True
+                else:
+                    raise ValueError("pad_mode must be either 'right' or 'left' ")
+                
+                b_window_list.append(b_pad)
+                s_window_list.append(s_pad)
+                mask_list.append(mask)
+
+        return (b_window_list, s_window_list, mask_list)
 
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=False, use_fourier=False):
