@@ -56,9 +56,9 @@ class Data_Prep_for_Raw():
         type_train_num=1,  # for splitting flight clustering data
         type_valid_num=1,  # for splitting flight clustering data
         special_id_count_thresh=3,  # for splitting flight clustering data
-        # After splitting fight-clustering data into train, validation and test, we may want to use each flight trajectory as a data sample.
+        # After splitting fight-clustering data into train, validation and test, we may want to use/split each flight trajectory as/into one/multiple data samples.
         # With such data, we can build a network (such as Transformer) to model the temporal dependency of animal behavior (and neural activity) during each flight 
-        trajectory_per_sample_flag=False, 
+        split_each_trajectory_flag=False, 
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -73,7 +73,7 @@ class Data_Prep_for_Raw():
         self.type_train_num = type_train_num
         self.type_valid_num = type_valid_num
         self.special_id_count_thresh = special_id_count_thresh
-        self.trajectory_per_sample_flag = trajectory_per_sample_flag
+        self.split_each_trajectory_flag = split_each_trajectory_flag
 
         # data resampling
         self.bin_width = bin_width
@@ -96,12 +96,9 @@ class Data_Prep_for_Raw():
         self.all_spike_cluster = None  # a list of arrays, each array contains neuronal activity for each trajectory
 
         # after flight clustering, split the trajectories for training, evaluation and test
-        self.behavior_train = None
-        self.behavior_valid = None
-        self.behavior_test = None
-        self.spike_train = None
-        self.spike_valid = None
-        self.spike_test = None
+        self.samples_train = None
+        self.samples_valid = None
+        self.samples_test = None
 
         # internal state flag to enforce call order inside the class
         self._behavior_ready = False  
@@ -521,26 +518,19 @@ class Data_Prep_for_Raw():
         np.random.shuffle(behavior_train)
         np.random.seed(100)
         np.random.shuffle(spike_train)
-        if self.trajectory_per_sample_flag:
-            self.behavior_train = np.hstack(behavior_train)
-            self.behavior_valid = np.hstack(behavior_valid)
-            self.behavior_test = np.hstack(behavior_test)
-            self.spike_train = np.hstack(spike_train)
-            self.spike_valid = np.hstack(spike_valid)
-            self.spike_test = np.hstack(spike_test)
+        if self.split_each_trajectory_flag:
+            self.samples_train = (np.hstack(behavior_train), np.hstack(spike_train))
+            self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
+            self.samples_test = (np.hstack(behavior_test), np.hstack(spike_test))
             print(f'Maximum flight length: {np.max([temp.shape[1] for temp in self.all_behavior_cluster])}')
-            pass
         else:
-            self.behavior_train = np.hstack(behavior_train)
-            self.behavior_valid = np.hstack(behavior_valid)
-            self.behavior_test = np.hstack(behavior_test)
-            self.spike_train = np.hstack(spike_train)
-            self.spike_valid = np.hstack(spike_valid)
-            self.spike_test = np.hstack(spike_test)
-            # print(behavior_train.shape, behavior_valid.shape, behavior_test.shape)  # (3, 981) (3, 40) (3, 260)
-            # print(spike_train.shape, spike_valid.shape, spike_test.shape)  # (289, 981) (289, 40) (289, 260)
+            self.samples_train = (np.hstack(behavior_train), np.hstack(spike_train))
+            self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
+            self.samples_test = (np.hstack(behavior_test), np.hstack(spike_test))
+            # print(np.hstack(behavior_train).shape, np.hstack(behavior_valid).shape, np.hstack(behavior_test).shape)  # (3, 981) (3, 40) (3, 260)
+            # print(np.hstack(spike_train).shape, np.hstack(spike_valid).shape, np.hstack(spike_test).shape)  # (289, 981) (289, 40) (289, 260)
 
-        return self.behavior_train, self.behavior_valid, self.behavior_test, self.spike_train, self.spike_valid, self.spike_test
+        return (self.samples_train, self.samples_valid, self.samples_test)
 
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=False, use_fourier=False):
@@ -819,7 +809,7 @@ def bat_data_loader(
     type_valid_num=1,  # for splitting flight clustering data
     special_id_count_thresh=3,  # for splitting flight clustering data
     shuffle_flag=False, # shuffle the training data
-    trajectory_per_sample_flag=False, 
+    split_each_trajectory_flag=False, 
 ):
     """
     Dataloaders for multiple sessions of bat data.
@@ -854,7 +844,7 @@ def bat_data_loader(
             type_train_num = type_train_num,
             type_valid_num = type_valid_num,
             special_id_count_thresh = special_id_count_thresh,
-            trajectory_per_sample_flag = trajectory_per_sample_flag,
+            split_each_trajectory_flag = split_each_trajectory_flag,
         )
         
         all_behavior = data_prep_for_raw.get_all_behavior()
@@ -868,7 +858,12 @@ def bat_data_loader(
         # flight cluster
         all_behavior_cluster, all_behavior_type, all_spike_cluster = data_prep_for_raw.get_flight_cluster()
         # split the flight-cluster data
-        behavior_train, behavior_valid, behavior_test, spike_train, spike_valid, spike_test = data_prep_for_raw.split_flight_cluster()
+        (samples_train, samples_valid, samples_test) = data_prep_for_raw.split_flight_cluster()
+        if len(samples_train) == 2:
+            (behavior_train, spike_train) = samples_train
+            (behavior_valid, spike_valid) = samples_valid
+            (behavior_test, spike_test) = samples_test
+        # behavior_train, behavior_valid, behavior_test, spike_train, spike_valid, spike_test = data_prep_for_raw.split_flight_cluster()
         # print(behavior_train.shape, behavior_valid.shape, behavior_test.shape)  # (3, 843) (3, 229) (3, 1732), 3 represents behavior features
         # print(spike_train.shape, spike_valid.shape, spike_test.shape)  # (95, 843) (95, 229) (95, 1732), 95 represents number of units
 
