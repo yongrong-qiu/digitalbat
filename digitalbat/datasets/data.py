@@ -60,7 +60,8 @@ class Data_Prep_for_Raw():
         # With such data, we can build a network (such as Transformer) to model the temporal dependency of animal behavior (and neural activity) during each flight 
         split_each_trajectory_flag=False, 
         window_size=20, # for splitting each trajectory into multiple samples
-        stride=20, # # for splitting each trajectory into multiple samples
+        stride_train=20, # splitting each trajectory into multiple samples, for training data
+        stride_test=20, # splitting each trajectory into multiple samples, for test data
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -77,7 +78,8 @@ class Data_Prep_for_Raw():
         self.special_id_count_thresh = special_id_count_thresh
         self.split_each_trajectory_flag = split_each_trajectory_flag
         self.window_size = window_size
-        self.stride = stride
+        self.stride_train = stride_train
+        self.stride_test = stride_test
 
         # data resampling
         self.bin_width = bin_width
@@ -527,9 +529,9 @@ class Data_Prep_for_Raw():
             # self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
             # self.samples_test = (np.hstack(behavior_test), np.hstack(spike_test))
             # print(f'Maximum flight length: {np.max([temp.shape[1] for temp in self.all_behavior_cluster])}')
-            self.samples_train = self.split_each_trajectory(behavior_train, spike_train, self.window_size, self.stride)
-            self.samples_valid = self.split_each_trajectory(behavior_valid, spike_valid, self.window_size, self.stride)
-            self.samples_test = self.split_each_trajectory(behavior_test, spike_test, self.window_size, self.stride)
+            self.samples_train = self.split_each_trajectory(behavior_train, spike_train, self.window_size, self.stride_train)
+            self.samples_valid = self.split_each_trajectory(behavior_valid, spike_valid, self.window_size, self.stride_test)
+            self.samples_test = self.split_each_trajectory(behavior_test, spike_test, self.window_size, self.stride_test)
             # print('SUM:')
             # print(np.sum(np.array(self.samples_train[2])*1.0 -1.0))
             # print(np.sum(np.array(self.samples_valid[2])*1.0 -1.0))
@@ -559,7 +561,8 @@ class Data_Prep_for_Raw():
         - returns:
             samples: a tuple of three lists b_window_list, s_window_list, mask_list
                      each list contains multiple numpy arrays: b_window shape (3, window_size), s_window shape (Y, window_size)
-                    mask shape (window_size,) bool (True for real timesteps)
+                     mask shape (window_size,) bool (True for real timesteps)
+                     and then transform the three lists to three numpy arrays
         Notes:
         - padding values are zeros 
         - if pad_on_short=False, short trajectories are ignored
@@ -635,7 +638,7 @@ class Data_Prep_for_Raw():
                 # print(f'mask_list: {np.array(mask_list)}')
                 # print(f'np.array(mask_list).shape: {np.array(mask_list).shape}')
 
-        return (b_window_list, s_window_list, mask_list)
+        return (np.array(b_window_list), np.array(s_window_list), np.array(mask_list)) # shapes: (N, 3, window_size), (N, num_of_neurons, window_size), (N, window_size)
 
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=False, use_fourier=False):
@@ -847,17 +850,26 @@ class BehaviorSpikeDataset():
         spike_std=None,
     ):
         """
-        sample: a tuple of (behavior, spike)
-            behavior: numpy array of shape (N, num_feature_channels)
-            spike: numpy array of shape (N, num_neurons)
+        samples: a tuple of (behavior, spike)
+                    behavior: numpy array of shape (N, num_behavior_channels)
+                    spike: numpy array of shape (N, num_neurons)
+                or a tuple of (behavior, spike, mask)
         behavior_mean: numpy array of shape (num_feature_channels,) or None
         behavior_std: numpy array of shape (num_feature_channels,) or None
         center: if True, (behavior - mean) / std, else behavior / std
         """
         if len(samples) == 2:
             (behavior, spike) = samples
+            mask = None
+        elif len(samples) == 3:
+            (behavior, spike, mask) = samples
+        else:
+            raise ValueError(f"'samples' must contain 2 or 3 elements, got {len(samples)}")
+
         behavior = torch.from_numpy(behavior).float()
         spike = torch.from_numpy(spike).float()
+        if mask is not None:
+            mask = torch.from_numpy(mask).float()
 
         if behavior_std is not None:
             behavior_std = torch.from_numpy(behavior_std).float()
@@ -873,12 +885,17 @@ class BehaviorSpikeDataset():
 
         self.behavior = behavior
         self.spike = spike
+        self.mask = mask
+        self.has_mask = mask is not None
 
     def __len__(self):
         return len(self.behavior)
     
     def __getitem__(self, idx):
-        return self.behavior[idx], self.spike[idx]
+        if self.has_mask:
+            return self.behavior[idx], self.spike[idx], self.mask[idx]
+        else:
+            return self.behavior[idx], self.spike[idx]
 
 
 class SubsetSequentialSampler(Sampler):
@@ -915,6 +932,8 @@ def bat_data_loader(
     special_id_count_thresh=3,  # for splitting flight clustering data
     shuffle_flag=False, # shuffle the training data
     split_each_trajectory_flag=False, 
+    batch_size_train=None, # batch_size for training data
+    batch_size_test=None,
 ):
     """
     Dataloaders for multiple sessions of bat data.
@@ -968,29 +987,49 @@ def bat_data_loader(
             (behavior_train, spike_train) = samples_train
             (behavior_valid, spike_valid) = samples_valid
             (behavior_test, spike_test) = samples_test
-        # behavior_train, behavior_valid, behavior_test, spike_train, spike_valid, spike_test = data_prep_for_raw.split_flight_cluster()
-        # print(behavior_train.shape, behavior_valid.shape, behavior_test.shape)  # (3, 843) (3, 229) (3, 1732), 3 represents behavior features
-        # print(spike_train.shape, spike_valid.shape, spike_test.shape)  # (95, 843) (95, 229) (95, 1732), 95 represents number of units
+            # print(behavior_train.shape, behavior_valid.shape, behavior_test.shape)  # (3, 843) (3, 229) (3, 1732), 3 represents behavior features
+            # print(spike_train.shape, spike_valid.shape, spike_test.shape)  # (95, 843) (95, 229) (95, 1732), 95 represents number of units
+            mask_train = None
 
-        behavior_dim = behavior_train.shape[0]
-        unit_num_dict[session_name] = spike_train.shape[0]
+            behavior_dim = behavior_train.shape[0]
+            unit_num_dict[session_name] = spike_train.shape[0]
+
+        elif len(samples_train) == 3: # for modeling temporal dependencies
+            (behavior_train, spike_train, mask_train) = samples_train # shapes: (N, 3, window_size), (N, num_of_neurons, window_size), (N, window_size)
+            (behavior_valid, spike_valid, mask_valid) = samples_valid
+            (behavior_test, spike_test, mask_test) = samples_test
+
+            behavior_dim = behavior_train.shape[1]
+            unit_num_dict[session_name] = spike_train.shape[1]
+
+        else:
+            raise ValueError(f"'samples_train' must contain 2 or 3 elements, got {len(samples_train)}")
 
         # pytorch dataset and dataloaders
         dataloaders = {}
+
         # train
-        data_input = np.copy(behavior_train.T)
-        data_output = np.copy(spike_train.T)
-        behavior_mean = np.mean(data_input, axis=0, keepdims=True)
-        behavior_std = np.std(data_input, axis=0, keepdims=True)
-        spike_std = np.std(data_output, axis=0, keepdims=True)
+        if mask_train is None:
+            data_input = np.copy(behavior_train.T)
+            data_output = np.copy(spike_train.T)
+            behavior_mean = np.mean(data_input, axis=0, keepdims=True)
+            behavior_std = np.std(data_input, axis=0, keepdims=True)
+            spike_std = np.std(data_output, axis=0, keepdims=True)
+        else:
+            data_input = np.transpose(behavior_train, (0, 2, 1))
+            data_output = np.transpose(spike_train, (0, 2, 1))
+            data_mask = np.copy(mask_train)
+            behavior_mean = np.nanmean(data_input, axis=(0,1), keepdims=True)
+            behavior_std = np.nanstd(data_input, axis=(0,1), keepdims=True)
+            spike_std = np.nanstd(data_output, axis=(0,1), keepdims=True)
+            data_input = np.nan_to_num(data_input) # NaN to 0.0, shape: (N, window_size, num_behavior_channels)
+            data_output = np.nan_to_num(data_output) # NaN to 0.0, shape: (N, window_size, num_neurons)
         meta_info_dict['behavior_mean'][session_name] = behavior_mean
         meta_info_dict['behavior_std'][session_name] = behavior_std
         meta_info_dict['spike_std'][session_name] = spike_std
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            samples = (data_input, data_output),
-            # behavior = data_input,
-            # spike = data_output,
+            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask),
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
@@ -999,16 +1038,22 @@ def bat_data_loader(
             dat,
             # TODO: use random sampler, but still keep the order within each trajectory
             sampler = SubsetRandomSampler(ind) if shuffle_flag else SubsetSequentialSampler(ind),
-            batch_size = data_input.shape[0],
+            batch_size = data_input.shape[0] if batch_size_train is None else batch_size_train,
         )
+
         # validation
-        data_input = np.copy(behavior_valid.T)
-        data_output = np.copy(spike_valid.T)
+        if mask_train is None:
+            data_input = np.copy(behavior_valid.T)
+            data_output = np.copy(spike_valid.T)
+        else:
+            data_input = np.transpose(behavior_valid, (0, 2, 1))
+            data_output = np.transpose(spike_valid, (0, 2, 1))
+            data_mask = np.copy(mask_valid)
+            data_input = np.nan_to_num(data_input) 
+            data_output = np.nan_to_num(data_output) 
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            samples = (data_input, data_output),
-            # behavior = data_input,
-            # spike = data_output,
+            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask),
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
@@ -1016,16 +1061,22 @@ def bat_data_loader(
         dataloaders['valid'] = DataLoader(
             dat,
             sampler = SubsetSequentialSampler(ind),
-            batch_size = data_input.shape[0],
+            batch_size = data_input.shape[0] if batch_size_train is None else batch_size_train,
         )
+
         # test
-        data_input = np.copy(behavior_test.T)
-        data_output = np.copy(spike_test.T)
+        if mask_train is None:
+            data_input = np.copy(behavior_test.T)
+            data_output = np.copy(spike_test.T)
+        else:
+            data_input = np.transpose(behavior_test, (0, 2, 1))
+            data_output = np.transpose(spike_test, (0, 2, 1))
+            data_mask = np.copy(mask_test)
+            data_input = np.nan_to_num(data_input) 
+            data_output = np.nan_to_num(data_output) 
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            samples = (data_input, data_output),
-            # behavior = data_input,
-            # spike = data_output,
+            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask),
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
@@ -1033,7 +1084,7 @@ def bat_data_loader(
         dataloaders['test'] = DataLoader(
             dat,
             sampler = SubsetSequentialSampler(ind),
-            batch_size = data_input.shape[0],
+            batch_size = data_input.shape[0] if batch_size_test is None else batch_size_test,
         )
 
         for k,v in dataloaders.items():
