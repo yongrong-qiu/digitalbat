@@ -59,6 +59,8 @@ class Data_Prep_for_Raw():
         # After splitting fight-clustering data into train, validation and test, we may want to use/split each flight trajectory as/into one/multiple data samples.
         # With such data, we can build a network (such as Transformer) to model the temporal dependency of animal behavior (and neural activity) during each flight 
         split_each_trajectory_flag=False, 
+        window_size=20, # for splitting each trajectory into multiple samples
+        stride=20, # # for splitting each trajectory into multiple samples
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -74,6 +76,8 @@ class Data_Prep_for_Raw():
         self.type_valid_num = type_valid_num
         self.special_id_count_thresh = special_id_count_thresh
         self.split_each_trajectory_flag = split_each_trajectory_flag
+        self.window_size = window_size
+        self.stride = stride
 
         # data resampling
         self.bin_width = bin_width
@@ -519,10 +523,17 @@ class Data_Prep_for_Raw():
         np.random.seed(100)
         np.random.shuffle(spike_train)
         if self.split_each_trajectory_flag:
-            self.samples_train = (np.hstack(behavior_train), np.hstack(spike_train))
-            self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
-            self.samples_test = (np.hstack(behavior_test), np.hstack(spike_test))
-            print(f'Maximum flight length: {np.max([temp.shape[1] for temp in self.all_behavior_cluster])}')
+            # self.samples_train = (np.hstack(behavior_train), np.hstack(spike_train))
+            # self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
+            # self.samples_test = (np.hstack(behavior_test), np.hstack(spike_test))
+            # print(f'Maximum flight length: {np.max([temp.shape[1] for temp in self.all_behavior_cluster])}')
+            self.samples_train = self.split_each_trajectory(behavior_train, spike_train, self.window_size, self.stride)
+            self.samples_valid = self.split_each_trajectory(behavior_valid, spike_valid, self.window_size, self.stride)
+            self.samples_test = self.split_each_trajectory(behavior_test, spike_test, self.window_size, self.stride)
+            # print('SUM:')
+            # print(np.sum(np.array(self.samples_train[2])*1.0 -1.0))
+            # print(np.sum(np.array(self.samples_valid[2])*1.0 -1.0))
+            # print(np.sum(np.array(self.samples_test[2])*1.0 -1.0))
         else:
             self.samples_train = (np.hstack(behavior_train), np.hstack(spike_train))
             self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
@@ -533,7 +544,7 @@ class Data_Prep_for_Raw():
         return (self.samples_train, self.samples_valid, self.samples_test)
     
     @staticmethod
-    def _split_each_trajectory(
+    def split_each_trajectory(
         behavior_list,
         spike_list,
         window_size=20,
@@ -568,22 +579,45 @@ class Data_Prep_for_Raw():
                     b_window_list.append(b_window)
                     s_window_list.append(s_window)
                     mask_list.append(mask)
-                # optionally, you may also include the last shorter tail (not done here)
+                # include the last shorter tail
+                shorter_tail_length = TT % window_size
+                if shorter_tail_length > 0:
+                    # create padded arrays
+                    if pad_mode == 'right':
+                        b_pad = np.full((b_raw.shape[0], window_size), np.nan, dtype=np.float32)
+                        s_pad = np.full((s_raw.shape[0], window_size), np.nan, dtype=np.float32)
+                        b_pad[:, :shorter_tail_length] = b_raw[:, -shorter_tail_length:]
+                        s_pad[:, :shorter_tail_length] = s_raw[:, -shorter_tail_length:]
+                        mask = np.zeros(window_size, dtype=bool)
+                        mask[:shorter_tail_length] = True
+                    elif pad_mode == 'left':
+                        b_pad = np.full((b_raw.shape[0], window_size), np.nan, dtype=np.float32)
+                        s_pad = np.full((s_raw.shape[0], window_size), np.nan, dtype=np.float32)
+                        b_pad[:, window_size-shorter_tail_length:] = b_raw[:, -shorter_tail_length:]
+                        s_pad[:, window_size-shorter_tail_length:] = s_raw[:, -shorter_tail_length:]
+                        mask = np.zeros(window_size, dtype=bool)
+                        mask[window_size-shorter_tail_length:] = True
+                    else:
+                        raise ValueError("pad_mode must be either 'right' or 'left' ")
+                    
+                    b_window_list.append(b_pad)
+                    s_window_list.append(s_pad)
+                    mask_list.append(mask)
 
             else:
                 if not pad_on_short:
                     continue
                 # create padded arrays
                 if pad_mode == 'right':
-                    b_pad = np.zeros((b_raw.shape[0], window_size), dtype=np.float32)
-                    s_pad = np.zeros((s_raw.shape[0], window_size), dtype=np.float32)
+                    b_pad = np.full((b_raw.shape[0], window_size), np.nan, dtype=np.float32)
+                    s_pad = np.full((s_raw.shape[0], window_size), np.nan, dtype=np.float32)
                     b_pad[:, :TT] = b_raw
                     s_pad[:, :TT] = s_raw
                     mask = np.zeros(window_size, dtype=bool)
                     mask[:TT] = True
                 elif pad_mode == 'left':
-                    b_pad = np.zeros((b_raw.shape[0], window_size), dtype=np.float32)
-                    s_pad = np.zeros((s_raw.shape[0], window_size), dtype=np.float32)
+                    b_pad = np.full((b_raw.shape[0], window_size), np.nan, dtype=np.float32)
+                    s_pad = np.full((s_raw.shape[0], window_size), np.nan, dtype=np.float32)
                     b_pad[:, window_size-TT:] = b_raw
                     s_pad[:, window_size-TT:] = s_raw
                     mask = np.zeros(window_size, dtype=bool)
@@ -594,6 +628,12 @@ class Data_Prep_for_Raw():
                 b_window_list.append(b_pad)
                 s_window_list.append(s_pad)
                 mask_list.append(mask)
+                # print(f'b_window_list: {np.array(b_window_list)[:, 1, :]}')
+                # print(f'b_window_list.shape: {np.array(b_window_list).shape}')
+                # print(f's_window_list: {np.array(s_window_list)[:, 10, :]}')
+                # print(f's_window_list.shape: {np.array(s_window_list).shape}')
+                # print(f'mask_list: {np.array(mask_list)}')
+                # print(f'np.array(mask_list).shape: {np.array(mask_list).shape}')
 
         return (b_window_list, s_window_list, mask_list)
 
