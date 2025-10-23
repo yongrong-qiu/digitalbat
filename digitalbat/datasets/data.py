@@ -883,6 +883,10 @@ class BehaviorSpikeDataset():
             spike_std = torch.from_numpy(spike_std).float()
             spike = spike/(spike_std + 1e-6)
 
+        # set all elements to zero where mask == 0.0
+        behavior[mask == 0.0] = 0.0
+        spike[mask == 0.0] = 0.0
+
         self.behavior = behavior
         self.spike = spike
         self.mask = mask
@@ -1018,7 +1022,7 @@ def bat_data_loader(
         else:
             data_input = np.transpose(behavior_train, (0, 2, 1))
             data_output = np.transpose(spike_train, (0, 2, 1))
-            data_mask = np.copy(mask_train)
+            data_mask = np.copy(mask_train) # 1.0 for real timesteps
             behavior_mean = np.nanmean(data_input, axis=(0,1), keepdims=True)
             behavior_std = np.nanstd(data_input, axis=(0,1), keepdims=True)
             spike_std = np.nanstd(data_output, axis=(0,1), keepdims=True)
