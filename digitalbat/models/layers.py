@@ -97,14 +97,10 @@ class BCEFocalCombinedLoss(nn.Module):
         return combined_loss
 
 
-# ============================================================
-# 1. Rotary Positional Embedding (RoPE)
-# ============================================================
-
 def apply_rotary_pos_emb(x, sin, cos):
     """
-    Apply rotary embedding to q or k tensor.
-    x: (B, T, H, D_head)
+    Apply rotary positional embedding (RoPE) to q or k tensor.
+    x: (B, num_head, T, D_head)
     sin, cos: (T, D_head)
     """
     # split last dim into two halves
@@ -126,62 +122,112 @@ def build_rotary_emb(seq_len, dim_head, device):
     return sin, cos
 
 
-class TransformerRoPE(nn.Module):
+class MultiheadAttentionRoPE(nn.Module):
     """
-    Transformer Encoder Layer with RoPE
+    Multihead attention using rotary position embedding
+
+    Example:
+        B, T, C, H = 2, 16, 64, 8
+        x = torch.randn(B, T, C)
+        attn = MultiHeadAttention(embed_dim=C, num_heads=H)
+
+        # Build rotary embeddings
+        sin, cos = build_rotary_emb(seq_len=T, dim_head=C // H, device=x.device)
+
+        # Forward with RoPE
+        out, weights = attn(x, x, x, sin=sin, cos=cos, return_attn_weights=True)
+        print(out.shape, weights.shape)
+        # (2, 16, 64), (2, 8, 16, 16)
+
     """
-    def __init__(self, hidden_dim, num_heads, ff_dim, dropout=0.1):
+    def __init__(self, embed_dim, num_heads, bias=True):
+        """
+        embed_dim: total embedding dimension (e.g., 512)
+        num_heads: number of attention heads (e.g., 8)
+        """
         super().__init__()
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+
+        self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.hidden_dim = hidden_dim
-        self.head_dim = hidden_dim // num_heads
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim % 2 == 0, "RoPE requires an even head_dim."
 
-        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.o_proj = nn.Linear(hidden_dim, hidden_dim)
+        # Linear projections for query, key, value
+        self.W_q = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.W_k = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.W_v = nn.Linear(embed_dim, embed_dim, bias=bias)
 
-        self.ff = nn.Sequential(
-            nn.Linear(hidden_dim, ff_dim),
-            nn.GELU(),
-            nn.Linear(ff_dim, hidden_dim)
-        )
+        # Output projection
+        self.W_o = nn.Linear(embed_dim, embed_dim, bias=bias)
 
-        self.dropout = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim)
-
-    def forward(self, x, attn_mask=None, sin=None, cos=None):
+    def forward(
+        self, 
+        query, 
+        key, 
+        value, 
+        sin=None, 
+        cos=None, 
+        attn_mask=None, 
+        dropout_p=0.0, 
+        is_causal=False, 
+        return_attn_weights=False,
+    ):
         """
-        x: (B, T, D)
-        attn_mask: (B, T) bool (True for valid)
-        sin, cos: RoPE embeddings
+        query, key, value: (batch_size, seq_len, embed_dim)
+        attn_mask: optional (batch_size, 1, seq_len_query, seq_len_key) or broadcastable form
+        return_attn_weights: if True, also return attention probabilities (B, num_heads, L, L)
         """
-        B, T, D = x.shape
+        B, L, _ = query.shape
 
-        q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
-        k = self.k_proj(x).view(B, T, self.num_heads, self.head_dim)
-        v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim)
+        # Linear projections
+        Q = self.W_q(query)
+        K = self.W_k(key)
+        V = self.W_v(value)
 
-        # Apply RoPE
+        # Reshape to multi-head form: (B, num_heads, L, head_dim)
+        Q = Q.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+        K = K.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+        V = V.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Apply rotary embeddings if provided
         if sin is not None and cos is not None:
-            q = apply_rotary_pos_emb(q, sin, cos)
-            k = apply_rotary_pos_emb(k, sin, cos)
+            Q = apply_rotary_pos_emb(Q, sin, cos)
+            K = apply_rotary_pos_emb(K, sin, cos)
 
-        # Scaled dot-product attention
-        attn = torch.einsum('bthd,bThd->bhtT', q, k) / math.sqrt(self.head_dim)
+        if not return_attn_weights:
+            # Efficient attention (no weights returned)
+            attn_output = F.scaled_dot_product_attention(
+                Q, K, V,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+            )
+            attn_weights = None
+        else:
+            # Compute attention scores manually to extract weights
+            d_k = Q.size(-1)
+            attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / d_k**0.5
 
-        # mask: 1=valid, 0=pad
-        if attn_mask is not None:
-            mask = attn_mask.unsqueeze(1).unsqueeze(2)  # (B,1,1,T)
-            attn = attn.masked_fill(~mask, float('-inf'))
+            if attn_mask is not None:
+                attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
 
-        attn_weights = F.softmax(attn, dim=-1)
-        attn_out = torch.einsum('bhtT,bThd->bthd', attn_weights, v)
-        attn_out = attn_out.reshape(B, T, D)
-        x = x + self.dropout(self.o_proj(attn_out))
-        x = self.norm1(x)
+            # Apply causal mask if needed
+            if is_causal:
+                L_q, L_k = Q.size(-2), K.size(-2)
+                causal_mask = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool))
+                attn_scores = attn_scores.masked_fill(~causal_mask, float('-inf'))
 
-        x = x + self.dropout(self.ff(x))
-        x = self.norm2(x)
-        return x
+            attn_weights = F.softmax(attn_scores, dim=-1)
+            attn_output = torch.matmul(attn_weights, V)
+
+        # Concatenate heads
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, L, self.embed_dim)
+
+        # Final output projection
+        out = self.W_o(attn_output)
+
+        if return_attn_weights:
+            return out, attn_weights  # (B, L, D), (B, num_heads, L, L)
+        else:
+            return out
