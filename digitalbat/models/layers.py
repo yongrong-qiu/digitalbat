@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-
+import math
 
 
 class ELU1(nn.Module):
@@ -95,3 +95,93 @@ class BCEFocalCombinedLoss(nn.Module):
         # Combine the two
         combined_loss = self.focal_weight * focal_loss + (1 - self.focal_weight) * bce_loss
         return combined_loss
+
+
+# ============================================================
+# 1. Rotary Positional Embedding (RoPE)
+# ============================================================
+
+def apply_rotary_pos_emb(x, sin, cos):
+    """
+    Apply rotary embedding to q or k tensor.
+    x: (B, T, H, D_head)
+    sin, cos: (T, D_head)
+    """
+    # split last dim into two halves
+    x1, x2 = x[..., ::2], x[..., 1::2]
+    sin, cos = sin.unsqueeze(0).unsqueeze(0), cos.unsqueeze(0).unsqueeze(0)
+    x_rot = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    return x_rot
+
+
+def build_rotary_emb(seq_len, dim_head, device):
+    """Precompute RoPE sine/cosine embeddings."""
+    # dim_head must be even
+    half_dim = dim_head // 2
+    freq_seq = torch.arange(half_dim, device=device, dtype=torch.float32)
+    freq = 1.0 / (10000 ** (freq_seq / half_dim))
+    t = torch.arange(seq_len, device=device, dtype=torch.float32)
+    angles = torch.einsum('t,f->tf', t, freq)
+    sin, cos = angles.sin(), angles.cos()
+    return sin, cos
+
+
+class TransformerRoPE(nn.Module):
+    """
+    Transformer Encoder Layer with RoPE
+    """
+    def __init__(self, hidden_dim, num_heads, ff_dim, dropout=0.1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.hidden_dim = hidden_dim
+        self.head_dim = hidden_dim // num_heads
+
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.o_proj = nn.Linear(hidden_dim, hidden_dim)
+
+        self.ff = nn.Sequential(
+            nn.Linear(hidden_dim, ff_dim),
+            nn.GELU(),
+            nn.Linear(ff_dim, hidden_dim)
+        )
+
+        self.dropout = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x, attn_mask=None, sin=None, cos=None):
+        """
+        x: (B, T, D)
+        attn_mask: (B, T) bool (True for valid)
+        sin, cos: RoPE embeddings
+        """
+        B, T, D = x.shape
+
+        q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
+        k = self.k_proj(x).view(B, T, self.num_heads, self.head_dim)
+        v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim)
+
+        # Apply RoPE
+        if sin is not None and cos is not None:
+            q = apply_rotary_pos_emb(q, sin, cos)
+            k = apply_rotary_pos_emb(k, sin, cos)
+
+        # Scaled dot-product attention
+        attn = torch.einsum('bthd,bThd->bhtT', q, k) / math.sqrt(self.head_dim)
+
+        # mask: 1=valid, 0=pad
+        if attn_mask is not None:
+            mask = attn_mask.unsqueeze(1).unsqueeze(2)  # (B,1,1,T)
+            attn = attn.masked_fill(~mask, float('-inf'))
+
+        attn_weights = F.softmax(attn, dim=-1)
+        attn_out = torch.einsum('bhtT,bThd->bthd', attn_weights, v)
+        attn_out = attn_out.reshape(B, T, D)
+        x = x + self.dropout(self.o_proj(attn_out))
+        x = self.norm1(x)
+
+        x = x + self.dropout(self.ff(x))
+        x = self.norm2(x)
+        return x
