@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import math
+from typing import Tuple
 
 
 class ELU1(nn.Module):
@@ -110,7 +111,6 @@ def apply_rotary_pos_emb(x, sin, cos):
     x_rot = x_rot.reshape(x.shape[:-1] + (-1,))
     return x_rot
 
-
 def build_rotary_emb(seq_len, dim_head, device):
     """Precompute RoPE sine/cosine embeddings."""
     # dim_head must be even
@@ -121,6 +121,50 @@ def build_rotary_emb(seq_len, dim_head, device):
     angles = torch.einsum('t,f->tf', t, freq)
     sin, cos = angles.sin(), angles.cos()
     return sin, cos
+
+
+def apply_rotary_emb_cis(
+    xq: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Adapted from LLAMA
+    Apply RoPE to xq, perform computations in complex domain
+
+    Example:
+        batch_size=10
+        seq_len=3
+        d=8
+        xq = torch.ones(batch_size, seq_len, d)
+        freqs_cis = precompute_freqs_cis(d, seq_len)
+        xq_out = apply_rotary_emb_cis(xq, freqs_cis)
+    """
+
+    # xq.shape = [batch_size, num_head, seq_len, dim] or [batch_size, seq_len, dim]
+    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 2)
+    
+    # complex domain
+    xq_ = torch.view_as_complex(xq_)
+    
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(-2)
+    return xq_out.type_as(xq)
+
+def precompute_freqs_cis(dim: int, seq_len: int, theta: float = 10000.0):
+    """
+    Adapted from LLAMA
+    Precompute RoPE, in complex domain
+    """
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    # t = [0, 1,..., seq_len-1]
+    t = torch.arange(seq_len, device=freqs.device)
+    # freqs.shape = [seq_len, dim // 2] 
+    freqs = torch.outer(t, freqs).float()  # m * \theta
+
+    # complex tensor
+    # assume freqs = [x, y]
+    # then: freqs_cis = [cos(x) + sin(x)i, cos(y) + sin(y)i]
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs) 
+    return freqs_cis
 
 
 class MultiheadAttentionRoPE(nn.Module):
