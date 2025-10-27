@@ -106,7 +106,8 @@ def apply_rotary_pos_emb(x, sin, cos):
     # split last dim into two halves
     x1, x2 = x[..., ::2], x[..., 1::2]
     sin, cos = sin.unsqueeze(0).unsqueeze(0), cos.unsqueeze(0).unsqueeze(0)
-    x_rot = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    x_rot = torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    x_rot = x_rot.reshape(x.shape[:-1] + (-1,))
     return x_rot
 
 
