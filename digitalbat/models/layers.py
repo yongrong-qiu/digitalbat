@@ -220,7 +220,7 @@ class MultiheadAttentionRoPE(nn.Module):
     ):
         """
         query, key, value: (batch_size, seq_len, embed_dim)
-        attn_mask: optional (batch_size, 1, seq_len_query, seq_len_key) or broadcastable form
+        attn_mask: optional (batch_size, 1, seq_len_query, seq_len_key) or broadcastable form, bool
         return_attn_weights: if True, also return attention probabilities (B, num_heads, L, L)
         """
         B, L, _ = query.shape

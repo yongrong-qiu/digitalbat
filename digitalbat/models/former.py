@@ -71,9 +71,11 @@ class Bat_Transformer(nn.Module):
 
         # attn_mask
         mask = mask.to(x.device)
-        attn_mask = torch.einsum("bi,bj->bij", mask.float(), mask.float()) # (B, T, T)
+        attn_mask = torch.einsum("bi,bj->bij", mask.float(), mask.float()).bool() # (B, T, T), BOOL
         attn_mask = attn_mask[:, None, :, :] # (B, 1, T, T)
         # attn_mask = attn_mask.expand(-1, self.num_heads, -1, -1) # (B, num_heads, T, T)
+
+        x = self.embed(x)
 
         for layer in self.layers:
             x = layer(x, x, x, attn_mask=attn_mask)

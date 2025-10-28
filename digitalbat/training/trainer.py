@@ -276,3 +276,78 @@ def bat_mlp_behavior_trainer(
     # restore model and return best accuracy
     model.load_state_dict(best_weights)
     return best_score, best_weights, val_scores
+
+def bat_former_trainer(
+    model, 
+    dataloaders, 
+    device,
+    n_epochs=200, # # number of epochs to run
+    lr=0.0001, # learning rate
+    loss_fn: nn.Module | None = None, 
+    valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None, 
+    # verbose=False, # not display the progress
+):
+    """
+    Training transfomer models for predicting neural activity
+    Arguments:
+        valid_fn: validation during training, larger number, better performance
+                  Compared to the valid_fn used for model_train_mlp(), here we return an array of correlation values for all units, without average.
+                  e.g., valid_fn=lambda y_true, y_pred: corr(y_true, y_pred, axis=0)
+                  y_true.shape: (N, spiking_unit_number)
+    """
+
+    model = model.to(device)
+    loss_fn = loss_fn.to(device)  # Make sure the loss module is on the correct device
+
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
+ 
+    # Hold the best model
+    best_score = - np.inf   # correlation coefficient, larger scores indicate better model
+    best_weights = None
+    val_scores = []
+ 
+    for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
+        model.train()
+        for session_name, session_data in dataloaders['train'].items():
+            # print(session_name, session_data)
+            for batch_id, batch in enumerate(session_data):
+                # print(batch[0].shape, batch[1].shape, batch[2].shape) 
+                # behavior (N, window_size, behavior_feature), spike (N, window_size, spiking_unit_number), mask (N, window_size)
+                # take a batch
+                X_batch = batch[0].to(device)
+                y_batch = batch[1].to(device)
+                mask_batch = batch[2].to(device)
+                # forward pass
+                y_pred = model(session_name, X_batch, mask_batch)
+                # y_pred.shape: (14, 20, 289), y_pred[mask_batch == 1.0].shape: (260, 289)
+                loss = loss_fn(y_pred[mask_batch == 1.0], y_batch[mask_batch == 1.0]) # compute loss only on valid timesteps
+                # backward pass
+                optimizer.zero_grad()
+                loss.backward()
+                # update weights
+                optimizer.step()
+
+        # evaluate accuracy at end of each epoch
+        model.eval()
+        temp_scores_list = []
+        for session_name, session_data in dataloaders['valid'].items():
+            # print(session_name, session_data)
+            for batch_id, batch in enumerate(session_data):
+                X_val = batch[0].to(device)
+                y_val = batch[1].to(device)
+                mask_val = batch[2].to(device)
+                y_pred = model(session_name, X_val, mask_val)
+                y_val_np = y_val.detach()[mask_val == 1.0].cpu().numpy() # compute scores only on valid timesteps
+                y_pred_np = y_pred.detach()[mask_val == 1.0].cpu().numpy()
+                # TODO: in the case of multiple batches of validation data, we should concatenate the data and then compute the correlation
+                temp_scores = valid_fn(y_val_np, y_pred_np) # an array of scores for spiking units in one batch data within one session of data
+                temp_scores_list.append(temp_scores)
+        val_score = np.nanmean(np.hstack(temp_scores_list))
+        val_scores.append(val_score)
+        if val_score > best_score:
+            best_score = val_score
+            best_weights = copy.deepcopy(model.state_dict())
+
+    # restore model and return best accuracy
+    model.load_state_dict(best_weights)
+    return best_score, best_weights, val_scores
