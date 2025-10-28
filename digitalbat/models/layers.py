@@ -276,3 +276,54 @@ class MultiheadAttentionRoPE(nn.Module):
             return out, attn_weights  # (B, L, D), (B, num_heads, L, L)
         else:
             return out
+
+
+class TransformerEncoderRoPE(nn.Module):
+    """
+    Transformer encoder layer using RoPE
+    """
+    def __init__(
+        self,
+        hidden_dim,
+        num_head,
+        ff_dim,
+        nonlinear_module = nn.GELU(),
+        dropout = 0.1,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_head = num_head
+        self.head_dim = hidden_dim // num_head
+
+        self.attention = MultiheadAttentionRoPE(hidden_dim, num_head)
+
+        self.ff = nn.Sequential(
+            nn.Linear(hidden_dim, ff_dim),
+            nonlinear_module,
+            nn.Linear(ff_dim, hidden_dim),
+        )
+
+        self.dropout = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+
+    def forward(
+        self,
+        query, 
+        key, 
+        value, 
+        attn_mask=None, 
+        is_causal=False, 
+    ):
+        # Build rotary embeddings
+        batch_size, seq_len, D = query.shape
+        sin, cos = build_rotary_emb(seq_len=seq_len, dim_head=self.head_dim, device=query.device)
+
+        # Forward with RoPE
+        out = self.attention(query, key, value, sin=sin, cos=cos, attn_mask=attn_mask, is_causal=is_causal)
+        out = out + self.dropout(out)
+        out = self.norm1(out)
+
+        out = out + self.dropout(self.ff(out))
+        out = self.norm2(out)
+        return out
