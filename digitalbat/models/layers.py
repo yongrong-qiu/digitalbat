@@ -281,6 +281,15 @@ class MultiheadAttentionRoPE(nn.Module):
 class TransformerEncoderRoPE(nn.Module):
     """
     Transformer encoder layer using RoPE
+    Example:
+        B, T, C, H, ff = 2, 16, 64, 8, 128
+        x = torch.randn(B, T, C)
+        enc = TransformerEncoderRoPE(hidden_dim=C, num_head=H, ff_dim=128)
+
+        # Forward with RoPE
+        out = enc(x, x, x)
+        print(out.shape)
+        # (2, 16, 64)
     """
     def __init__(
         self,
