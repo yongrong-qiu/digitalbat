@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 
+from .layers import TransformerEncoderRoPE
+
 
 class Bat_Transformer(nn.Module):
     """
@@ -29,57 +31,46 @@ class Bat_Transformer(nn.Module):
         self,
         input_dim: int,
         output_dim_dict: dict, # a dictionary of spiking unit numbers for each session, e.g., {'Dataset_3_14543_240419': 289, 'Dataset_1_32622_231009': 95}
-        latent_dims_list: List[int] = [100, 100],
-        latent_activation: nn.Module = nn.ReLU(),
-        final_activation: nn.Module = nn.Identity(),
+        latent_dim: int = 64,
+        num_heads: int = 4,
+        ff_dim: int = 64,
+        num_layers: int = 1,
         dropout_prob: float = 0.0,
+        final_activation: nn.Module = nn.Identity(),
     ):
         super().__init__()
-
-        # Create learnable layers
-        self.layers = nn.ModuleList()
-
-        if latent_dims_list:
-            self.layers.append(nn.Linear(input_dim, latent_dims_list[0]))
-            self.layers.append(nn.BatchNorm1d(latent_dims_list[0]))
-            self.layers.append(latent_activation)
-            self.layers.append(nn.Dropout(dropout_prob))
-            for i in range(len(latent_dims_list) - 1):
-                self.layers.append(nn.Linear(latent_dims_list[i], latent_dims_list[i + 1]))
-                self.layers.append(nn.BatchNorm1d(latent_dims_list[i + 1]))
-                self.layers.append(latent_activation)
-                self.layers.append(nn.Dropout(dropout_prob))
-            
-            readout_in_dim = latent_dims_list[-1]
-
-        else:
-            readout_in_dim = input_dim
+        self.embed = nn.Linear(input_dim, latent_dim) # behavior embedding
+        self.layers = nn.ModuleList([
+            TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, dropout=dropout_prob) for _ in range(num_layers)
+        ])
 
         # session-specific readouts
         self.readouts = nn.ModuleDict({
-            session_name: nn.Linear(readout_in_dim, unit_num)
+            session_name: nn.Linear(latent_dim, unit_num)
             for session_name, unit_num in output_dim_dict.items()
         })
 
         self.final_activation = final_activation
 
-    def forward(self, session_name: str, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, session_name: str, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the model.
 
         Parameters
         ----------
         x : torch.Tensor
-            Shape (batch_size, input_dim)
+            Shape (batch_size, T, input_dim)
+        mask: (B, T) bool, True for valid, False for pad
 
         Returns
         -------
         torch.Tensor
-            Shape (batch_size, output_dim)
+            Shape (batch_size, T, output_dim)
         """
 
         for layer in self.layers:
-            x = layer(x)
+            # TODO mask
+            x = layer(x, x, x, attn_mask=mask)
         x = self.readouts[session_name](x)
         x = self.final_activation(x)
 
