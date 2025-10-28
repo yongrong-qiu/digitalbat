@@ -43,6 +43,7 @@ class Bat_Transformer(nn.Module):
         self.layers = nn.ModuleList([
             TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, dropout=dropout_prob) for _ in range(num_layers)
         ])
+        self.num_heads = num_heads
 
         # session-specific readouts
         self.readouts = nn.ModuleDict({
@@ -68,9 +69,14 @@ class Bat_Transformer(nn.Module):
             Shape (batch_size, T, output_dim)
         """
 
+        # attn_mask
+        mask = mask.to(x.device)
+        attn_mask = torch.einsum("bi,bj->bij", mask.float(), mask.float()) # (B, T, T)
+        attn_mask = attn_mask[:, None, :, :] # (B, 1, T, T)
+        # attn_mask = attn_mask.expand(-1, self.num_heads, -1, -1) # (B, num_heads, T, T)
+
         for layer in self.layers:
-            # TODO mask
-            x = layer(x, x, x, attn_mask=mask)
+            x = layer(x, x, x, attn_mask=attn_mask)
         x = self.readouts[session_name](x)
         x = self.final_activation(x)
 
