@@ -936,6 +936,9 @@ def bat_data_loader(
     special_id_count_thresh=3,  # for splitting flight clustering data
     shuffle_flag=False, # shuffle the training data
     split_each_trajectory_flag=False, 
+    window_size = 20, 
+    stride_train = 20, 
+    stride_test = 20, 
     batch_size_train=None, # batch_size for training data
     batch_size_test=None,
 ):
@@ -973,6 +976,9 @@ def bat_data_loader(
             type_valid_num = type_valid_num,
             special_id_count_thresh = special_id_count_thresh,
             split_each_trajectory_flag = split_each_trajectory_flag,
+            window_size = window_size, 
+            stride_train = stride_train, 
+            stride_test = stride_test, 
         )
         
         all_behavior = data_prep_for_raw.get_all_behavior()
