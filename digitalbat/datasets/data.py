@@ -56,6 +56,7 @@ class Data_Prep_for_Raw():
         type_train_num=1,  # for splitting flight clustering data
         type_valid_num=1,  # for splitting flight clustering data
         special_id_count_thresh=3,  # for splitting flight clustering data
+        only_use_special_id_4train_flag=False, # Only use the "special_id" flight types (e.g., flight clusters with more than "special_id_count_thresh" repeats) for training 
         # After splitting fight-clustering data into train, validation and test, we may want to use/split each flight trajectory as/into one/multiple data samples.
         # With such data, we can build a network (such as Transformer) to model the temporal dependency of animal behavior (and neural activity) during each flight 
         split_each_trajectory_flag=False, 
@@ -76,6 +77,7 @@ class Data_Prep_for_Raw():
         self.type_train_num = type_train_num
         self.type_valid_num = type_valid_num
         self.special_id_count_thresh = special_id_count_thresh
+        self.only_use_special_id_4train_flag = only_use_special_id_4train_flag
         self.split_each_trajectory_flag = split_each_trajectory_flag
         self.window_size = window_size
         self.stride_train = stride_train
@@ -500,10 +502,11 @@ class Data_Prep_for_Raw():
 
         behavior_train, behavior_valid, behavior_test = [], [], []
         spike_train, spike_valid, spike_test = [], [], []
-        for ii in range(len(self.all_behavior_type)):
-            if self.all_behavior_type[ii] not in special_ids:
-                behavior_train.append(self.all_behavior_cluster[ii])
-                spike_train.append(self.all_spike_cluster[ii])
+        if not self.only_use_special_id_4train_flag:
+            for ii in range(len(self.all_behavior_type)):
+                if self.all_behavior_type[ii] not in special_ids:
+                    behavior_train.append(self.all_behavior_cluster[ii])
+                    spike_train.append(self.all_spike_cluster[ii])
         for unique_id in special_ids:
             tempinds = np.where(np.array(self.all_behavior_type)==unique_id)[0]
             for jj in range(len(tempinds)):
@@ -934,6 +937,7 @@ def bat_data_loader(
     type_train_num=1,  # for splitting flight clustering data
     type_valid_num=1,  # for splitting flight clustering data
     special_id_count_thresh=3,  # for splitting flight clustering data
+    only_use_special_id_4train_flag=False,
     shuffle_flag=False, # shuffle the training data
     split_each_trajectory_flag=False, 
     window_size = 20, 
@@ -975,6 +979,7 @@ def bat_data_loader(
             type_train_num = type_train_num,
             type_valid_num = type_valid_num,
             special_id_count_thresh = special_id_count_thresh,
+            only_use_special_id_4train_flag = only_use_special_id_4train_flag,
             split_each_trajectory_flag = split_each_trajectory_flag,
             window_size = window_size, 
             stride_train = stride_train, 
