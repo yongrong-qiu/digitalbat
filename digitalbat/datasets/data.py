@@ -475,6 +475,7 @@ class Data_Prep_for_Raw():
         self.all_behavior_type = all_behavior_type
         self.all_spike_cluster = all_spike_cluster
         self.max_len_of_flight_trajectory = np.max([beh.shape[1] for beh in all_behavior_cluster])
+        # print(f'max_len_of_flight_trajectory: {self.max_len_of_flight_trajectory}')
 
         self._flight_cluster_ready = True
         

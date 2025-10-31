@@ -6,7 +6,7 @@ import tqdm
 import copy
 from typing import Callable
 
-from ..utility.utils import corr
+from ..utility.utils import corr, poisson_fde_population
 from ..models.layers import FocalLoss, BCEFocalCombinedLoss
 
 
@@ -130,6 +130,7 @@ def bat_mlp_trainer(
     lr=0.0001, # learning rate
     loss_fn: nn.Module | None = None, 
     valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None, 
+    valid_stat='mean', # after computing validation scores for all neurons, we calculate a single number (statistics) as 'val_score' for these neurons
     # verbose=False, # not display the progress
 ):
     """
@@ -138,6 +139,7 @@ def bat_mlp_trainer(
         valid_fn: validation during training, larger number, better performance
                   Compared to the valid_fn used for model_train_mlp(), here we return an array of correlation values for all units, without average.
                   e.g., valid_fn=lambda y_true, y_pred: corr(y_true, y_pred, axis=0)
+                  e.g., valid_fn=lambda y_true, y_pred: poisson_fde_population(y_true, y_pred)
                   y_true.shape: (N, spiking_unit_number)
     """
 
@@ -196,7 +198,10 @@ def bat_mlp_trainer(
                 y_pred_np = y_pred.detach().cpu().numpy()
                 temp_scores = valid_fn(y_val_np, y_pred_np) # an array of scores for spiking units in one batch data within one session of data
                 temp_scores_list.append(temp_scores)
-        val_score = np.nanmean(np.hstack(temp_scores_list))
+        if valid_stat == 'mean':
+            val_score = np.nanmean(np.hstack(temp_scores_list))
+        elif valid_stat == 'median':
+            val_score = np.nanmedian(np.hstack(temp_scores_list))
         val_scores.append(val_score)
         if val_score > best_score:
             best_score = val_score
@@ -281,10 +286,11 @@ def bat_former_trainer(
     model, 
     dataloaders, 
     device,
-    n_epochs=200, # # number of epochs to run
+    n_epochs=200, # number of epochs to run
     lr=0.0001, # learning rate
     loss_fn: nn.Module | None = None, 
     valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None, 
+    valid_stat='mean', # after computing validation scores for all neurons, we calculate a single number (statistics) as 'val_score' for these neurons
     # verbose=False, # not display the progress
 ):
     """
@@ -293,7 +299,8 @@ def bat_former_trainer(
         valid_fn: validation during training, larger number, better performance
                   Compared to the valid_fn used for model_train_mlp(), here we return an array of correlation values for all units, without average.
                   e.g., valid_fn=lambda y_true, y_pred: corr(y_true, y_pred, axis=0)
-                  y_true.shape: (N, spiking_unit_number)
+                  e.g., valid_fn=lambda y_true, y_pred: poisson_fde_population(y_true, y_pred)
+                  y_true.shape: (N, unit_number)
     """
 
     model = model.to(device)
@@ -312,7 +319,7 @@ def bat_former_trainer(
             # print(session_name, session_data)
             for batch_id, batch in enumerate(session_data):
                 # print(batch[0].shape, batch[1].shape, batch[2].shape) 
-                # behavior (N, window_size, behavior_feature), spike (N, window_size, spiking_unit_number), mask (N, window_size)
+                # behavior (N, window_size, behavior_feature), spike (N, window_size, unit_number), mask (N, window_size)
                 # take a batch
                 X_batch = batch[0].to(device)
                 y_batch = batch[1].to(device)
@@ -342,7 +349,10 @@ def bat_former_trainer(
                 # TODO: in the case of multiple batches of validation data, we should concatenate the data and then compute the correlation
                 temp_scores = valid_fn(y_val_np, y_pred_np) # an array of scores for spiking units in one batch data within one session of data
                 temp_scores_list.append(temp_scores)
-        val_score = np.nanmean(np.hstack(temp_scores_list))
+        if valid_stat == 'mean':
+            val_score = np.nanmean(np.hstack(temp_scores_list))
+        elif valid_stat == 'median':
+            val_score = np.nanmedian(np.hstack(temp_scores_list))
         val_scores.append(val_score)
         if val_score > best_score:
             best_score = val_score

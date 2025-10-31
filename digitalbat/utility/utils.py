@@ -281,6 +281,24 @@ def poisson_fraction_deviance_explained(y_true: np.ndarray, y_pred: np.ndarray) 
     # Return fraction deviance explained
     return 1 - dev_model / (dev_null + 1e-6 )
 
+def poisson_fde_population(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
+    """
+    Use poisson_fraction_deviance_explained() to compute FDE for a population of neurons.
+
+    Args:
+    - y_true: recorded responses, 2D array with a shape of (TT, neuron_number)
+    - y_pred: predicted responses, 2D array with a shape of (TT, neuron_number)
+
+    Return:
+    - 1D array, FDE for each neuron
+    """
+
+    fdes = np.empty((y_true.shape[1]))
+    for ii in range(len(fdes)):
+        fdes[ii] = poisson_fraction_deviance_explained(y_true[:,ii], y_pred[:,ii]) 
+    
+    return fdes
+
 
 # ---------------------------------------------------------------------
 # Utility function: Arc length computation
