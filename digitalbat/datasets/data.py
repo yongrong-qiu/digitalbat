@@ -60,9 +60,9 @@ class Data_Prep_for_Raw():
         # After splitting fight-clustering data into train, validation and test, we may want to use/split each flight trajectory as/into one/multiple data samples.
         # With such data, we can build a network (such as Transformer) to model the temporal dependency of animal behavior (and neural activity) during each flight 
         split_each_trajectory_flag=False, 
-        window_size=20, # for splitting each trajectory into multiple samples
-        stride_train=20, # splitting each trajectory into multiple samples, for training data
-        stride_test=20, # splitting each trajectory into multiple samples, for test data
+        window_size: int|None = None, # for splitting each trajectory into multiple samples
+        stride_train: int|None = None, # splitting each trajectory into multiple samples, for training data
+        stride_test: int|None = None, # splitting each trajectory into multiple samples, for test data
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -102,6 +102,7 @@ class Data_Prep_for_Raw():
         self.all_behavior_cluster = None  # a list of arrays, each array contains behavior for each trajectory
         self.all_behavior_type = None  # a list of trajectory clustering types
         self.all_spike_cluster = None  # a list of arrays, each array contains neuronal activity for each trajectory
+        self.max_len_of_flight_trajectory = None # maximum length of all flight trajectories in this session
 
         # after flight clustering, split the trajectories for training, evaluation and test
         self.samples_train = None
@@ -473,6 +474,7 @@ class Data_Prep_for_Raw():
         self.all_behavior_cluster = all_behavior_cluster
         self.all_behavior_type = all_behavior_type
         self.all_spike_cluster = all_spike_cluster
+        self.max_len_of_flight_trajectory = np.max([beh.shape[1] for beh in all_behavior_cluster])
 
         self._flight_cluster_ready = True
         
@@ -532,9 +534,14 @@ class Data_Prep_for_Raw():
             # self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
             # self.samples_test = (np.hstack(behavior_test), np.hstack(spike_test))
             # print(f'Maximum flight length: {np.max([temp.shape[1] for temp in self.all_behavior_cluster])}')
-            self.samples_train = self.split_each_trajectory(behavior_train, spike_train, self.window_size, self.stride_train)
-            self.samples_valid = self.split_each_trajectory(behavior_valid, spike_valid, self.window_size, self.stride_test)
-            self.samples_test = self.split_each_trajectory(behavior_test, spike_test, self.window_size, self.stride_test)
+            if self.window_size is None and self.stride_train is None and self.stride_test is None: 
+                self.samples_train = self.split_each_trajectory(behavior_train, spike_train, self.max_len_of_flight_trajectory, self.max_len_of_flight_trajectory)
+                self.samples_valid = self.split_each_trajectory(behavior_valid, spike_valid, self.max_len_of_flight_trajectory, self.max_len_of_flight_trajectory)
+                self.samples_test = self.split_each_trajectory(behavior_test, spike_test, self.max_len_of_flight_trajectory, self.max_len_of_flight_trajectory)
+            else:
+                self.samples_train = self.split_each_trajectory(behavior_train, spike_train, self.window_size, self.stride_train)
+                self.samples_valid = self.split_each_trajectory(behavior_valid, spike_valid, self.window_size, self.stride_test)
+                self.samples_test = self.split_each_trajectory(behavior_test, spike_test, self.window_size, self.stride_test)    
             # print('SUM:')
             # print(np.sum(np.array(self.samples_train[2])*1.0 -1.0))
             # print(np.sum(np.array(self.samples_valid[2])*1.0 -1.0))
