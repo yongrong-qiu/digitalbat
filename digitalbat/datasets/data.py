@@ -6,6 +6,7 @@ from scipy.io import loadmat
 import glob
 import h5py
 from scipy.stats import binned_statistic
+from collections import namedtuple
 
 from ..utility.utils import bandpass_filter
 from ..utility.utils import interpolate_signal_with_nans
@@ -908,9 +909,20 @@ class BehaviorSpikeDataset():
     
     def __getitem__(self, idx):
         if self.has_mask:
-            return self.behavior[idx], self.spike[idx], self.mask[idx]
+            DataSample = namedtuple('DataSample',['behavior', 'spike', 'mask'])
+            return DataSample(
+                behavior=self.behavior[idx],
+                spike=self.spike[idx],
+                mask=self.mask[idx],
+            )
+            # return self.behavior[idx], self.spike[idx], self.mask[idx]
         else:
-            return self.behavior[idx], self.spike[idx]
+            DataSample = namedtuple('DataSample',['behavior', 'spike'])
+            return DataSample(
+                behavior=self.behavior[idx],
+                spike=self.spike[idx],
+            )
+            # return self.behavior[idx], self.spike[idx]
 
 
 class SubsetSequentialSampler(Sampler):

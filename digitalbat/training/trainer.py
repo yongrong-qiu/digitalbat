@@ -321,9 +321,9 @@ def bat_former_trainer(
                 # print(batch[0].shape, batch[1].shape, batch[2].shape) 
                 # behavior (N, window_size, behavior_feature), spike (N, window_size, unit_number), mask (N, window_size)
                 # take a batch
-                X_batch = batch[0].to(device)
-                y_batch = batch[1].to(device)
-                mask_batch = batch[2].to(device)
+                X_batch = batch.behavior.to(device)
+                y_batch = batch.spike.to(device)
+                mask_batch = batch.mask.to(device)
                 # forward pass
                 y_pred = model(session_name, X_batch, mask_batch)
                 # y_pred.shape: (14, 20, 289), y_pred[mask_batch == 1.0].shape: (260, 289)
@@ -340,9 +340,9 @@ def bat_former_trainer(
         for session_name, session_data in dataloaders['valid'].items():
             # print(session_name, session_data)
             for batch_id, batch in enumerate(session_data):
-                X_val = batch[0].to(device)
-                y_val = batch[1].to(device)
-                mask_val = batch[2].to(device)
+                X_val = batch.behavior.to(device)
+                y_val = batch.spike.to(device)
+                mask_val = batch.mask.to(device)
                 y_pred = model(session_name, X_val, mask_val)
                 y_val_np = y_val.detach()[mask_val == 1.0].cpu().numpy() # compute scores only on valid timesteps
                 y_pred_np = y_pred.detach()[mask_val == 1.0].cpu().numpy()
