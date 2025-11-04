@@ -100,9 +100,9 @@ class Data_Prep_for_Raw():
 
         self.flight_cluster_alpha = flight_cluster_alpha
         self.flight_cluster_results = None
-        self.all_behavior_cluster = None  # a list of arrays, each array contains behavior for each trajectory
+        self.all_behavior_clustered = None  # a list of arrays, each array contains behavior for each trajectory
         self.all_behavior_type = None  # a list of trajectory clustering types
-        self.all_spike_cluster = None  # a list of arrays, each array contains neuronal activity for each trajectory
+        self.all_spike_clustered = None  # a list of arrays, each array contains neuronal activity for each trajectory
         self.max_len_of_flight_trajectory = None # maximum length of all flight trajectories in this session
 
         # after flight clustering, split the trajectories for training, evaluation and test
@@ -454,8 +454,8 @@ class Data_Prep_for_Raw():
 
         # for each flight cluster type, we only use one repeat to train and evaluate the model
         # TODO: for each flight cluster type, we use the mean of the repeats to evaluate the model
-        all_behavior_cluster = []
-        all_spike_cluster = []
+        all_behavior_clustered = []
+        all_spike_clustered = []
         all_behavior_type = []
         for tempid in unique_ids:
             start_time = bhv_t[self.flight_cluster_results['start_frame'][np.where(self.flight_cluster_results['id']==tempid)[0]]]
@@ -463,24 +463,31 @@ class Data_Prep_for_Raw():
             for ii in range(len(start_time)):
                 tempind = np.where((self.all_time_flight>=start_time[ii]) & (self.all_time_flight<=stop_time[ii]))[0]
                 if len(tempind): # exclude the flight behavior beyond all_time_flight, e.g., at the very beginning of the session
-                    all_behavior_cluster.append(self.all_behavior[:, tempind])
+                    all_behavior_clustered.append(self.all_behavior[:, tempind])
                     all_behavior_type.append(tempid)
-                    all_spike_cluster.append(self.all_spike[:, tempind])
+                    all_spike_clustered.append(self.all_spike[:, tempind])
     
         # # shuffle all flights
         # np.random.seed(100)
-        # np.random.shuffle(all_behavior_cluster)
-        # np.random.shuffle(all_spike_cluster)
+        # np.random.shuffle(all_behavior_clustered)
+        # np.random.shuffle(all_spike_clustered)
 
-        self.all_behavior_cluster = all_behavior_cluster
+        self.all_behavior_clustered = all_behavior_clustered
         self.all_behavior_type = all_behavior_type
-        self.all_spike_cluster = all_spike_cluster
-        self.max_len_of_flight_trajectory = np.max([beh.shape[1] for beh in all_behavior_cluster])
+        self.all_spike_clustered = all_spike_clustered
+        # print(f'len(all_behavior_clustered): {len(all_behavior_clustered)}, all_behavior_clustered[0].shape: {all_behavior_clustered[0].shape}') 
+        # print(f'len(all_behavior_type):    {len(all_behavior_type)}, all_behavior_type: {all_behavior_type}')
+        # print(f'len(all_spike_clustered):    {len(all_spike_clustered)}, all_spike_clustered[0].shape: {all_spike_clustered[0].shape}')
+        # len(all_behavior_clustered): 37, all_behavior_clustered[0].shape: (3, 59)
+        # len(all_behavior_type):    37,    all_behavior_type: [1, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21]
+        # len(all_spike_clustered):    37,    all_spike_clustered[0].shape: (289, 59)
+
+        self.max_len_of_flight_trajectory = np.max([beh.shape[1] for beh in all_behavior_clustered])
         # print(f'max_len_of_flight_trajectory: {self.max_len_of_flight_trajectory}')
 
         self._flight_cluster_ready = True
         
-        return self.all_behavior_cluster, self.all_behavior_type, self.all_spike_cluster
+        return self.all_behavior_clustered, self.all_behavior_type, self.all_spike_clustered
     
     def split_flight_cluster(self):
         """
@@ -506,23 +513,33 @@ class Data_Prep_for_Raw():
 
         behavior_train, behavior_valid, behavior_test = [], [], []
         spike_train, spike_valid, spike_test = [], [], []
+        flight_path_index_train, flight_path_index_valid, flight_path_index_test = [], [], [] # index of individual flight path
+        flight_type_index_train, flight_type_index_valid, flight_type_index_test = [], [], [] # index of each flight cluster type
         if not self.only_use_special_id_4train_flag:
             for ii in range(len(self.all_behavior_type)):
                 if self.all_behavior_type[ii] not in special_ids:
-                    behavior_train.append(self.all_behavior_cluster[ii])
-                    spike_train.append(self.all_spike_cluster[ii])
+                    behavior_train.append(self.all_behavior_clustered[ii])
+                    spike_train.append(self.all_spike_clustered[ii])
+                    flight_path_index_train.append(ii)
+                    flight_type_index_train.append(self.all_behavior_type[ii])
         for unique_id in special_ids:
             tempinds = np.where(np.array(self.all_behavior_type)==unique_id)[0]
             for jj in range(len(tempinds)):
                 if jj < self.type_train_num:
-                    behavior_train.append(self.all_behavior_cluster[tempinds[jj]])
-                    spike_train.append(self.all_spike_cluster[tempinds[jj]])
+                    behavior_train.append(self.all_behavior_clustered[tempinds[jj]])
+                    spike_train.append(self.all_spike_clustered[tempinds[jj]])
+                    flight_path_index_train.append(tempinds[jj])
+                    flight_type_index_train.append(self.all_behavior_type[tempinds[jj]])
                 elif jj < self.type_train_num + self.type_valid_num:
-                    behavior_valid.append(self.all_behavior_cluster[tempinds[jj]])
-                    spike_valid.append(self.all_spike_cluster[tempinds[jj]])
+                    behavior_valid.append(self.all_behavior_clustered[tempinds[jj]])
+                    spike_valid.append(self.all_spike_clustered[tempinds[jj]])
+                    flight_path_index_valid.append(tempinds[jj])
+                    flight_type_index_valid.append(self.all_behavior_type[tempinds[jj]])
                 else:
-                    behavior_test.append(self.all_behavior_cluster[tempinds[jj]])
-                    spike_test.append(self.all_spike_cluster[tempinds[jj]])
+                    behavior_test.append(self.all_behavior_clustered[tempinds[jj]])
+                    spike_test.append(self.all_spike_clustered[tempinds[jj]])
+                    flight_path_index_test.append(tempinds[jj])
+                    flight_type_index_test.append(self.all_behavior_type[tempinds[jj]])
 
         # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
         # print(len(spike_train), len(spike_valid), len(spike_test))  # 22 2 13
@@ -535,15 +552,57 @@ class Data_Prep_for_Raw():
             # self.samples_train = (np.hstack(behavior_train), np.hstack(spike_train))
             # self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
             # self.samples_test = (np.hstack(behavior_test), np.hstack(spike_test))
-            # print(f'Maximum flight length: {np.max([temp.shape[1] for temp in self.all_behavior_cluster])}')
+            # print(f'Maximum flight length: {np.max([temp.shape[1] for temp in self.all_behavior_clustered])}')
             if self.window_size is None and self.stride_train is None and self.stride_test is None: 
-                self.samples_train = self.split_each_trajectory(behavior_train, spike_train, self.max_len_of_flight_trajectory, self.max_len_of_flight_trajectory)
-                self.samples_valid = self.split_each_trajectory(behavior_valid, spike_valid, self.max_len_of_flight_trajectory, self.max_len_of_flight_trajectory)
-                self.samples_test = self.split_each_trajectory(behavior_test, spike_test, self.max_len_of_flight_trajectory, self.max_len_of_flight_trajectory)
+                self.samples_train = self.split_each_trajectory(
+                    behavior_train, 
+                    spike_train, 
+                    flight_path_index_train,
+                    flight_type_index_train,
+                    self.max_len_of_flight_trajectory, 
+                    self.max_len_of_flight_trajectory
+                )
+                self.samples_valid = self.split_each_trajectory(
+                    behavior_valid, 
+                    spike_valid, 
+                    flight_path_index_valid,
+                    flight_type_index_valid,
+                    self.max_len_of_flight_trajectory, 
+                    self.max_len_of_flight_trajectory
+                )
+                self.samples_test = self.split_each_trajectory(
+                    behavior_test, 
+                    spike_test, 
+                    flight_path_index_test,
+                    flight_type_index_test,
+                    self.max_len_of_flight_trajectory, 
+                    self.max_len_of_flight_trajectory
+                )
             else:
-                self.samples_train = self.split_each_trajectory(behavior_train, spike_train, self.window_size, self.stride_train)
-                self.samples_valid = self.split_each_trajectory(behavior_valid, spike_valid, self.window_size, self.stride_test)
-                self.samples_test = self.split_each_trajectory(behavior_test, spike_test, self.window_size, self.stride_test)    
+                self.samples_train = self.split_each_trajectory(
+                    behavior_train, 
+                    spike_train, 
+                    flight_path_index_train,
+                    flight_type_index_train,
+                    self.window_size, 
+                    self.stride_train
+                )
+                self.samples_valid = self.split_each_trajectory(
+                    behavior_valid, 
+                    spike_valid, 
+                    flight_path_index_valid,
+                    flight_type_index_valid,
+                    self.window_size, 
+                    self.stride_test
+                )
+                self.samples_test = self.split_each_trajectory(
+                    behavior_test, 
+                    spike_test, 
+                    flight_path_index_test,
+                    flight_type_index_test,
+                    self.window_size, 
+                    self.stride_test
+                )    
             # print('SUM:')
             # print(np.sum(np.array(self.samples_train[2])*1.0 -1.0))
             # print(np.sum(np.array(self.samples_valid[2])*1.0 -1.0))
@@ -561,6 +620,8 @@ class Data_Prep_for_Raw():
     def split_each_trajectory(
         behavior_list,
         spike_list,
+        flight_path_index_list,
+        flight_type_index_list,
         window_size=20,
         stride=20,
         pad_on_short=True,
@@ -571,19 +632,21 @@ class Data_Prep_for_Raw():
         - behavior_list: list of arrays, each (3, T_k); k: trajectory index
         - spike_list: list of arrays, each (Y, T_k) -- same Y across this session
         - returns:
-            samples: a tuple of three lists b_window_list, s_window_list, mask_list
+            samples: a tuple of five lists: b_window_list, s_window_list, mask_list, f_window_path_index_list, f_window_type_index_list
                      each list contains multiple numpy arrays: b_window shape (3, window_size), s_window shape (Y, window_size)
                      mask shape (window_size,) bool (True for real timesteps)
                      and then transform the three lists to three numpy arrays
+                - f_window_path_index_list: each element represents the index of individual flight path before the flight path is splitted into multiple windows
+                - f_window_type_index_list: each element represents the index of flight cluster type
         Notes:
         - padding values are zeros 
         - if pad_on_short=False, short trajectories are ignored
         """
         assert len(behavior_list) == len(spike_list)
 
-        b_window_list, s_window_list, mask_list = [], [], []
+        b_window_list, s_window_list, mask_list, f_window_path_index_list, f_window_type_index_list = [], [], [], [], []
 
-        for b_raw, s_raw in zip(behavior_list, spike_list): 
+        for b_raw, s_raw, flight_path_index_raw, flight_type_index_raw  in zip(behavior_list, spike_list, flight_path_index_list, flight_type_index_list): 
             TT = b_raw.shape[1]
 
             if TT >= window_size:
@@ -594,6 +657,8 @@ class Data_Prep_for_Raw():
                     b_window_list.append(b_window)
                     s_window_list.append(s_window)
                     mask_list.append(mask)
+                    f_window_path_index_list.append(flight_path_index_raw)
+                    f_window_type_index_list.append(flight_type_index_raw)
                 # include the last shorter tail
                 shorter_tail_length = TT % window_size
                 if shorter_tail_length > 0:
@@ -618,6 +683,8 @@ class Data_Prep_for_Raw():
                     b_window_list.append(b_pad)
                     s_window_list.append(s_pad)
                     mask_list.append(mask)
+                    f_window_path_index_list.append(flight_path_index_raw)
+                    f_window_type_index_list.append(flight_type_index_raw)
 
             else:
                 if not pad_on_short:
@@ -643,6 +710,8 @@ class Data_Prep_for_Raw():
                 b_window_list.append(b_pad)
                 s_window_list.append(s_pad)
                 mask_list.append(mask)
+                f_window_path_index_list.append(flight_path_index_raw)
+                f_window_type_index_list.append(flight_type_index_raw)
                 # print(f'b_window_list: {np.array(b_window_list)[:, 1, :]}')
                 # print(f'b_window_list.shape: {np.array(b_window_list).shape}')
                 # print(f's_window_list: {np.array(s_window_list)[:, 10, :]}')
@@ -650,7 +719,13 @@ class Data_Prep_for_Raw():
                 # print(f'mask_list: {np.array(mask_list)}')
                 # print(f'np.array(mask_list).shape: {np.array(mask_list).shape}')
 
-        return (np.array(b_window_list), np.array(s_window_list), np.array(mask_list)) # shapes: (N, 3, window_size), (N, num_of_neurons, window_size), (N, window_size)
+        return (
+            np.array(b_window_list), 
+            np.array(s_window_list), 
+            np.array(mask_list), 
+            np.array(f_window_path_index_list), 
+            np.array(f_window_type_index_list),
+        ) # shapes: (N, 3, window_size), (N, num_of_neurons, window_size), (N, window_size), (N,), (N,)
 
 
 def data_prep_for_mlp(all_input, all_label, train_num, valid_num, center_flag=False, use_fourier=False):
@@ -872,9 +947,9 @@ class BehaviorSpikeDataset():
         """
         if len(samples) == 2:
             (behavior, spike) = samples
-            mask = None
-        elif len(samples) == 3:
-            (behavior, spike, mask) = samples
+            mask, flight_path_index, flight_type_index = None, None, None
+        elif len(samples) >= 3:
+            (behavior, spike, mask, flight_path_index, flight_type_index) = samples
         else:
             raise ValueError(f"'samples' must contain 2 or 3 elements, got {len(samples)}")
 
@@ -882,6 +957,8 @@ class BehaviorSpikeDataset():
         spike = torch.from_numpy(spike).float()
         if mask is not None:
             mask = torch.from_numpy(mask).float()
+            flight_path_index = torch.from_numpy(flight_path_index).float()
+            flight_type_index = torch.from_numpy(flight_type_index).float()
 
         if behavior_std is not None:
             behavior_std = torch.from_numpy(behavior_std).float()
@@ -903,17 +980,21 @@ class BehaviorSpikeDataset():
         self.spike = spike
         self.mask = mask
         self.has_mask = mask is not None
+        self.flight_path_index = flight_path_index
+        self.flight_type_index = flight_type_index
 
     def __len__(self):
         return len(self.behavior)
     
     def __getitem__(self, idx):
         if self.has_mask:
-            DataSample = namedtuple('DataSample',['behavior', 'spike', 'mask'])
+            DataSample = namedtuple('DataSample',['behavior', 'spike', 'mask', 'flight_path_index', 'flight_type_index'])
             return DataSample(
                 behavior=self.behavior[idx],
                 spike=self.spike[idx],
                 mask=self.mask[idx],
+                flight_path_index=self.flight_path_index[idx],
+                flight_type_index=self.flight_type_index[idx],
             )
             # return self.behavior[idx], self.spike[idx], self.mask[idx]
         else:
@@ -1015,7 +1096,7 @@ def bat_data_loader(
         # print(f'spike_ratio.shape: {spike_ratio.shape}') # spike_ratio.shape: (95,)
         
         # flight cluster
-        all_behavior_cluster, all_behavior_type, all_spike_cluster = data_prep_for_raw.get_flight_cluster()
+        all_behavior_clustered, all_behavior_type, all_spike_clustered = data_prep_for_raw.get_flight_cluster()
         # split the flight-cluster data
         (samples_train, samples_valid, samples_test) = data_prep_for_raw.split_flight_cluster()
         if len(samples_train) == 2:
@@ -1029,10 +1110,11 @@ def bat_data_loader(
             behavior_dim = behavior_train.shape[0]
             unit_num_dict[session_name] = spike_train.shape[0]
 
-        elif len(samples_train) == 3: # for modeling temporal dependencies
-            (behavior_train, spike_train, mask_train) = samples_train # shapes: (N, 3, window_size), (N, num_of_neurons, window_size), (N, window_size)
-            (behavior_valid, spike_valid, mask_valid) = samples_valid
-            (behavior_test, spike_test, mask_test) = samples_test
+        elif len(samples_train) >= 3: # for modeling temporal dependencies
+            # shapes: (N, 3, window_size), (N, num_of_neurons, window_size), (N, window_size), (N,), (N,)
+            (behavior_train, spike_train, mask_train, flight_path_index_train, flight_type_index_train) = samples_train 
+            (behavior_valid, spike_valid, mask_valid, flight_path_index_valid, flight_type_index_valid) = samples_valid
+            (behavior_test, spike_test, mask_test, flight_path_index_test, flight_type_index_test) = samples_test
 
             behavior_dim = behavior_train.shape[1]
             unit_num_dict[session_name] = spike_train.shape[1]
@@ -1054,6 +1136,8 @@ def bat_data_loader(
             data_input = np.transpose(behavior_train, (0, 2, 1))
             data_output = np.transpose(spike_train, (0, 2, 1))
             data_mask = np.copy(mask_train) # 1.0 for real timesteps
+            data_flight_path_index = np.copy(flight_path_index_train)
+            data_flight_type_index = np.copy(flight_type_index_train)
             behavior_mean = np.nanmean(data_input, axis=(0,1), keepdims=True)
             behavior_std = np.nanstd(data_input, axis=(0,1), keepdims=True)
             spike_std = np.nanstd(data_output, axis=(0,1), keepdims=True)
@@ -1064,7 +1148,7 @@ def bat_data_loader(
         meta_info_dict['spike_std'][session_name] = spike_std
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask),
+            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask, data_flight_path_index, data_flight_type_index),
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
@@ -1084,11 +1168,13 @@ def bat_data_loader(
             data_input = np.transpose(behavior_valid, (0, 2, 1))
             data_output = np.transpose(spike_valid, (0, 2, 1))
             data_mask = np.copy(mask_valid)
+            data_flight_path_index = np.copy(flight_path_index_valid)
+            data_flight_type_index = np.copy(flight_type_index_valid)
             data_input = np.nan_to_num(data_input) 
             data_output = np.nan_to_num(data_output) 
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask),
+            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask, data_flight_path_index, data_flight_type_index),
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
@@ -1107,11 +1193,13 @@ def bat_data_loader(
             data_input = np.transpose(behavior_test, (0, 2, 1))
             data_output = np.transpose(spike_test, (0, 2, 1))
             data_mask = np.copy(mask_test)
+            data_flight_path_index = np.copy(flight_path_index_test)
+            data_flight_type_index = np.copy(flight_type_index_test)
             data_input = np.nan_to_num(data_input) 
             data_output = np.nan_to_num(data_output) 
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
-            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask),
+            samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask, data_flight_path_index, data_flight_type_index),
             behavior_mean = behavior_mean,
             behavior_std = behavior_std,
             # spike_std = spike_std,
