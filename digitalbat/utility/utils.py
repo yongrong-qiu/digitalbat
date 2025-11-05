@@ -7,6 +7,9 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import pdist, squareform
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
+from matplotlib import pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib import cm
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union
@@ -245,6 +248,104 @@ def generate_2d_rate_map(
     smoothed_rate_map = gaussian_filter(rate_map, sigma=sigma)
 
     return x_edges, y_edges, rate_map, smoothed_rate_map
+
+def plot_2d_rate_map(
+    unit: int, # neuron index
+    target_type: int, # flight cluster type index
+    loc_xx: np.ndarray,  # 1D array of x-coordinates of the animal's location over time
+    loc_yy: np.ndarray,  # 1D array of y-coordinates of the animal's location over time
+    spike_count_val: np.ndarray,  # 1D array of spike counts for one neuron at each time point
+    spike_count_pred: np.ndarray,  # 1D array of spike counts for one neuron at each time point
+    loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
+    loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
+    loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
+    dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
+):
+    """
+    For a specific "unit" and a specific "target_type", plot the 2d rate map for the recorded and predicted data
+    """
+    x_edges, y_edges, rate_map, smoothed_rate_map = generate_2d_rate_map(
+        loc_xx=loc_xx,
+        loc_yy=loc_yy,
+        unit_spike_count=spike_count_val,
+        loc_xx_lim=loc_xx_lim,
+        loc_yy_lim=loc_yy_lim,
+        loc_bin_width=loc_bin_width,
+        dt=dt,
+    )
+    #    
+    _, _, _, smoothed_rate_map_pred = generate_2d_rate_map(
+        loc_xx=loc_xx,
+        loc_yy=loc_yy,
+        unit_spike_count=spike_count_pred,
+        loc_xx_lim=loc_xx_lim,
+        loc_yy_lim=loc_yy_lim,
+        loc_bin_width=loc_bin_width,
+        dt=dt,
+    )
+    # Plot smoothed maps
+    vmin = np.min(np.concatenate((smoothed_rate_map, smoothed_rate_map_pred), ))
+    vmax = np.max(np.concatenate((smoothed_rate_map, smoothed_rate_map_pred), ))
+    fig, axs = plt.subplots(1, 2, figsize=(5, 2))
+    im0 = axs[0].imshow(smoothed_rate_map.T, origin='lower', vmin=vmin, vmax=vmax,
+                        extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                        aspect='auto', cmap='hot_r')
+    axs[0].set_title(f"Unit: {unit}; type: {target_type}; recorded")
+    axs[0].set_xlabel("X position")
+    axs[0].set_ylabel("Y position")
+    plt.colorbar(im0, ax=axs[0], label="Spikes/s")
+    im1 = axs[1].imshow(smoothed_rate_map_pred.T, origin='lower', vmin=vmin, vmax=vmax,
+                        extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                        aspect='auto', cmap='hot_r')
+    axs[1].set_title("Predicted")
+    axs[1].set_xlabel("X position")
+    # axs[1].set_ylabel("Y position")
+    plt.colorbar(im1, ax=axs[1], label="Spikes/s")
+    plt.tight_layout()
+
+def plot_2d_trajectory(
+    unit: int, # neuron index
+    target_type: int, # flight cluster type index
+    loc_xx: np.ndarray,  # 1D array of x-coordinates of the animal's location over time
+    loc_yy: np.ndarray,  # 1D array of y-coordinates of the animal's location over time
+    spike_count_val: np.ndarray,  # 1D array of spike counts for one neuron at each time point
+    spike_count_pred: np.ndarray,  # 1D array of spike counts for one neuron at each time point
+    loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
+    loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
+):
+    """
+    2D trajectory with colors indicating neural responses along the path
+    For a specific "unit" and a specific "target_type", plot the 2d trajectory for the recorded and predicted data
+    """
+    # Make line segments between successive points
+    points = np.array([loc_xx, loc_yy]).T.reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+    # Normalize spike counts for colormap
+    norm = plt.Normalize(np.stack([spike_count_val, spike_count_pred]).min(), np.stack([spike_count_val, spike_count_pred]).max())
+    # Create a line collection with color mapping
+    lc_val = LineCollection(segments, cmap='hot', norm=norm)
+    lc_val.set_array(spike_count_val)
+    lc_val.set_linewidth(1)
+    lc_pred = LineCollection(segments, cmap='hot', norm=norm)
+    lc_pred.set_array(spike_count_pred)
+    lc_pred.set_linewidth(1)
+    # plot
+    fig, axs = plt.subplots(1, 2, figsize=(5, 2))
+    line = axs[0].add_collection(lc_val)
+    axs[0].set_title(f"Unit: {unit}; type: {target_type}; recorded")
+    axs[0].set_xlim(loc_xx_lim)
+    axs[0].set_ylim(loc_yy_lim)
+    axs[0].set_xlabel("X position")
+    axs[0].set_ylabel("Y position")
+    plt.colorbar(line, ax=axs[0], label="Spike count")
+    line = axs[1].add_collection(lc_pred)
+    axs[1].set_title("Predicted")
+    axs[1].set_xlabel("X position")
+    axs[1].set_xlim(loc_xx_lim)
+    axs[1].set_ylim(loc_yy_lim)
+    # axs[1].set_ylabel("Y position")
+    plt.colorbar(line, ax=axs[1], label="Spike count")
+    plt.tight_layout()
 
 
 def poisson_fraction_deviance_explained(y_true: np.ndarray, y_pred: np.ndarray) -> float:
