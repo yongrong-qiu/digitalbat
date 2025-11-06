@@ -53,7 +53,13 @@ class Bat_Transformer(nn.Module):
 
         self.final_activation = final_activation
 
-    def forward(self, session_name: str, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        session_name: str, 
+        x: torch.Tensor, 
+        mask: torch.Tensor,
+        return_attn_weights: bool = False,
+    ) -> torch.Tensor:
         """
         Forward pass through the model.
 
@@ -77,9 +83,19 @@ class Bat_Transformer(nn.Module):
 
         x = self.embed(x)
 
-        for layer in self.layers:
-            x = layer(x, x, x, attn_mask=attn_mask)
+        if return_attn_weights:
+            attn_weights_list = []
+            for layer in self.layers:
+                x, attn_weights = layer(x, x, x, attn_mask=attn_mask, return_attn_weights=return_attn_weights)
+                attn_weights_list.append(attn_weights)
+        else:
+            for layer in self.layers:
+                x = layer(x, x, x, attn_mask=attn_mask, return_attn_weights=return_attn_weights)
+    
         x = self.readouts[session_name](x)
         x = self.final_activation(x)
 
-        return x
+        if return_attn_weights:
+            return x, attn_weights_list
+        else:
+            return x

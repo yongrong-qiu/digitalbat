@@ -323,16 +323,25 @@ class TransformerEncoderRoPE(nn.Module):
         value, 
         attn_mask=None, 
         is_causal=False, 
+        return_attn_weights=False,
     ):
         # Build rotary embeddings
         batch_size, seq_len, D = query.shape
         sin, cos = build_rotary_emb(seq_len=seq_len, dim_head=self.head_dim, device=query.device)
 
         # Forward with RoPE
-        out = self.attention(query, key, value, sin=sin, cos=cos, attn_mask=attn_mask, is_causal=is_causal)
+        if return_attn_weights:
+            out, attn_weights= self.attention(query, key, value, sin=sin, cos=cos, attn_mask=attn_mask, is_causal=is_causal, return_attn_weights=return_attn_weights)
+        else:
+            out = self.attention(query, key, value, sin=sin, cos=cos, attn_mask=attn_mask, is_causal=is_causal, return_attn_weights=return_attn_weights)
+        
         out = out + self.dropout(out)
         out = self.norm1(out)
 
         out = out + self.dropout(self.ff(out))
         out = self.norm2(out)
-        return out
+
+        if return_attn_weights:
+            return out, attn_weights 
+        else:
+            return out
