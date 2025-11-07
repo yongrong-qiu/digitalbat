@@ -286,6 +286,7 @@ def bat_former_trainer(
     model, 
     dataloaders, 
     device,
+    is_causal: bool = False, 
     n_epochs=200, # number of epochs to run
     lr=0.0001, # learning rate
     loss_fn: nn.Module | None = None, 
@@ -325,7 +326,7 @@ def bat_former_trainer(
                 y_batch = batch.spike.to(device)
                 mask_batch = batch.mask.to(device)
                 # forward pass
-                y_pred = model(session_name, X_batch, mask_batch)
+                y_pred = model(session_name, X_batch, mask_batch, is_causal=is_causal)
                 # y_pred.shape: (14, 20, 289), y_pred[mask_batch == 1.0].shape: (260, 289)
                 loss = loss_fn(y_pred[mask_batch == 1.0], y_batch[mask_batch == 1.0]) # compute loss only on valid timesteps
                 # backward pass
@@ -343,7 +344,7 @@ def bat_former_trainer(
                 X_val = batch.behavior.to(device)
                 y_val = batch.spike.to(device)
                 mask_val = batch.mask.to(device)
-                y_pred = model(session_name, X_val, mask_val)
+                y_pred = model(session_name, X_val, mask_val, is_causal=is_causal)
                 y_val_np = y_val.detach()[mask_val == 1.0].cpu().numpy() # compute scores only on valid timesteps
                 y_pred_np = y_pred.detach()[mask_val == 1.0].cpu().numpy()
                 # TODO: in the case of multiple batches of validation data, we should concatenate the data and then compute the correlation

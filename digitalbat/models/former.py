@@ -58,6 +58,7 @@ class Bat_Transformer(nn.Module):
         session_name: str, 
         x: torch.Tensor, 
         mask: torch.Tensor,
+        is_causal: bool = False, 
         return_attn_weights: bool = False,
     ) -> torch.Tensor:
         """
@@ -86,11 +87,11 @@ class Bat_Transformer(nn.Module):
         if return_attn_weights:
             attn_weights_list = []
             for layer in self.layers:
-                x, attn_weights = layer(x, x, x, attn_mask=attn_mask, return_attn_weights=return_attn_weights)
+                x, attn_weights = layer(x, x, x, attn_mask=attn_mask, is_causal=is_causal, return_attn_weights=return_attn_weights)
                 attn_weights_list.append(attn_weights)
         else:
             for layer in self.layers:
-                x = layer(x, x, x, attn_mask=attn_mask, return_attn_weights=return_attn_weights)
+                x = layer(x, x, x, attn_mask=attn_mask, is_causal=is_causal, return_attn_weights=return_attn_weights)
     
         x = self.readouts[session_name](x)
         x = self.final_activation(x)
