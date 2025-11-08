@@ -340,6 +340,7 @@ def bat_former_trainer(
         temp_scores_list = []
         for session_name, session_data in dataloaders['valid'].items():
             # print(session_name, session_data)
+            y_val_np_list, y_pred_np_list = [], []
             for batch_id, batch in enumerate(session_data):
                 X_val = batch.behavior.to(device)
                 y_val = batch.spike.to(device)
@@ -347,9 +348,13 @@ def bat_former_trainer(
                 y_pred = model(session_name, X_val, mask_val, is_causal=is_causal)
                 y_val_np = y_val.detach()[mask_val == 1.0].cpu().numpy() # compute scores only on valid timesteps
                 y_pred_np = y_pred.detach()[mask_val == 1.0].cpu().numpy()
-                # TODO: in the case of multiple batches of validation data, we should concatenate the data and then compute the correlation
-                temp_scores = valid_fn(y_val_np, y_pred_np) # an array of scores for spiking units in one batch data within one session of data
-                temp_scores_list.append(temp_scores)
+                # y_pred.shape: torch.Size([48, 70, 95]), y_pred_np.shape: (1732, 95) ... 95: number of neurons, 48: batch_size
+                y_val_np_list.append(y_val_np)
+                y_pred_np_list.append(y_pred_np)
+            y_val_np = np.vstack(y_val_np_list)
+            y_pred_np = np.vstack(y_pred_np_list)
+            temp_scores = valid_fn(y_val_np, y_pred_np) # an array of scores for spiking units in one batch data within one session of data
+            temp_scores_list.append(temp_scores)
         if valid_stat == 'mean':
             val_score = np.nanmean(np.hstack(temp_scores_list))
         elif valid_stat == 'median':
