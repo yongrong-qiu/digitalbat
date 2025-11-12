@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import math
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 class ELU1(nn.Module):
@@ -213,7 +213,7 @@ class MultiheadAttentionRoPE(nn.Module):
         value, 
         sin=None, 
         cos=None, 
-        attn_mask=None, 
+        attn_mask: Optional[torch.BoolTensor] = None, 
         dropout_p=0.0, 
         is_causal=False, 
         return_attn_weights=False,
@@ -244,7 +244,39 @@ class MultiheadAttentionRoPE(nn.Module):
             Q = apply_rotary_pos_emb(Q, sin, cos)
             K = apply_rotary_pos_emb(K, sin, cos)
 
-        if not is_bigbird and not return_attn_weights:
+        d_k = Q.size(-1)
+        L_q, L_k = Q.size(-2), K.size(-2)
+
+        # Apply big bird style sparse attention mask if needed
+        if is_bigbird:
+            # sliding window attention
+            assert attention_window_size%2==1, "attention_window_size should be an odd number"
+            shift = (attention_window_size-1)//2
+            mask1 = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=shift)
+            mask2 = ~torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=-shift-1)
+            bigbird_mask = mask1 * mask2
+            # fig, ax = plt.subplots(figsize=(3,3))
+            # ax.imshow(mask.cpu().numpy())
+            #
+            # global attention
+            if num_global > 0:
+                global_idx = torch.arange(num_global, device=Q.device)
+                bigbird_mask[:, global_idx] = True  # all tokens attend to globals
+                bigbird_mask[global_idx, :] = True  # globals attend to all tokens
+            # fig, ax = plt.subplots(figsize=(3,3))
+            # ax.imshow(mask.cpu().numpy())
+            #
+            # random attention
+            if num_random > 0:
+                torch.manual_seed(1) 
+                rand = torch.randint(0, L_k, (L_q, num_random), device=Q.device)
+                bigbird_mask.scatter_(1, rand, True)
+            # fig, ax = plt.subplots(figsize=(3,3))
+            # ax.imshow(mask.cpu().numpy())
+            #
+            attn_mask = attn_mask & bigbird_mask[None, None, :, :]
+
+        if not return_attn_weights:
             # Efficient attention (no weights returned)
             attn_output = F.scaled_dot_product_attention(
                 Q, K, V,
@@ -253,11 +285,8 @@ class MultiheadAttentionRoPE(nn.Module):
                 is_causal=is_causal,
             )
             attn_weights = None
-        else:
+        else: # TODO: Somehow, the following code yielded NaNs for val_score, so could not be used for training.
             # Compute attention scores manually to extract weights
-            d_k = Q.size(-1)
-            L_q, L_k = Q.size(-2), K.size(-2)
-
             attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / d_k**0.5
 
             attn_bias = torch.zeros(Q.size(0), Q.size(1), L_q, L_k, dtype=Q.dtype, device=Q.device)
@@ -267,36 +296,6 @@ class MultiheadAttentionRoPE(nn.Module):
                 # assert attn_mask is None  # TODO: do we need this? can we have attn_mask together with causal
                 causal_mask = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool))
                 attn_bias.masked_fill_(~causal_mask, float('-inf'))
-
-            # Apply big bird style sparse attention mask if needed
-            if is_bigbird:
-                pass
-                # # sliding window attention
-                # assert attention_window_size%2==1, "attention_window_size should be an odd number"
-                # shift = (attention_window_size-1)//2
-                # mask1 = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=shift)
-                # mask2 = ~torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=-shift-1)
-                # bigbird_mask = mask1 * mask2
-                # # fig, ax = plt.subplots(figsize=(3,3))
-                # # ax.imshow(mask.cpu().numpy())
-                # #
-                # # global attention
-                # if num_global > 0:
-                #     global_idx = torch.arange(num_global, device=Q.device)
-                #     bigbird_mask[:, global_idx] = True  # all tokens attend to globals
-                #     bigbird_mask[global_idx, :] = True  # globals attend to all tokens
-                # # fig, ax = plt.subplots(figsize=(3,3))
-                # # ax.imshow(mask.cpu().numpy())
-                # #
-                # # random attention
-                # if num_random > 0:
-                #     torch.manual_seed(1) 
-                #     rand = torch.randint(0, L_k, (L_q, num_random), device=Q.device)
-                #     bigbird_mask.scatter_(1, rand, True)
-                # # fig, ax = plt.subplots(figsize=(3,3))
-                # # ax.imshow(mask.cpu().numpy())
-                # #
-                # attn_scores = attn_scores.masked_fill(~bigbird_mask, float('-inf'))
 
             if attn_mask is not None:
                 attn_bias.masked_fill_(~attn_mask, float('-inf'))
