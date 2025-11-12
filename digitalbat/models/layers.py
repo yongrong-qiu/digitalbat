@@ -256,46 +256,52 @@ class MultiheadAttentionRoPE(nn.Module):
         else:
             # Compute attention scores manually to extract weights
             d_k = Q.size(-1)
+            L_q, L_k = Q.size(-2), K.size(-2)
+
             attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / d_k**0.5
 
-            if attn_mask is not None:
-                attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
+            attn_bias = torch.zeros(Q.size(0), Q.size(1), L_q, L_k, dtype=Q.dtype, device=Q.device)
 
-            L_q, L_k = Q.size(-2), K.size(-2)
             # Apply causal mask if needed
             if is_causal:
+                # assert attn_mask is None  # TODO: do we need this? can we have attn_mask together with causal
                 causal_mask = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool))
-                attn_scores = attn_scores.masked_fill(~causal_mask, float('-inf'))
+                attn_bias.masked_fill_(~causal_mask, float('-inf'))
 
             # Apply big bird style sparse attention mask if needed
             if is_bigbird:
-                # sliding window attention
-                assert attention_window_size%2==1, "attention_window_size should be an odd number"
-                shift = (attention_window_size-1)//2
-                mask1 = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=shift)
-                mask2 = ~torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=-shift-1)
-                bigbird_mask = mask1 * mask2
-                # fig, ax = plt.subplots(figsize=(3,3))
-                # ax.imshow(mask.cpu().numpy())
-                #
-                # global attention
-                if num_global > 0:
-                    global_idx = torch.arange(num_global, device=Q.device)
-                    bigbird_mask[:, global_idx] = True  # all tokens attend to globals
-                    bigbird_mask[global_idx, :] = True  # globals attend to all tokens
-                # fig, ax = plt.subplots(figsize=(3,3))
-                # ax.imshow(mask.cpu().numpy())
-                #
-                # random attention
-                if num_random > 0:
-                    torch.manual_seed(1) 
-                    rand = torch.randint(0, L_k, (L_q, num_random), device=Q.device)
-                    bigbird_mask.scatter_(1, rand, True)
-                # fig, ax = plt.subplots(figsize=(3,3))
-                # ax.imshow(mask.cpu().numpy())
-                #
-                attn_scores = attn_scores.masked_fill(~bigbird_mask, float('-inf'))
+                pass
+                # # sliding window attention
+                # assert attention_window_size%2==1, "attention_window_size should be an odd number"
+                # shift = (attention_window_size-1)//2
+                # mask1 = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=shift)
+                # mask2 = ~torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=-shift-1)
+                # bigbird_mask = mask1 * mask2
+                # # fig, ax = plt.subplots(figsize=(3,3))
+                # # ax.imshow(mask.cpu().numpy())
+                # #
+                # # global attention
+                # if num_global > 0:
+                #     global_idx = torch.arange(num_global, device=Q.device)
+                #     bigbird_mask[:, global_idx] = True  # all tokens attend to globals
+                #     bigbird_mask[global_idx, :] = True  # globals attend to all tokens
+                # # fig, ax = plt.subplots(figsize=(3,3))
+                # # ax.imshow(mask.cpu().numpy())
+                # #
+                # # random attention
+                # if num_random > 0:
+                #     torch.manual_seed(1) 
+                #     rand = torch.randint(0, L_k, (L_q, num_random), device=Q.device)
+                #     bigbird_mask.scatter_(1, rand, True)
+                # # fig, ax = plt.subplots(figsize=(3,3))
+                # # ax.imshow(mask.cpu().numpy())
+                # #
+                # attn_scores = attn_scores.masked_fill(~bigbird_mask, float('-inf'))
 
+            if attn_mask is not None:
+                attn_bias.masked_fill_(~attn_mask, float('-inf'))
+
+            attn_scores += attn_bias
             attn_weights = F.softmax(attn_scores, dim=-1)
             attn_output = torch.matmul(attn_weights, V)
 
