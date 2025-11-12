@@ -217,6 +217,10 @@ class MultiheadAttentionRoPE(nn.Module):
         dropout_p=0.0, 
         is_causal=False, 
         return_attn_weights=False,
+        is_bigbird=False, # whether to use bigbird style sparse attention
+        attention_window_size=3, # bigbird style sparse attention
+        num_global=2, # bigbird style sparse attention
+        num_random=1, # bigbird style sparse attention
     ):
         """
         query, key, value: (batch_size, seq_len, embed_dim)
@@ -240,7 +244,7 @@ class MultiheadAttentionRoPE(nn.Module):
             Q = apply_rotary_pos_emb(Q, sin, cos)
             K = apply_rotary_pos_emb(K, sin, cos)
 
-        if not return_attn_weights:
+        if not is_bigbird and not return_attn_weights:
             # Efficient attention (no weights returned)
             attn_output = F.scaled_dot_product_attention(
                 Q, K, V,
@@ -257,11 +261,40 @@ class MultiheadAttentionRoPE(nn.Module):
             if attn_mask is not None:
                 attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
 
+            L_q, L_k = Q.size(-2), K.size(-2)
             # Apply causal mask if needed
             if is_causal:
-                L_q, L_k = Q.size(-2), K.size(-2)
                 causal_mask = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool))
                 attn_scores = attn_scores.masked_fill(~causal_mask, float('-inf'))
+
+            # Apply big bird style sparse attention mask if needed
+            if is_bigbird:
+                # sliding window attention
+                assert attention_window_size%2==1, "attention_window_size should be an odd number"
+                shift = (attention_window_size-1)//2
+                mask1 = torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=shift)
+                mask2 = ~torch.tril(torch.ones(L_q, L_k, device=Q.device, dtype=torch.bool), diagonal=-shift-1)
+                bigbird_mask = mask1 * mask2
+                # fig, ax = plt.subplots(figsize=(3,3))
+                # ax.imshow(mask.cpu().numpy())
+                #
+                # global attention
+                if num_global > 0:
+                    global_idx = torch.arange(num_global, device=Q.device)
+                    bigbird_mask[:, global_idx] = True  # all tokens attend to globals
+                    bigbird_mask[global_idx, :] = True  # globals attend to all tokens
+                # fig, ax = plt.subplots(figsize=(3,3))
+                # ax.imshow(mask.cpu().numpy())
+                #
+                # random attention
+                if num_random > 0:
+                    torch.manual_seed(1) 
+                    rand = torch.randint(0, L_k, (L_q, num_random), device=Q.device)
+                    bigbird_mask.scatter_(1, rand, True)
+                # fig, ax = plt.subplots(figsize=(3,3))
+                # ax.imshow(mask.cpu().numpy())
+                #
+                attn_scores = attn_scores.masked_fill(~bigbird_mask, float('-inf'))
 
             attn_weights = F.softmax(attn_scores, dim=-1)
             attn_output = torch.matmul(attn_weights, V)
@@ -324,6 +357,10 @@ class TransformerEncoderRoPE(nn.Module):
         attn_mask=None, 
         is_causal=False, 
         return_attn_weights=False,
+        is_bigbird=False, # whether to use bigbird style sparse attention
+        attention_window_size=3, # bigbird style sparse attention
+        num_global=2, # bigbird style sparse attention
+        num_random=1, # bigbird style sparse attention
     ):
         # Build rotary embeddings
         batch_size, seq_len, D = query.shape
@@ -331,9 +368,35 @@ class TransformerEncoderRoPE(nn.Module):
 
         # Forward with RoPE
         if return_attn_weights:
-            out, attn_weights= self.attention(query, key, value, sin=sin, cos=cos, attn_mask=attn_mask, is_causal=is_causal, return_attn_weights=return_attn_weights)
+            out, attn_weights= self.attention(
+                query, 
+                key, 
+                value, 
+                sin=sin, 
+                cos=cos, 
+                attn_mask=attn_mask, 
+                is_causal=is_causal, 
+                return_attn_weights=return_attn_weights,
+                is_bigbird=is_bigbird,
+                attention_window_size=attention_window_size,
+                num_global=num_global,
+                num_random=num_random,
+            )
         else:
-            out = self.attention(query, key, value, sin=sin, cos=cos, attn_mask=attn_mask, is_causal=is_causal, return_attn_weights=return_attn_weights)
+            out = self.attention(
+                query, 
+                key, 
+                value, 
+                sin=sin, 
+                cos=cos, 
+                attn_mask=attn_mask, 
+                is_causal=is_causal, 
+                return_attn_weights=return_attn_weights,
+                is_bigbird=is_bigbird,
+                attention_window_size=attention_window_size,
+                num_global=num_global,
+                num_random=num_random,
+            )
         
         out = out + self.dropout(out)
         out = self.norm1(out)

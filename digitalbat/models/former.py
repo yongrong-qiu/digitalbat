@@ -60,6 +60,10 @@ class Bat_Transformer(nn.Module):
         mask: torch.Tensor,
         is_causal: bool = False, 
         return_attn_weights: bool = False,
+        is_bigbird=False, # whether to use bigbird style sparse attention
+        attention_window_size=3, # bigbird style sparse attention
+        num_global=2, # bigbird style sparse attention
+        num_random=1, # bigbird style sparse attention
     ) -> torch.Tensor:
         """
         Forward pass through the model.
@@ -87,11 +91,33 @@ class Bat_Transformer(nn.Module):
         if return_attn_weights:
             attn_weights_list = []
             for layer in self.layers:
-                x, attn_weights = layer(x, x, x, attn_mask=attn_mask, is_causal=is_causal, return_attn_weights=return_attn_weights)
+                x, attn_weights = layer(
+                    x, 
+                    x, 
+                    x, 
+                    attn_mask=attn_mask, 
+                    is_causal=is_causal, 
+                    return_attn_weights=return_attn_weights,
+                    is_bigbird=is_bigbird,
+                    attention_window_size=attention_window_size,
+                    num_global=num_global,
+                    num_random=num_random,
+                )
                 attn_weights_list.append(attn_weights)
         else:
             for layer in self.layers:
-                x = layer(x, x, x, attn_mask=attn_mask, is_causal=is_causal, return_attn_weights=return_attn_weights)
+                x = layer(
+                    x, 
+                    x, 
+                    x, 
+                    attn_mask=attn_mask, 
+                    is_causal=is_causal, 
+                    return_attn_weights=return_attn_weights,
+                    is_bigbird=is_bigbird,
+                    attention_window_size=attention_window_size,
+                    num_global=num_global,
+                    num_random=num_random,
+                )
     
         x = self.readouts[session_name](x)
         x = self.final_activation(x)
