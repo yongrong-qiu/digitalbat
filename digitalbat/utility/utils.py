@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans
 from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib import cm
+import torch
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union
@@ -632,3 +633,16 @@ class FlightClusters:
             self.results['dur'] = durs
 
         return self.results
+
+
+def set_random_state(seed):
+    """
+    Set random seed for pytorch
+    """
+    torch.backends.cudnn.benchmark = False
+    torch.cuda.manual_seed(seed)
+    
+    torch.backends.cudnn.deterministic = True
+    np.random.seed(seed)
+    torch.manual_seed(seed)    # reproducible
+    return None
