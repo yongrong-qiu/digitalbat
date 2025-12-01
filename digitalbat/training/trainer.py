@@ -296,6 +296,8 @@ def bat_former_trainer(
     loss_fn: nn.Module | None = None, 
     valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None, 
     valid_stat='mean', # after computing validation scores for all neurons, we calculate a single number (statistics) as 'val_score' for these neurons
+    save_model: bool = False, # whether to save model or not
+    model_name: str = 'best_model_weights.pth',
     # verbose=False, # not display the progress
 ):
     """
@@ -386,6 +388,8 @@ def bat_former_trainer(
             best_score = val_score
             best_weights = copy.deepcopy(model.state_dict())
 
-    # restore model and return best accuracy
+    # save model, restore model and return best accuracy
+    if save_model:
+        torch.save(model.state_dict(), model_name)
     model.load_state_dict(best_weights)
     return best_score, best_weights, val_scores
