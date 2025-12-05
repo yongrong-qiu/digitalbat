@@ -348,6 +348,45 @@ def plot_2d_trajectory_response(
     plt.colorbar(line, ax=axs[1], label="Spike count")
     plt.tight_layout()
 
+def plot_3d_trajectory_time(
+    trajectory_3d, # numpy array, shape (T, 3)
+    loc_lim, # numpy array, shape (3, 2)
+    flight_cluster_type: int = 1, # the cluster type of the flight path, such as: 1, 2, 3, etc.
+    time_bin_width = 0.1, # bin_width for each time point in trajectory_3d
+):
+    """
+    For a flight path, plot a 3D trajectory as a continuous line, with color indicating time
+    """
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
+    T = trajectory_3d.shape[0]
+    points = np.copy(trajectory_3d)
+    # Create line segments between consecutive points
+    segments = np.concatenate([points[:-1, None, :], points[1:, None, :]], axis=1)
+    # Time array for coloring
+    t = np.linspace(0, T*time_bin_width, T - 1)
+    #
+    fig = plt.figure(figsize=(7, 6))
+    ax = fig.add_subplot(111, projection='3d')
+    # Create colored 3D line
+    lc = Line3DCollection(segments, array=t, cmap='viridis', linewidth=2)
+    ax.add_collection(lc)
+    # Set limits
+    ax.set_xlim(loc_lim[0])
+    ax.set_ylim(loc_lim[1])
+    ax.set_zlim(loc_lim[2])
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_title(f"3D trajectory for Type {flight_cluster_type}")
+    # Colorbar
+    fig.subplots_adjust(right=0.9)
+    cax = fig.add_axes([0.9, 0.2, 0.02, 0.3])  # Adjust to fit within bounds
+    fig.colorbar(lc, cax=cax)
+    cax.set_ylabel('Time [s]')
+    # cbar = fig.colorbar(lc, ax=ax, shrink=0.5)
+    # cbar.set_label("Time [s]")
+
 
 def poisson_fraction_deviance_explained(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """
