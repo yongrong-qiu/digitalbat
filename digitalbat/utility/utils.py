@@ -304,7 +304,7 @@ def plot_2d_rate_map(
     plt.colorbar(im1, ax=axs[1], label="Spikes/s")
     plt.tight_layout()
 
-def plot_2d_trajectory(
+def plot_2d_trajectory_response(
     unit: int, # neuron index
     target_type: int, # flight cluster type index
     loc_xx: np.ndarray,  # 1D array of x-coordinates of the animal's location over time
