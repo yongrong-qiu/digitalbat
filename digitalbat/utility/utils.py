@@ -374,7 +374,12 @@ def plot_3d_trajectory_time(
     # Set limits
     ax.set_xlim(loc_lim[0])
     ax.set_ylim(loc_lim[1])
-    ax.set_zlim(loc_lim[2])
+    # TODO: For some sessions, such as Dataset_1_32622_231009, 1st flight path in test data
+    # the z limits offered by 'loc_lim' is zero, but 'trajectory_3d' has negative values in z-axis
+    if trajectory_3d[:,2].min() > loc_lim[2,0]:
+        ax.set_zlim(loc_lim[2])
+    else:
+        ax.set_zlim([-loc_lim[2,1], loc_lim[2,1]])
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
@@ -685,3 +690,34 @@ def set_random_state(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)    # reproducible
     return None
+
+
+def compute_shift_attention(attn):
+    """
+    For each time point, we reindex the attention matrix by a specific temporal offset relative to the query position, 
+    producing a time-lag importance profile that quantifies how strongly each position attends to the past, present, and future. 
+    This transformation enables direct comparison of temporal dependencies across all positions in the sequence.
+
+    attn: attention weight matrix, numpy array of shape (T, T)
+    returns shift_scores: (T, 2T-1), where each column corresponds to a time-lag Δ
+    """
+    T = attn.shape[0]
+    max_shift = T - 1
+    num_shifts = 2*T - 1
+
+    # Prepare output
+    shift_scores = np.zeros((T, num_shifts), dtype=attn.dtype)
+
+    # Compute all pairwise Δ = j - i
+    i = np.arange(T)[:, None]   # shape (T,1)
+    j = np.arange(T)[None, :]   # shape (1,T)
+    diff = j - i                # (T,T), values from -(T-1) … (T-1)
+
+    # Shift diff to valid array indices
+    col_idx = diff + max_shift  # now in 0 … 2T-2
+
+    # "Scatter add" into shift_scores
+    for r in range(T):
+        shift_scores[r].put(col_idx[r], attn[r])
+
+    return shift_scores
