@@ -371,6 +371,8 @@ def plot_3d_trajectory_time(
     # Create colored 3D line
     lc = Line3DCollection(segments, array=t, cmap='viridis', linewidth=2)
     ax.add_collection(lc)
+    # start of a flight path
+    ax.scatter(*trajectory_3d[0,:], marker='*', c='red')
     # Set limits
     ax.set_xlim(loc_lim[0])
     ax.set_ylim(loc_lim[1])
