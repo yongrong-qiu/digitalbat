@@ -681,6 +681,89 @@ class FlightClusters:
         return self.results
 
 
+def compute_fractional_abscissa(path):
+    """
+    Compute the normalized arc-length parameter (fractional abscissa)
+    for a 2D or 3D trajectory.
+
+    Parameters
+    ----------
+    path : array of shape (T, D)
+        The flight path, where T is the number of time points and
+        D = 2 or 3 is the spatial dimension (x,y) or (x,y,z).
+
+    Returns
+    -------
+    frac : array of shape (T,)
+        The normalized arc-length values in the range [0, 1],
+        where frac[0] = 0 at the starting point and frac[-1] = 1 at the end.
+
+    Notes
+    -----
+    This function re-parameterizes the trajectory based on physical
+    distance traveled rather than the original sampling times.
+    """
+
+    # 1. Compute differences between successive points along the path: Δx, Δy, (Δz)
+    diffs = np.diff(path, axis=0)  # shape (T-1, D)
+
+    # 2. Compute the Euclidean distance between each pair of successive points
+    #    This gives segment lengths along the trajectory.
+    lengths = np.linalg.norm(diffs, axis=1)  # shape (T-1,)
+
+    # 3. Compute cumulative arc length
+    #    cumlen[t] = total distance traveled from start to time t
+    cumlen = np.concatenate([[0], np.cumsum(lengths)])  # shape (T,)
+
+    # 4. Normalize by total path length so that final value = 1
+    frac = cumlen / cumlen[-1]
+
+    return frac
+
+
+def resample_response(path, response, n=100):
+    """
+    Resample a neural response array along a normalized arc-length
+    representation of a flight path.
+
+    Parameters
+    ----------
+    path : array of shape (T, D)
+        Original trajectory in 2D or 3D.
+    response : array of shape (T,)
+        Neural response measured at each time point.
+    n : int
+        Number of desired resampled points (uniform in arc length).
+
+    Returns
+    -------
+    response_resampled : array of shape (n,)
+        The response resampled on a uniform arc-length grid.
+
+    Notes
+    -----
+    This procedure removes differences in sampling rate or temporal
+    distortions by aligning responses according to spatial progression
+    along the flight path. It is widely used in movement and motor
+    neuroscience for trajectory normalization.
+    """
+
+    # 1. Compute fractional arc-length coordinates for the original path
+    frac = compute_fractional_abscissa(path)  # shape (T,)
+
+    # 2. Construct an interpolator that maps arc-length → response value
+    #    Using linear interpolation preserves monotonicity and avoids artifacts.
+    f = interp1d(frac, response, kind='linear')
+
+    # 3. Create a new set of evenly spaced arc-length positions in [0, 1]
+    new_frac = np.linspace(0, 1, n)
+
+    # 4. Sample the response at corresponding positions
+    response_resampled = f(new_frac)
+
+    return response_resampled
+
+
 def set_random_state(seed):
     """
     Set random seed for pytorch
