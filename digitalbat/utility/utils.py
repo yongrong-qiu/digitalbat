@@ -723,43 +723,45 @@ def compute_fractional_abscissa(path):
 
 def resample_response(path, response, n=100):
     """
-    Resample a neural response array along a normalized arc-length
+    Resample a neural response matrix along a normalized arc-length
     representation of a flight path.
 
     Parameters
     ----------
     path : array of shape (T, D)
         Original trajectory in 2D or 3D.
-    response : array of shape (T,)
-        Neural response measured at each time point.
+    response : array of shape (T, N)
+        Neural responses for N neurons at T time points.
     n : int
-        Number of desired resampled points (uniform in arc length).
+        Number of resampled positions (uniform in arc length).
 
     Returns
     -------
-    response_resampled : array of shape (n,)
-        The response resampled on a uniform arc-length grid.
+    response_resampled : array of shape (n, N)
+        Responses resampled on a uniform arc-length grid.
 
     Notes
     -----
-    This procedure removes differences in sampling rate or temporal
-    distortions by aligning responses according to spatial progression
-    along the flight path. It is widely used in movement and motor
-    neuroscience for trajectory normalization.
+    - Each neuron's response is treated as a function of arc length.
+    - The interpolation is applied *independently* to each neuron.
     """
 
+    # Number of time points (T) and neurons (N)
+    T, N = response.shape
+
     # 1. Compute fractional arc-length coordinates for the original path
-    frac = compute_fractional_abscissa(path)  # shape (T,)
+    frac = compute_fractional_abscissa(path)   # shape (T,)
 
-    # 2. Construct an interpolator that maps arc-length → response value
-    #    Using linear interpolation preserves monotonicity and avoids artifacts.
-    f = interp1d(frac, response, kind='linear')
+    # 2. Create the target arc-length grid (uniform from 0 to 1)
+    new_frac = np.linspace(0, 1, n)            # shape (n,)
 
-    # 3. Create a new set of evenly spaced arc-length positions in [0, 1]
-    new_frac = np.linspace(0, 1, n)
+    # 3. Create interpolator for all neurons at once
+    #    axis=0 tells interp1d that interpolation happens along the time dimension
+    #    Input shape: (T, N)
+    interpolator = interp1d(frac, response, kind='linear', axis=0)
 
-    # 4. Sample the response at corresponding positions
-    response_resampled = f(new_frac)
+    # 4. Resample: output shape will be (n, N)
+    response_resampled = interpolator(new_frac)
 
     return response_resampled
 
