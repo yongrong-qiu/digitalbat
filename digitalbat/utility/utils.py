@@ -681,7 +681,7 @@ class FlightClusters:
         return self.results
 
 
-def compute_fractional_abscissa(path):
+def compute_fractional_abscissa(path, eps=1e-12):
     """
     Compute the normalized arc-length parameter (fractional abscissa)
     for a 2D or 3D trajectory.
@@ -713,10 +713,21 @@ def compute_fractional_abscissa(path):
 
     # 3. Compute cumulative arc length
     #    cumlen[t] = total distance traveled from start to time t
-    cumlen = np.concatenate([[0], np.cumsum(lengths)])  # shape (T,)
+    cumlen = np.concatenate([[0.0], np.cumsum(lengths)])  # shape (T,)
 
-    # 4. Normalize by total path length so that final value = 1
-    frac = cumlen / cumlen[-1]
+    total = cumlen[-1]
+    if total < eps:
+        # trajectory has no length at all
+        return np.linspace(0, 1, len(cumlen))
+
+    # Normalize by total path length so that final value = 1
+    frac = cumlen / total
+
+    # fix duplicates: enforce strict monotonicity
+    # if frac[t] == frac[t-1], add tiny offsets
+    for i in range(1, len(frac)):
+        if frac[i] <= frac[i - 1]:
+            frac[i] = frac[i - 1] + eps
 
     return frac
 
