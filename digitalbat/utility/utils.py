@@ -350,6 +350,82 @@ def plot_2d_trajectory_response(
     return None
 
 
+def plot_2d_trajectory_response_multiple(
+    session_target, # a string specifying the session name
+    units: np.ndarray, # 1D array of neuronal indices
+    X_val_np: np.ndarray, # shape: (batch_size, time_point, 3)
+    y_val_np: np.ndarray, # shape: (batch_size, time_point, neurons)
+    y_pred_np: np.ndarray, # shape: (batch_size, time_point, neurons)
+    mask_val: np.ndarray, # shape: (batch_size, time_point)
+    flight_type_index: np.ndarray, # shape: (batch_size, ), flight cluster type for each trajectory
+    meta_infor_dict, # dictionary with keys 'behavior_std', 'behavior_mean', 'r_lim' for experimental sessions
+):
+    """
+    Similar to plot_2d_trajectory_response() but for multiple units and flight cluster types in a session 'session_target'
+    2D trajectory with colors indicating neural responses along the path, for the recorded and predicted data
+
+    X_val_np.shape: (48, 70, 3), y_val_np.shape: (48, 70, 95), y_pred_np.shape: (48, 70, 95), mask_val.shape: (48, 70), flight_type_index.shape: (48,)
+    """
+    nrows, ncols = len(np.unique(flight_type_index)), len(units)*2
+    fig, axs = plt.subplots(nrows, ncols, figsize=(ncols*2, nrows*1.5))
+    for ii,target_type in enumerate(np.unique(flight_type_index)):
+        target_ind = np.where(flight_type_index == target_type)[0]
+        #
+        target_X_val = X_val_np[target_ind, :, :]
+        target_y_val = y_val_np[target_ind, :, :]
+        target_y_pred = y_pred_np[target_ind, :, :]
+        target_mask_val = mask_val[target_ind, ]
+        #
+        target_X_val = target_X_val[target_mask_val == 1.0]
+        target_y_val = target_y_val[target_mask_val == 1.0]
+        target_y_pred = target_y_pred[target_mask_val == 1.0]
+        # print(f'target_X_val.shape: {target_X_val.shape}, target_y_val.shape: {target_y_val.shape}, target_y_pred.shape: {target_y_pred.shape}')
+        # target_X_val.shape: (1512, 3), target_y_val.shape: (1512, 168), target_y_pred.shape: (1512, 168) # 168 neurons
+        loc_xx = target_X_val[:, 0] * meta_infor_dict['behavior_std'][session_target][0, 0, 0] + meta_infor_dict['behavior_mean'][session_target][0, 0, 0]
+        loc_yy = target_X_val[:, 1] * meta_infor_dict['behavior_std'][session_target][0, 0, 1] + meta_infor_dict['behavior_mean'][session_target][0, 0, 1]
+        loc_xx_lim = meta_infor_dict['r_lim'][session_target][0, :]
+        loc_yy_lim = meta_infor_dict['r_lim'][session_target][1, :]
+        for jj, unit in enumerate(units):
+            spike_count_val = target_y_val[:, unit]
+            spike_count_pred = target_y_pred[:, unit]
+            # Make line segments between successive points
+            points = np.array([loc_xx, loc_yy]).T.reshape(-1, 1, 2)
+            segments = np.concatenate([points[:-1], points[1:]], axis=1)
+            # Normalize spike counts for colormap
+            norm = plt.Normalize(np.stack([spike_count_val, spike_count_pred]).min(), np.stack([spike_count_val, spike_count_pred]).max())
+            # Create a line collection with color mapping
+            lc_val = LineCollection(segments, cmap='hot', norm=norm)
+            lc_val.set_array(spike_count_val)
+            lc_val.set_linewidth(1)
+            lc_pred = LineCollection(segments, cmap='hot', norm=norm)
+            lc_pred.set_array(spike_count_pred)
+            lc_pred.set_linewidth(1)
+            # plot
+            line = axs[ii,jj*2].add_collection(lc_val)
+            if ii == 0:
+                axs[ii,jj*2].set_title(f"Unit: {unit}; type: {target_type}; recorded")
+            axs[ii,jj*2].set_xlim(loc_xx_lim)
+            axs[ii,jj*2].set_ylim(loc_yy_lim)
+            if ii == nrows:
+                axs[ii,jj*2].set_xlabel("X position")
+            if jj == 0:
+                axs[ii,jj*2].set_ylabel("Y position")
+            plt.colorbar(line, ax=axs[ii,jj*2])
+            line = axs[ii,jj*2+1].add_collection(lc_pred)
+            if ii == 0:
+                axs[ii,jj*2+1].set_title("Predicted")
+            # axs[ii,jj*2+1].set_xlabel("X position")
+            axs[ii,jj*2+1].set_xlim(loc_xx_lim)
+            axs[ii,jj*2+1].set_ylim(loc_yy_lim)
+            # axs[1].set_ylabel("Y position")
+            if jj == len(units):
+                plt.colorbar(line, ax=axs[ii,jj*2+1], label="Spike count")
+            else:
+                plt.colorbar(line, ax=axs[ii,jj*2+1])
+            plt.tight_layout()
+    return None
+
+
 def plot_3d_trajectory(
     trajectory_3d, # numpy array, shape (T, 3)
     loc_lim, # numpy array, shape (3, 2)
