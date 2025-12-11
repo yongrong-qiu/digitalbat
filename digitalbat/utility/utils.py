@@ -347,12 +347,18 @@ def plot_2d_trajectory_response(
     # axs[1].set_ylabel("Y position")
     plt.colorbar(line, ax=axs[1], label="Spike count")
     plt.tight_layout()
+    return None
 
-def plot_3d_trajectory_time(
+
+def plot_3d_trajectory(
     trajectory_3d, # numpy array, shape (T, 3)
     loc_lim, # numpy array, shape (3, 2)
     flight_cluster_type: int = 1, # the cluster type of the flight path, such as: 1, 2, 3, etc.
     time_bin_width = 0.1, # bin_width for each time point in trajectory_3d
+    visualize_array = None, # None or a numpy array with a shape (T,)
+    cmap = 'viridis', # colormap
+    set_zero_as_medium = False, # When using the colormap 'bwr', if we want to set 'zero' to the white color, we need to set 'zero' as medium value
+    cax_ylabel = 'Time [s]', # colorbar ylabel
 ):
     """
     For a flight path, plot a 3D trajectory as a continuous line, with color indicating time
@@ -363,25 +369,40 @@ def plot_3d_trajectory_time(
     points = np.copy(trajectory_3d)
     # Create line segments between consecutive points
     segments = np.concatenate([points[:-1, None, :], points[1:, None, :]], axis=1)
-    # Time array for coloring
-    t = np.linspace(0, T*time_bin_width, T - 1)
-    #
+    
+    if visualize_array is None:
+        # Time array for coloring
+        visualize_array = np.linspace(0, T*time_bin_width, T - 1)
+    else:
+        visualize_array = visualize_array[:T-1]
+
     fig = plt.figure(figsize=(7, 6))
     ax = fig.add_subplot(111, projection='3d')
+    
     # Create colored 3D line
-    lc = Line3DCollection(segments, array=t, cmap='viridis', linewidth=2)
+    if set_zero_as_medium:
+        vmax = np.max(np.abs(visualize_array))
+        vmin = -1.0 * vmax
+    else:
+        vmax, vmin = np.max(visualize_array), np.min(visualize_array)
+    lc = Line3DCollection(segments, array=visualize_array, cmap=cmap, linewidth=2)
+    lc.set_clim(vmin=vmin, vmax=vmax)
     ax.add_collection(lc)
+
+    ax.scatter(trajectory_3d[:, 0], trajectory_3d[:, 1], trajectory_3d[:, 2], c='k', s=3)
     # start of a flight path
     ax.scatter(*trajectory_3d[0,:], marker='*', c='red')
     # Set limits
     ax.set_xlim(loc_lim[0])
     ax.set_ylim(loc_lim[1])
+
     # TODO: For some sessions, such as Dataset_1_32622_231009, 1st flight path in test data
     # the z limits offered by 'loc_lim' is zero, but 'trajectory_3d' has negative values in z-axis
     if trajectory_3d[:,2].min() > loc_lim[2,0]:
         ax.set_zlim(loc_lim[2])
     else:
         ax.set_zlim([-loc_lim[2,1], loc_lim[2,1]])
+
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
@@ -390,9 +411,10 @@ def plot_3d_trajectory_time(
     fig.subplots_adjust(right=0.9)
     cax = fig.add_axes([0.9, 0.2, 0.02, 0.3])  # Adjust to fit within bounds
     fig.colorbar(lc, cax=cax)
-    cax.set_ylabel('Time [s]')
+    cax.set_ylabel(cax_ylabel)
     # cbar = fig.colorbar(lc, ax=ax, shrink=0.5)
     # cbar.set_label("Time [s]")
+    return None
 
 
 def poisson_fraction_deviance_explained(y_true: np.ndarray, y_pred: np.ndarray) -> float:
