@@ -358,7 +358,7 @@ def plot_2d_trajectory_response_multiple(
     y_pred_np: np.ndarray, # shape: (batch_size, time_point, neurons)
     mask_val: np.ndarray, # shape: (batch_size, time_point)
     flight_type_index: np.ndarray, # shape: (batch_size, ), flight cluster type for each trajectory
-    meta_infor_dict, # dictionary with keys 'behavior_std', 'behavior_mean', 'r_lim' for experimental sessions
+    meta_info_dict, # dictionary with keys 'behavior_std', 'behavior_mean', 'r_lim' for experimental sessions
 ):
     """
     Similar to plot_2d_trajectory_response() but for multiple units and flight cluster types in a session 'session_target'
@@ -381,10 +381,10 @@ def plot_2d_trajectory_response_multiple(
         target_y_pred = target_y_pred[target_mask_val == 1.0]
         # print(f'target_X_val.shape: {target_X_val.shape}, target_y_val.shape: {target_y_val.shape}, target_y_pred.shape: {target_y_pred.shape}')
         # target_X_val.shape: (1512, 3), target_y_val.shape: (1512, 168), target_y_pred.shape: (1512, 168) # 168 neurons
-        loc_xx = target_X_val[:, 0] * meta_infor_dict['behavior_std'][session_target][0, 0, 0] + meta_infor_dict['behavior_mean'][session_target][0, 0, 0]
-        loc_yy = target_X_val[:, 1] * meta_infor_dict['behavior_std'][session_target][0, 0, 1] + meta_infor_dict['behavior_mean'][session_target][0, 0, 1]
-        loc_xx_lim = meta_infor_dict['r_lim'][session_target][0, :]
-        loc_yy_lim = meta_infor_dict['r_lim'][session_target][1, :]
+        loc_xx = target_X_val[:, 0] * meta_info_dict['behavior_std'][session_target][0, 0, 0] + meta_info_dict['behavior_mean'][session_target][0, 0, 0]
+        loc_yy = target_X_val[:, 1] * meta_info_dict['behavior_std'][session_target][0, 0, 1] + meta_info_dict['behavior_mean'][session_target][0, 0, 1]
+        loc_xx_lim = meta_info_dict['r_lim'][session_target][0, :]
+        loc_yy_lim = meta_info_dict['r_lim'][session_target][1, :]
         for jj, unit in enumerate(units):
             spike_count_val = target_y_val[:, unit]
             spike_count_pred = target_y_pred[:, unit]
