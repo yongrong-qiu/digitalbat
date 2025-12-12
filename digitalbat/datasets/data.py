@@ -106,6 +106,8 @@ class Data_Prep_for_Raw():
         self.all_spike_clustered = None  # a list of arrays, each array contains neuronal activity for each trajectory
         self.max_len_of_flight_trajectory = None # maximum length of all flight trajectories in this session
         self.split_flights_for_train = split_flights_for_train
+        self.flight_type_test_indomain = None
+        self.flight_type_test_ood = None
 
         # after flight clustering, split the trajectories for training, evaluation and test
         self.samples_train = None
@@ -573,7 +575,17 @@ class Data_Prep_for_Raw():
                     spike_test.append(self.all_spike_clustered[inds[ii]])
                     flight_path_index_test.append(inds[ii])
                     flight_type_index_test.append(self.all_behavior_type[inds[ii]])
-        
+
+        # For flight cluster types in test data, some of them also exist in the traininig or validation data, we call them 'flight_type_test_indomain'
+        # Other types are only present in the test data, which are referred to as 'flight_type_test_ood'
+        self.flight_type_test_indomain = list(set(flight_type_index_test) & (set(flight_type_index_train) | set(flight_type_index_valid)))
+        self.flight_type_test_ood = list(set(flight_type_index_test) - (set(flight_type_index_train) | set(flight_type_index_valid)))
+        # print(f'flight_type_index_train: {flight_type_index_train}')
+        # print(f'flight_type_index_valid: {flight_type_index_valid}')
+        # print(f'flight_type_index_test: {flight_type_index_test}')
+        # print(f'self.flight_type_test_indomain: {self.flight_type_test_indomain}')
+        # print(f'self.flight_type_test_ood: {self.flight_type_test_ood}')
+
         # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
         # print(len(spike_train), len(spike_valid), len(spike_test))  # 22 2 13
         # shuffle the training trajectories
@@ -1097,6 +1109,8 @@ def bat_data_loader(
     # "behavior_mean" and "behavior_std" (for data preprocessing before feeding into the model)
     meta_info_dict = {} 
     meta_info_dict['r_lim'] = {}
+    meta_info_dict['flight_type_test_indomain'] = {}
+    meta_info_dict['flight_type_test_ood'] = {}
     meta_info_dict['behavior_mean'] = {}
     meta_info_dict['behavior_std'] = {}
     meta_info_dict['spike_std'] = {}
@@ -1138,6 +1152,9 @@ def bat_data_loader(
         all_behavior_clustered, all_behavior_type, all_spike_clustered = data_prep_for_raw.get_flight_cluster()
         # split the flight-cluster data
         (samples_train, samples_valid, samples_test) = data_prep_for_raw.split_flight_cluster()
+        meta_info_dict['flight_type_test_indomain'][session_name] = data_prep_for_raw.flight_type_test_indomain
+        meta_info_dict['flight_type_test_ood'][session_name] = data_prep_for_raw.flight_type_test_ood
+
         if len(samples_train) == 2:
             (behavior_train, spike_train) = samples_train
             (behavior_valid, spike_valid) = samples_valid
