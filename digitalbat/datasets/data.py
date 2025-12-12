@@ -1072,6 +1072,7 @@ def bat_data_loader(
     no_3d_location = False, # False
     spike_count_flag = True,
     bin_width = 0.10, # 0.10, in seconds
+    split_flights_for_train = 'manual', # the way to split flight paths for train + valid + test; either 'manual' or 'random'
     type_train_num=1,  # for splitting flight clustering data
     type_valid_num=1,  # for splitting flight clustering data
     special_id_count_thresh=3,  # for splitting flight clustering data
@@ -1114,6 +1115,7 @@ def bat_data_loader(
             no_3d_location = no_3d_location,
             spike_count_flag = spike_count_flag,
             bin_width = bin_width, 
+            split_flights_for_train = split_flights_for_train, 
             type_train_num = type_train_num,
             type_valid_num = type_valid_num,
             special_id_count_thresh = special_id_count_thresh,
