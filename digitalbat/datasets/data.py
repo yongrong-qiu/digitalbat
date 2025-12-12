@@ -54,6 +54,7 @@ class Data_Prep_for_Raw():
         spike_count_flag=False, # default: we use spiking event, not spike counts 
         bin_width=0.010, # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
         flight_cluster_alpha=0.8, # alpha for flight clustering
+        split_flights_for_train: str = 'manual', # the way to split flight paths for train + valid + test; either 'manual' or 'random'
         type_train_num=1,  # for splitting flight clustering data
         type_valid_num=1,  # for splitting flight clustering data
         special_id_count_thresh=3,  # for splitting flight clustering data
@@ -104,6 +105,7 @@ class Data_Prep_for_Raw():
         self.all_behavior_type = None  # a list of trajectory clustering types
         self.all_spike_clustered = None  # a list of arrays, each array contains neuronal activity for each trajectory
         self.max_len_of_flight_trajectory = None # maximum length of all flight trajectories in this session
+        self.split_flights_for_train = split_flights_for_train
 
         # after flight clustering, split the trajectories for training, evaluation and test
         self.samples_train = None
@@ -495,52 +497,83 @@ class Data_Prep_for_Raw():
         """
         if not self._flight_cluster_ready:
             raise RuntimeError('You must run get_flight_cluster() before running split_flight_cluster().')
-
-        # After flight clustering, some types have multiple repeats while others have only one repeat
-        # There are several ways to use the data for modeling.
-        # We use some types to train the model and other types to validate and test the model. One way is to
-        # use only one repeat from all types.
-        # Or: we use all types to train the model and use the other repeats of certain types to validate and 
-        # test the model
-        # for each special_id, we use 'type_train_num' repeat for training, 'type_valid_num' for validation, others for test
-        assert self.special_id_count_thresh > self.type_train_num + self.type_valid_num
-        unique_ids, id_counts = np.unique(self.all_behavior_type, return_counts=True)
-        # print(f'unique_ids: {unique_ids}')  # unique_ids: [ 1  2  3  4  5  6  7  8  9 10 11 12 13 15 16 17 18 19 20 21]
-        # print(f'id_counts: {id_counts}')  # id_counts: [2 1 9 1 1 1 1 1 8 2 1 1 1 1 1 1 1 1 1 1]
-        # special_ids would be used for model training, validation and test
-        special_ids = unique_ids[np.where(id_counts>=(self.special_id_count_thresh ))[0]]
-        # print(f'special_ids: {special_ids}')  # special_ids: [3 9]
-
+        
         behavior_train, behavior_valid, behavior_test = [], [], []
         spike_train, spike_valid, spike_test = [], [], []
         flight_path_index_train, flight_path_index_valid, flight_path_index_test = [], [], [] # index of individual flight path
         flight_type_index_train, flight_type_index_valid, flight_type_index_test = [], [], [] # index of each flight cluster type
-        if not self.only_use_special_id_4train_flag:
-            for ii in range(len(self.all_behavior_type)):
-                if self.all_behavior_type[ii] not in special_ids:
-                    behavior_train.append(self.all_behavior_clustered[ii])
-                    spike_train.append(self.all_spike_clustered[ii])
-                    flight_path_index_train.append(ii)
-                    flight_type_index_train.append(self.all_behavior_type[ii])
-        for unique_id in special_ids:
-            tempinds = np.where(np.array(self.all_behavior_type)==unique_id)[0]
-            for jj in range(len(tempinds)):
-                if jj < self.type_train_num:
-                    behavior_train.append(self.all_behavior_clustered[tempinds[jj]])
-                    spike_train.append(self.all_spike_clustered[tempinds[jj]])
-                    flight_path_index_train.append(tempinds[jj])
-                    flight_type_index_train.append(self.all_behavior_type[tempinds[jj]])
-                elif jj < self.type_train_num + self.type_valid_num:
-                    behavior_valid.append(self.all_behavior_clustered[tempinds[jj]])
-                    spike_valid.append(self.all_spike_clustered[tempinds[jj]])
-                    flight_path_index_valid.append(tempinds[jj])
-                    flight_type_index_valid.append(self.all_behavior_type[tempinds[jj]])
-                else:
-                    behavior_test.append(self.all_behavior_clustered[tempinds[jj]])
-                    spike_test.append(self.all_spike_clustered[tempinds[jj]])
-                    flight_path_index_test.append(tempinds[jj])
-                    flight_type_index_test.append(self.all_behavior_type[tempinds[jj]])
 
+        # After flight clustering, some types have multiple flight paths while others have only one trajectory
+        # There are several ways to split the data for modeling.
+
+        if self.split_flights_for_train == 'manual':
+            # We use some types to train the model and other types to validate and test the model. One way is to
+            # use only one repeat from all types.
+            # Or: we use all types to train the model and use the other repeats of certain types to validate and 
+            # test the model
+            # for each special_id, we use 'type_train_num' repeat for training, 'type_valid_num' for validation, others for test
+            assert self.special_id_count_thresh > self.type_train_num + self.type_valid_num
+            unique_ids, id_counts = np.unique(self.all_behavior_type, return_counts=True)
+            # print(f'unique_ids: {unique_ids}')  # unique_ids: [ 1  2  3  4  5  6  7  8  9 10 11 12 13 15 16 17 18 19 20 21]
+            # print(f'id_counts: {id_counts}')  # id_counts: [2 1 9 1 1 1 1 1 8 2 1 1 1 1 1 1 1 1 1 1]
+            # special_ids would be used for model training, validation and test
+            special_ids = unique_ids[np.where(id_counts>=(self.special_id_count_thresh ))[0]]
+            # print(f'special_ids: {special_ids}')  # special_ids: [3 9]
+
+            if not self.only_use_special_id_4train_flag:
+                for ii in range(len(self.all_behavior_type)):
+                    if self.all_behavior_type[ii] not in special_ids:
+                        behavior_train.append(self.all_behavior_clustered[ii])
+                        spike_train.append(self.all_spike_clustered[ii])
+                        flight_path_index_train.append(ii)
+                        flight_type_index_train.append(self.all_behavior_type[ii])
+            for unique_id in special_ids:
+                tempinds = np.where(np.array(self.all_behavior_type)==unique_id)[0]
+                for jj in range(len(tempinds)):
+                    if jj < self.type_train_num:
+                        behavior_train.append(self.all_behavior_clustered[tempinds[jj]])
+                        spike_train.append(self.all_spike_clustered[tempinds[jj]])
+                        flight_path_index_train.append(tempinds[jj])
+                        flight_type_index_train.append(self.all_behavior_type[tempinds[jj]])
+                    elif jj < self.type_train_num + self.type_valid_num:
+                        behavior_valid.append(self.all_behavior_clustered[tempinds[jj]])
+                        spike_valid.append(self.all_spike_clustered[tempinds[jj]])
+                        flight_path_index_valid.append(tempinds[jj])
+                        flight_type_index_valid.append(self.all_behavior_type[tempinds[jj]])
+                    else:
+                        behavior_test.append(self.all_behavior_clustered[tempinds[jj]])
+                        spike_test.append(self.all_spike_clustered[tempinds[jj]])
+                        flight_path_index_test.append(tempinds[jj])
+                        flight_type_index_test.append(self.all_behavior_type[tempinds[jj]])
+
+        elif self.split_flights_for_train == 'random':
+            # Or we treat each flight path as a random data sample
+            # We randomly select 70% for training, 15% for validation and 15% for test
+
+            # len(all_behavior_clustered): 37, all_behavior_clustered[0].shape: (3, 59)
+            # len(all_behavior_type):    37,    all_behavior_type: [1, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21]
+            # len(all_spike_clustered):    37,    all_spike_clustered[0].shape: (289, 59)
+            np.random.seed(66)
+            inds = np.random.choice(len(self.all_behavior_type), len(self.all_behavior_type), replace=False)
+            train_num, valid_num = int(len(inds) * 0.7), int(len(inds) * 0.15)
+            test_num = len(inds) - train_num - valid_num
+            for ii in range(len(inds)):
+                if ii < train_num:
+                    behavior_train.append(self.all_behavior_clustered[inds[ii]])
+                    spike_train.append(self.all_spike_clustered[inds[ii]])
+                    flight_path_index_train.append(inds[ii])
+                    flight_type_index_train.append(self.all_behavior_type[inds[ii]])
+                elif ii >= train_num and ii < train_num + valid_num:
+                    behavior_valid.append(self.all_behavior_clustered[inds[ii]])
+                    spike_valid.append(self.all_spike_clustered[inds[ii]])
+                    flight_path_index_valid.append(inds[ii])
+                    flight_type_index_valid.append(self.all_behavior_type[inds[ii]])
+                elif ii >= train_num + valid_num:
+                    behavior_test.append(self.all_behavior_clustered[inds[ii]])
+                    spike_test.append(self.all_spike_clustered[inds[ii]])
+                    flight_path_index_test.append(inds[ii])
+                    flight_type_index_test.append(self.all_behavior_type[inds[ii]])
+        
         # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
         # print(len(spike_train), len(spike_valid), len(spike_test))  # 22 2 13
         # shuffle the training trajectories
@@ -548,6 +581,10 @@ class Data_Prep_for_Raw():
         np.random.shuffle(behavior_train)
         np.random.seed(100)
         np.random.shuffle(spike_train)
+        np.random.seed(100)
+        np.random.shuffle(flight_path_index_train)
+        np.random.seed(100)
+        np.random.shuffle(flight_type_index_train)
         if self.split_each_trajectory_flag:
             # self.samples_train = (np.hstack(behavior_train), np.hstack(spike_train))
             # self.samples_valid = (np.hstack(behavior_valid), np.hstack(spike_valid))
