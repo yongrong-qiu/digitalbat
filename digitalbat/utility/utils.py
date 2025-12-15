@@ -979,7 +979,7 @@ def nearest_neighbor_score(
         nn_scores = valid_fn(nn_response, test_response)
         nn_arrays_dict[session_target] = nn_scores
 
-    return nn_arrays_dict
+    return nn_arrays_dict, nn_response, test_response
 
 
 def set_random_state(seed):
