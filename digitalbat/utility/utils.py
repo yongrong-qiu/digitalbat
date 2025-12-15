@@ -13,7 +13,7 @@ from matplotlib import cm
 import torch
 
 from numpy.typing import ArrayLike
-from typing import Tuple, Union
+from typing import Tuple, Union, Callable
 
 
 def bandpass_filter(signal, fs, band):
@@ -873,6 +873,113 @@ def resample_response(path, response, n=100):
     response_resampled = interpolator(new_frac)
 
     return response_resampled
+
+
+def nearest_neighbor_score(
+    dataloaders,
+    meta_info_dict,
+    valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+):
+    """
+    Nearest neighbor analysis.
+    For each flight path in test data, we find the paths in the training/validation data with the same cluster type, we call them 'nearest-neighbor' paths.
+    For each pair of test and nearest-neighbor paths, we resample each neuron's responses along arc-length representation of the paths. 
+    We additionally average resampled responses across paths for nearest-neighbor flights.
+    For each neuron, we concatenate the resampled responses across flight paths and compute the correlation between the test data and nearest-neighbor data. 
+
+    valid_fn = lambda y_true, y_pred: corr(y_true, y_pred, axis=0)
+    or:
+    valid_fn = lambda y_true, y_pred: poisson_fde_population(y_true, y_pred)
+    """
+    
+    nn_arrays_dict = {} # a dictionary of score arrays (for each unit) for different sessions
+    session_targets = list(dataloaders['test'].keys()) # ['Dataset_1_32622_231010'] # list(dataloaders['test'].keys())
+    for session_target in session_targets:
+        print(f'session_target: {session_target}')
+        for (session_name, session_data),(_, session_data2) in zip(dataloaders['train'].items(), dataloaders['valid'].items()):
+            # print(session_name, session_data)
+            if session_name == session_target:
+                target_types = np.array(meta_info_dict['flight_type_test_indomain'][session_name], dtype=int) # data type: int
+                nn_response = {}
+                for batch_id, batch in enumerate(session_data): # for flights in training data
+                    X_val = batch[0] # (torch.Size([15, 70, 3]),
+                    y_val = batch[1] # torch.Size([15, 70, 54])
+                    mask_val = batch[2] # torch.Size([15, 70]))
+                    flight_type_index = batch.flight_type_index.detach().cpu().numpy().astype(int) # data type: int
+                    # Find indices where flight_type_index ∈ target_inds, here we loop through each target_type
+                    for ii,target_type in enumerate(target_types):
+                        target_indices = np.where(flight_type_index == target_types[ii])[0]
+                        # Each path has slightly different time points, we just use the minimum one
+                        temp_path_time = int(np.min(np.sum(mask_val.detach().cpu().numpy()[target_indices], axis=1)))
+                        resample_resps = [] # a list of resampled responses for each flight path
+                        for jj in range(len(target_indices)): # loop through each flight path for the particular target_type
+                            mask = mask_val.detach().cpu().numpy()[target_indices[jj]]   
+                            path = X_val.detach().cpu().numpy()[target_indices[jj]][mask == 1.0]
+                            resp = y_val.detach().cpu().numpy()[target_indices[jj]][mask == 1.0]
+                            resample_resps.append(resample_response(path, resp, n=temp_path_time))
+                            # if target_type == 10:
+                                # print(f'target_type: {target_type}, temp_path_time: {temp_path_time}')
+                        nn_response[str(target_type)] = resample_resps
+                        
+                for batch_id, batch in enumerate(session_data2): # for flights in validation data
+                    X_val = batch[0] # (torch.Size([15, 70, 3]),
+                    y_val = batch[1] # torch.Size([15, 70, 54])
+                    mask_val = batch[2] # torch.Size([15, 70]))
+                    flight_type_index = batch.flight_type_index.detach().cpu().numpy().astype(int) # data type: int
+                    # Find indices where flight_type_index ∈ target_inds, here we loop through each target_type
+                    for ii,target_type in enumerate(target_types):
+                        target_indices = np.where(flight_type_index == target_types[ii])[0]
+                        # resample_resps = [] # a list of resampled responses for each flight path
+                        for jj in range(len(target_indices)): # loop through each flight path for the particular target_type
+                            mask = mask_val.detach().cpu().numpy()[target_indices[jj]]   
+                            path = X_val.detach().cpu().numpy()[target_indices[jj]][mask == 1.0]
+                            resp = y_val.detach().cpu().numpy()[target_indices[jj]][mask == 1.0]
+                            # resample_resps.append(resample_response(path, resp, n=temp_path_time))
+                            nn_response[str(target_type)].append(resample_response(path, resp, n=nn_response[str(target_type)][0].shape[0]))
+                            # if target_type == 10:
+                                # print(f'target_type: {target_type}, temp_path_time: {nn_response[str(target_type)][0].shape[0]}')
+                        nn_response[str(target_type)] = np.array(nn_response[str(target_type)])
+                        # print(np.array(nn_response[str(target_type)]).shape) # (5, 31, 95): 5 repeats 31 time points 95 neurons; (1, 36, 95); ...
+
+        # get the flight path and resample responses in test data
+        for session_name, session_data in dataloaders['test'].items():
+            # print(session_name, session_data)
+            if session_name == session_target:
+                test_response = {}
+                for batch_id, batch in enumerate(session_data): # only for 1 batch 
+                    X_val = batch[0] # X_val.shape: torch.Size([48, 70, 3])
+                    y_val = batch[1] # y_val.shape: torch.Size([48, 70, 95])
+                    mask_val = batch[2] # mask_val.shape: torch.Size([48, 70]) (batch_size, time_frames)
+                    flight_type_index = batch.flight_type_index.detach().cpu().numpy().astype(int) # data type: int
+                    # Find indices where flight_type_index ∈ target_inds, here we loop through each target_type
+                    for ii,target_type in enumerate(target_types):
+                        target_indices = np.where(flight_type_index == target_types[ii])[0]
+                        resample_resps = [] # a list of resampled responses for each flight path
+                        for jj in range(len(target_indices)): # loop through each flight path for the particular target_type
+                            mask = mask_val.detach().cpu().numpy()[target_indices[jj]]   
+                            path = X_val.detach().cpu().numpy()[target_indices[jj]][mask == 1.0]
+                            resp = y_val.detach().cpu().numpy()[target_indices[jj]][mask == 1.0]
+                            resample_resps.append(resample_response(path, resp, n=nn_response[str(target_type)][0].shape[0]))
+                            # if target_type == 10:
+                                # print(f'target_type: {target_type}, temp_path_time: {temp_path_time}')
+                        test_response[str(target_type)] = np.array(resample_resps)
+                        # print(np.array(resample_resps).shape) # (5, 31, 95): 5 repeats 31 time points 95 neurons; (1, 36, 95); ...
+
+        # average responses across flight paths belong to the same cluster
+        for key,value in nn_response.items():
+            nn_response[key] = np.mean(value, axis=0)
+        # expand arrays in nn_response have the same shape with test_response
+        for key,value in nn_response.items():
+            nn_response[key] = np.repeat(value[None, :, :], test_response[key].shape[0], axis=0)
+            # print(nn_response[key].shape)
+        # concatenate responses across cluster types
+        nn_response = np.vstack([np.reshape(resp, (-1, resp.shape[2])) for resp in list(nn_response.values())])
+        test_response = np.vstack([np.reshape(resp, (-1, resp.shape[2])) for resp in list(test_response.values())])
+        print(f'nn_response.shape: {nn_response.shape}, test_response.shape: {test_response.shape}') # nn_response.shape: (1619, 95), test_response.shape: (1619, 95)
+        nn_scores = valid_fn(nn_response, test_response)
+        nn_arrays_dict[session_target] = nn_scores
+
+    return nn_arrays_dict
 
 
 def set_random_state(seed):

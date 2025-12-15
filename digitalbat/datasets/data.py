@@ -555,7 +555,7 @@ class Data_Prep_for_Raw():
             # len(all_behavior_clustered): 37, all_behavior_clustered[0].shape: (3, 59)
             # len(all_behavior_type):    37,    all_behavior_type: [1, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21]
             # len(all_spike_clustered):    37,    all_spike_clustered[0].shape: (289, 59)
-            np.random.seed(66)
+            np.random.seed(166)
             inds = np.random.choice(len(self.all_behavior_type), len(self.all_behavior_type), replace=False)
             train_num, valid_num = int(len(inds) * 0.7), int(len(inds) * 0.15)
             test_num = len(inds) - train_num - valid_num
