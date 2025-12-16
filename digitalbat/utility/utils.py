@@ -366,9 +366,12 @@ def plot_2d_trajectory_response_multiple(
 
     X_val_np.shape: (48, 70, 3), y_val_np.shape: (48, 70, 95), y_pred_np.shape: (48, 70, 95), mask_val.shape: (48, 70), flight_type_index.shape: (48,)
     """
+    flight_type_index = flight_type_index.astype(int)
+    target_types_indomain = np.array(meta_info_dict['flight_type_test_indomain'][session_target], dtype=int)
+    target_types_ood = np.array(meta_info_dict['flight_type_test_ood'][session_target], dtype=int)
     nrows, ncols = len(np.unique(flight_type_index)), len(units)*2
     fig, axs = plt.subplots(nrows, ncols, figsize=(ncols*2, nrows*1.5))
-    for ii,target_type in enumerate(np.unique(flight_type_index)):
+    for ii,target_type in enumerate(np.concatenate((target_types_indomain, target_types_ood))):
         target_ind = np.where(flight_type_index == target_type)[0]
         #
         target_X_val = X_val_np[target_ind, :, :]
@@ -403,13 +406,14 @@ def plot_2d_trajectory_response_multiple(
             # plot
             line = axs[ii,jj*2].add_collection(lc_val)
             if ii == 0:
-                axs[ii,jj*2].set_title(f"Unit: {unit}; type: {target_type}; recorded")
+                axs[ii,jj*2].set_title(f"Unit: {unit}; recorded")
             axs[ii,jj*2].set_xlim(loc_xx_lim)
             axs[ii,jj*2].set_ylim(loc_yy_lim)
-            if ii == nrows:
-                axs[ii,jj*2].set_xlabel("X position")
+            if ii == nrows-1:
+                axs[ii,jj*2].set_xlabel("X")
             if jj == 0:
-                axs[ii,jj*2].set_ylabel("Y position")
+                label = f"Y; type: {target_type}" if target_type in target_types_indomain else f"Y; type: {target_type}; OOD"
+                axs[ii,jj*2].set_ylabel(label)
             plt.colorbar(line, ax=axs[ii,jj*2])
             line = axs[ii,jj*2+1].add_collection(lc_pred)
             if ii == 0:
