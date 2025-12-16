@@ -980,7 +980,7 @@ def nearest_neighbor_score(
         nn_response = np.vstack([np.reshape(resp, (-1, resp.shape[2])) for resp in list(nn_response.values())])
         test_response = np.vstack([np.reshape(resp, (-1, resp.shape[2])) for resp in list(test_response.values())])
         print(f'nn_response.shape: {nn_response.shape}, test_response.shape: {test_response.shape}') # nn_response.shape: (1619, 95), test_response.shape: (1619, 95)
-        nn_scores = valid_fn(nn_response, test_response)
+        nn_scores = valid_fn(test_response, nn_response)
         nn_arrays_dict[session_target] = nn_scores
 
     return nn_arrays_dict, nn_response, test_response
