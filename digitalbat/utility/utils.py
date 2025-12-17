@@ -359,6 +359,7 @@ def plot_2d_trajectory_response_multiple(
     mask_val: np.ndarray, # shape: (batch_size, time_point)
     flight_type_index: np.ndarray, # shape: (batch_size, ), flight cluster type for each trajectory
     meta_info_dict, # dictionary with keys 'behavior_std', 'behavior_mean', 'r_lim' for experimental sessions
+    plot_flight_type_num = None, # the number of flight cluster types to be visualized
 ):
     """
     Similar to plot_2d_trajectory_response() but for multiple units and flight cluster types in a session 'session_target'
@@ -369,9 +370,15 @@ def plot_2d_trajectory_response_multiple(
     flight_type_index = flight_type_index.astype(int)
     target_types_indomain = np.array(meta_info_dict['flight_type_test_indomain'][session_target], dtype=int)
     target_types_ood = np.array(meta_info_dict['flight_type_test_ood'][session_target], dtype=int)
-    nrows, ncols = len(np.unique(flight_type_index)), len(units)*2
+    if plot_flight_type_num:
+        nrows, ncols = plot_flight_type_num, len(units)*2
+    else:
+        nrows, ncols = len(np.unique(flight_type_index)), len(units)*2
     fig, axs = plt.subplots(nrows, ncols, figsize=(ncols*2, nrows*1.5))
     for ii,target_type in enumerate(np.concatenate((target_types_indomain, target_types_ood))):
+        if plot_flight_type_num:
+            if ii >= plot_flight_type_num:
+                break
         target_ind = np.where(flight_type_index == target_type)[0]
         #
         target_X_val = X_val_np[target_ind, :, :]
