@@ -82,6 +82,64 @@ class Saliency(InterpretModel):
         )
 
 
+class Gradient_Bat_Transformer(InterpretModel):
+    """
+    Compute the gradient of a target_neuron's response at a time point  w.r.t a flight path, for a model Bat_Transformer(). 
+    Note that the model input is a flight trajectory.
+    """
+    def __init__(
+        self, 
+        model: nn.Module, 
+        session_name: str, 
+        X_val: torch.Tensor, # flight path; (torch.Size([1, num_of_time_points, 3]),
+        y_val: torch.Tensor, # recorded response; (torch.Size([1, num_of_time_points, num_of_neurons]),
+        mask_val: torch.Tensor, # mask for the path; torch.Size([1, num_of_time_points]))
+        target_neuron_index: int,
+        trainer_config: dict,
+        device: str = 'cpu',
+    ):
+        super().__init__(model, device)
+        self.session_name = session_name
+        self.X_val = X_val.to(self.device)
+        self.mask_val = mask_val.to(self.device)
+        self.trainer_config = trainer_config
+        self.target_neuron_index = target_neuron_index
+        self.unmask_T = int(np.sum(mask_val.detach().cpu().numpy())) # the valid time points for this flight trajectory
+        self.response_pred = None # predicted responses to X_val for the target_neuron_index; numpy array; shape (T, )
+        self.gradient_list = [] # a list of gradient for each time point, each gradient array has a shape of (unmask_T, 3)
+        self.response_val = y_val.detach().cpu().numpy()[0, :self.unmask_T, target_neuron_index] # recorded responses to X_val for the target_neuron_index; numpy array; shape (T, )
+        self.flight_path = X_val.detach().cpu().numpy()[0, :self.unmask_T, :] # transform X_val from tensor to numpy, and then only use the valid time points
+
+    def compute_feature_importance(self, **kwargs) -> None:
+        """
+        Compute gradient-based feature importance for the given input and the target unit.
+        """
+
+        for ii in range(self.unmask_T):
+            # Make sure input requires gradient
+            sample = self.X_val.detach().requires_grad_(True)
+            # Forward pass
+            output = self.model(
+                self.session_name, 
+                sample, 
+                self.mask_val, 
+                is_causal=self.trainer_config['is_causal'], 
+                is_bigbird=self.trainer_config['is_bigbird'], 
+                attention_window_size=self.trainer_config['attention_window_size'],
+                num_global=self.trainer_config['num_global'],
+            ) # torch.Size([1, T, num_of_neurons])
+
+            # Focus on the 3rd output unit (index 2)
+            unit_output = output[0, ii, self.target_neuron_index]
+            # Backward pass to compute gradients w.r.t. input
+            unit_output.backward()
+            self.gradient_list.append(sample.grad.detach().squeeze().cpu().numpy()[:self.unmask_T,:])
+            if ii == 0:
+                self.response_pred = output.detach().cpu().numpy()[0, :self.unmask_T, self.target_neuron_index]
+
+        return None
+
+
 class IntegGradi(InterpretModel):
     def __init__(self, model: nn.Module, device: str = 'cpu'):
         super().__init__(model, device)
