@@ -507,36 +507,40 @@ def plot_3d_trajectory(
 def poisson_fraction_deviance_explained(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """
     Compute the fraction deviance explained for a Poisson GLM.
-    
+
     Parameters:
     - y_true: 1D array of observed counts (non-negative integers)
     - y_pred: 1D array of predicted rates (must be > 0)
-    
+
     Returns:
     - Fraction of deviance explained (float between -inf and 1)
+
+    Note: 
+    We updated a bit to match the numbers exactly with https://github.com/sytseng/GLM_Tensorflow_2/blob/main/code/glm_class.py
     """
 
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
 
     # Avoid log(0) and division by zero
-    eps = np.finfo(float).eps
+    eps = 1e-33 # 1e-33 # np.finfo(float).eps
     y_pred = np.clip(y_pred, eps, None)
     # Null model prediction: mean of y_true
+    y_true = np.clip(y_true, eps, None)
     y_mean = np.mean(y_true)
     y_mean = np.clip(y_mean, eps, None)
 
     def deviance(y, mu):
-        term = np.zeros_like(y, dtype=float)
-        nonzero = y > 0
-        term[nonzero] = y[nonzero] * np.log(y[nonzero] / mu[nonzero])
-        return 2 * np.sum(term - (y - mu))
+        # term = np.zeros_like(y, dtype=float)
+        # nonzero = y > 0
+        # term[nonzero] = y[nonzero] * np.log(y[nonzero] / mu[nonzero])
+        return 2 * np.sum(y * (np.log(y) - np.log(mu)) - (y - mu))
 
     dev_model = deviance(y_true, y_pred)
     dev_null = deviance(y_true, np.full_like(y_true, y_mean))
 
     # Return fraction deviance explained
-    return 1 - dev_model / (dev_null + 1e-6 )
+    return 1 - dev_model / (dev_null + eps) # 1e-6
 
 def poisson_fde_population(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
     """
