@@ -11,6 +11,8 @@ from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib import cm
 import torch
+import pandas as pd
+from scipy.spatial.distance import pdist, squareform
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -1039,3 +1041,122 @@ def compute_shift_attention(attn):
         shift_scores[r].put(col_idx[r], attn[r])
 
     return shift_scores
+
+
+class OrthogonalityPermutationTest:
+    def __init__(
+        self,
+        X,
+        df,
+        session_name,
+        n_perm=1000,
+        metric="cosine",
+        random_state=None,
+    ):
+        """
+        X : ndarray, shape (n_neurons, n_features)
+            Readout weights (aligned with df rows)
+        df : pandas.DataFrame
+            Must contain column 'session_name'
+        session_name : str
+            Session to analyze
+        n_perm : int
+            Number of permutations
+        """
+        self.X = X
+        self.df = df
+        self.session_name = session_name
+        self.n_perm = n_perm
+        self.metric = metric
+        self.rng = np.random.default_rng(random_state)
+
+        # Select session neurons
+        self.idx = df["session_name"] == session_name
+        self.Xs = X[self.idx.values]
+        self.n = self.Xs.shape[0]
+
+        if self.n < 2:
+            raise ValueError("Need at least 2 neurons in session")
+
+    def compute_observed(self):
+        """Observed cosine distance matrix"""
+        self.dist_obs_condensed = pdist(self.Xs, metric=self.metric)
+        self.dist_obs = squareform(self.dist_obs_condensed)
+        return self.dist_obs
+
+    def compute_null(self):
+        """Generate null distance matrices via permutation"""
+        n_pairs = self.n * (self.n - 1) // 2
+        null_dists = np.zeros((self.n_perm, n_pairs), dtype=np.float32)
+
+        for k in range(self.n_perm):
+            perm = self.rng.permutation(self.n)
+            X_perm = self.Xs[perm]
+            null_dists[k] = pdist(X_perm, metric=self.metric)
+
+        self.null_dists = null_dists
+        return null_dists
+
+    def compute_pvalues(self):
+        """Compute p-values for closeness to orthogonality (distance ≈ 1)."""
+        if not hasattr(self, "dist_obs_condensed"):
+            self.compute_observed()
+        if not hasattr(self, "null_dists"):
+            self.compute_null()
+
+        # Distance-to-orthogonality statistic
+        delta_obs = np.abs(self.dist_obs_condensed - 1.0)
+        delta_null = np.abs(self.null_dists - 1.0)
+
+        # One-sided permutation p-value: closer to 1 than null
+        pvals = (
+            1 + np.sum(delta_null <= delta_obs[None, :], axis=0)
+        ) / (1 + self.n_perm)
+
+        self.delta_obs_condensed = delta_obs
+        self.pvals_condensed = pvals
+        self.pvals = squareform(pvals)
+
+        return self.pvals
+
+    def significant_pairs(self, alpha=0.05):
+        """Return indices of significantly orthogonal neuron pairs"""
+        if not hasattr(self, "pvals"):
+            self.compute_pvalues()
+
+        i, j = np.triu_indices(self.n, k=1)
+        mask = self.pvals[i, j] < alpha
+
+        return np.vstack([i[mask], j[mask]]).T
+    
+    def significant_pairs_with_session_indices(self, alpha=0.05):
+        """
+        Return significant orthogonal neuron pairs with session-local indices.
+
+        Returns
+        -------
+        pandas.DataFrame with columns:
+            - session_neuron_idx_1
+            - session_neuron_idx_2
+            - p_value
+            - cosine_distance
+        """
+        if not hasattr(self, "pvals"):
+            self.compute_pvalues()
+
+        # Local indices within the session
+        i, j = np.triu_indices(self.n, k=1)
+        mask = self.pvals[i, j] < alpha
+
+        # Map local -> session neuron indices
+        session_neuron_indices = self.df.loc[self.idx, "session_neuron_idx"].values
+
+        data = {
+            "session_neuron_idx_1": session_neuron_indices[i[mask]],
+            "session_neuron_idx_2": session_neuron_indices[j[mask]],
+            "p_value": self.pvals[i[mask], j[mask]],
+            "cosine_distance": self.dist_obs[i[mask], j[mask]],
+        }
+
+        return pd.DataFrame(data)
+
