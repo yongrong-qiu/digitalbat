@@ -1044,6 +1044,24 @@ def compute_shift_attention(attn):
 
 
 class OrthogonalityPermutationTest:
+    """
+    Orthogonality permutation test for neurons within one experimental session.
+
+    Example usage:
+        tester = OrthogonalityPermutationTest(
+            X=readout_weight_sessions,
+            df=inds_sessions_df,
+            session_name=list(dataloaders['test'].keys())[4],
+            n_perm=1000,
+            random_state=0,
+        )
+        sig_df = tester.significant_pairs_with_session_indices(alpha=0.05)
+        row = sig_df.iloc[20]
+        tester.plot_null_vs_observed(
+            session_neuron_idx_1=row["session_neuron_idx_1"],
+            session_neuron_idx_2=row["session_neuron_idx_2"],
+        )
+    """
     def __init__(
         self,
         X,
@@ -1051,7 +1069,7 @@ class OrthogonalityPermutationTest:
         session_name,
         n_perm=1000,
         metric="cosine",
-        random_state=None,
+        random_state=1234,
     ):
         """
         X : ndarray, shape (n_neurons, n_features)
@@ -1080,22 +1098,22 @@ class OrthogonalityPermutationTest:
 
     def compute_observed(self):
         """Observed cosine distance matrix"""
-        self.dist_obs_condensed = pdist(self.Xs, metric=self.metric)
-        self.dist_obs = squareform(self.dist_obs_condensed)
+        self.dist_obs_condensed = pdist(self.Xs, metric=self.metric) # shape (363 * 362 / 2, )
+        self.dist_obs = squareform(self.dist_obs_condensed) # shape (363, 363)
         return self.dist_obs
 
     def compute_null(self):
         """Generate null distance matrices via permutation"""
         n_pairs = self.n * (self.n - 1) // 2
-        null_dists = np.zeros((self.n_perm, n_pairs), dtype=np.float32)
+        null_dists_condensed = np.zeros((self.n_perm, n_pairs), dtype=np.float32)
 
         for k in range(self.n_perm):
             perm = self.rng.permutation(self.n)
             X_perm = self.Xs[perm]
-            null_dists[k] = pdist(X_perm, metric=self.metric)
+            null_dists_condensed[k] = pdist(X_perm, metric=self.metric)
 
-        self.null_dists = null_dists
-        return null_dists
+        self.null_dists_condensed = null_dists_condensed
+        return null_dists_condensed
 
     def compute_pvalues(self):
         """Compute p-values for closeness to orthogonality (distance ≈ 1)."""
@@ -1106,7 +1124,7 @@ class OrthogonalityPermutationTest:
 
         # Distance-to-orthogonality statistic
         delta_obs = np.abs(self.dist_obs_condensed - 1.0)
-        delta_null = np.abs(self.null_dists - 1.0)
+        delta_null = np.abs(self.null_dists_condensed - 1.0)
 
         # One-sided permutation p-value: closer to 1 than null
         pvals = (
@@ -1159,4 +1177,70 @@ class OrthogonalityPermutationTest:
         }
 
         return pd.DataFrame(data)
+    
+    def plot_null_vs_observed(
+        self,
+        session_neuron_idx_1,
+        session_neuron_idx_2,
+        bins=40,
+    ):
+        """
+        Plot null distribution and observed statistic for neuron-pair orthogonality.
+
+        Orthogonality statistic:
+            delta = |cosine_distance - 1|
+        Smaller values indicate stronger orthogonality.
+        """
+
+        # Session-local neuron indices
+        session_neuron_indices = self.df.loc[
+            self.idx, "session_neuron_idx"
+        ].values
+
+        try:
+            i = np.where(session_neuron_indices == session_neuron_idx_1)[0][0]
+            j = np.where(session_neuron_indices == session_neuron_idx_2)[0][0]
+        except IndexError:
+            raise ValueError("Session neuron index not found")
+
+        if i == j:
+            raise ValueError("Neuron indices must be different")
+
+        # Ensure (i, j) corresponds to condensed index ordering (upper triangle)
+        if i > j:
+            i, j = j, i
+
+        # Condensed index mapping
+        pair_idx = int(i * self.n - i * (i + 1) // 2 + (j - i - 1))
+
+        # Observed statistics
+        d_obs = self.dist_obs[i, j]
+        delta_obs = abs(d_obs - 1.0)
+
+        # Null statistics
+        delta_null = abs(self.null_dists_condensed[:, pair_idx] - 1.0)
+
+        # Correct permutation p-value
+        p_val = (1 + np.sum(delta_null <= delta_obs)) / (1 + self.n_perm)
+
+        # Plot
+        plt.figure(figsize=(4, 3))
+        plt.hist(delta_null, bins=bins, density=True, alpha=0.7, color='gray')
+        plt.axvline(
+            delta_obs,
+            linestyle="--",
+            linewidth=2,
+            c='k',
+            label=f"Observed |d−1| = {delta_obs:.4f}",
+        )
+        plt.xlabel("|Cosine distance − 1|")
+        plt.ylabel("Density")
+        plt.title(
+            f"Orthogonality permutation test\n"
+            f"{self.session_name}\n"
+            f"Neurons {session_neuron_idx_1:.0f} vs {session_neuron_idx_2:.0f}: p = {p_val:.3f}"
+        )
+        plt.legend()
+        plt.tight_layout()
+
 
