@@ -1070,6 +1070,7 @@ class OrthogonalityPermutationTest:
         n_perm=1000,
         metric="cosine",
         random_state=1234,
+        null_model='shuffle_neurons', 
     ):
         """
         X : ndarray, shape (n_neurons, n_features)
@@ -1080,6 +1081,10 @@ class OrthogonalityPermutationTest:
             Session to analyze
         n_perm : int
             Number of permutations
+        null_model: str
+            Two ways to generate null model:
+                'shuffle_neurons': shuffle readout weights across neurons within the session
+                'shuffle_weights': shuffle readout weights within each neuron
         """
         self.X = X
         self.df = df
@@ -1087,6 +1092,7 @@ class OrthogonalityPermutationTest:
         self.n_perm = n_perm
         self.metric = metric
         self.rng = np.random.default_rng(random_state)
+        self.null_model = null_model
 
         # Select session neurons
         self.idx = df["session_name"] == session_name
@@ -1107,10 +1113,17 @@ class OrthogonalityPermutationTest:
         n_pairs = self.n * (self.n - 1) // 2
         null_dists_condensed = np.zeros((self.n_perm, n_pairs), dtype=np.float32)
 
-        for k in range(self.n_perm):
-            perm = self.rng.permutation(self.n)
-            X_perm = self.Xs[perm]
-            null_dists_condensed[k] = pdist(X_perm, metric=self.metric)
+        if self.null_model == 'shuffle_neurons':
+            for k in range(self.n_perm):
+                perm = self.rng.permutation(self.n)
+                X_perm = self.Xs[perm]
+                null_dists_condensed[k] = pdist(X_perm, metric=self.metric)
+        elif self.null_model == 'shuffle_weights':
+            for k in range(self.n_perm):
+                Xp = np.zeros_like(self.Xs)
+                for i in range(self.n):
+                    Xp[i] = self.rng.permutation(self.Xs[i])
+                null_dists_condensed[k] = pdist(Xp, metric=self.metric)
 
         self.null_dists_condensed = null_dists_condensed
         return null_dists_condensed
