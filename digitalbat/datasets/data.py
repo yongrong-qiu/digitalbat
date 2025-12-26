@@ -1217,6 +1217,11 @@ def bat_data_loader(
             data_flight_type_index = np.copy(flight_type_index_train)
             behavior_mean = np.nanmean(data_input, axis=(0,1), keepdims=True)
             behavior_std = np.nanstd(data_input, axis=(0,1), keepdims=True)
+            # if use_speed_head_dir: # somehow this does not help
+            #     # when adding speed (the forth channel) and head direction (unit, the fifth to seventh channels)
+            #     # we scale the speed to std=1.0, we do not change head direction
+            #     behavior_mean[:, :, 3:7] = 0.0
+            #     behavior_std[:, :, 4:7] = 1.0
             spike_std = np.nanstd(data_output, axis=(0,1), keepdims=True)
             data_input = np.nan_to_num(data_input) # NaN to 0.0, shape: (N, window_size, num_behavior_channels)
             data_output = np.nan_to_num(data_output) # NaN to 0.0, shape: (N, window_size, num_neurons)

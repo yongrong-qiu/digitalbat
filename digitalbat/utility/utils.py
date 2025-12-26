@@ -480,7 +480,7 @@ def plot_3d_trajectory(
 
     ax.scatter(trajectory_3d[:, 0], trajectory_3d[:, 1], trajectory_3d[:, 2], c='k', s=3)
     # start of a flight path
-    ax.scatter(*trajectory_3d[0,:], marker='*', c='red')
+    ax.scatter(*trajectory_3d[0,:3], marker='*', c='red')
     # Set limits
     ax.set_xlim(loc_lim[0])
     ax.set_ylim(loc_lim[1])
