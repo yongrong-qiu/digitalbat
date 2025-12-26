@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.sampler import SubsetRandomSampler
@@ -45,6 +46,7 @@ class Data_Prep_for_Raw():
         self,
         parent_folder,
         su_file_path,  
+        use_speed_head_dir, # whether to use speed and head direction or not
         use_IMU_flag,
         use_click_flag,
         use_LFP_flag,
@@ -69,6 +71,7 @@ class Data_Prep_for_Raw():
         super().__init__()
         self.parent_folder = parent_folder
         self.su_file_path = glob.glob(su_file_path)  # a list of strings
+        self.use_speed_head_dir = use_speed_head_dir
         self.use_IMU_flag = use_IMU_flag
         self.use_click_flag = use_click_flag
         self.use_LFP_flag = use_LFP_flag
@@ -134,9 +137,10 @@ class Data_Prep_for_Raw():
         # bhv['Fs']: [[120]], bhv['bflying'].shape: (642724, 1), bhv['v_abs'].shape: (642724, 1), bhv['r'].shape: (642724, 3)
 
         # bhv_thresh = 6.0
-        bhv_v_abs = bhv['bflying'][:,0] # 'v_abs'
+        bhv_bflying = bhv['bflying'][:,0] # 'v_abs'
+        bhv_v_abs = bhv['v_abs'][:,0]
         # bhv_v_abs[np.where(bhv_v_abs > bhv_thresh)] = bhv_thresh
-        bhv_r = bhv['r']
+        bhv_r = bhv['r'] # 3D position
         if 'Dataset_2' in self.parent_folder:
             bhv_t = bhv['t'][:,0]
         else:
@@ -233,10 +237,25 @@ class Data_Prep_for_Raw():
             temp = interpolate_signal_with_nans(bhv_t, bhv_r[:,ii], self.all_time)
             # print (f'temp.shape: {temp.shape}')
             all_behavior.append(temp)
+        # add speed and head direction
+        if self.use_speed_head_dir:
+            traj = np.array(all_behavior[:bhv_r.shape[1]]).T # shape: (time, 3)
+            vel = np.gradient(traj, self.bin_width, axis=0)
+            speed = np.linalg.norm(vel, axis=1)
+            # vel = np.insert(np.diff(traj, axis=0), 0, 0.0, axis=0)/self.bin_width
+            # speed = np.linalg.norm(vel, axis=1, keepdims=True)
+            vel_unit = vel / (speed[:,None] + 1e-8)
+            # print (f'speed.shape: {speed.shape}')
+            all_behavior.append(speed)
+            for ii in range(vel_unit.shape[1]):
+                # print (f'vel_unit[:, ii].shape: {vel_unit[:, ii].shape}')
+                all_behavior.append(vel_unit[:, ii])
         # flight status
-        temp = interpolate_signal_with_nans(bhv_t, bhv_v_abs, self.all_time)
+        bhv_bflying_resample = interpolate_signal_with_nans(bhv_t, bhv_bflying, self.all_time)
+        bhv_v_abs_resample = interpolate_signal_with_nans(bhv_t, bhv_v_abs, self.all_time)
+        # print(f'np.mean(np.abs(bhv_v_abs_resample - speed)): {np.mean(np.abs(bhv_v_abs_resample - speed))}')
         # print (f'temp.shape: {temp.shape}')
-        all_behavior.append(temp)
+        # all_behavior.append(temp)
 
         if self.use_IMU_flag:
             for ii in range(imu_acc.shape[1]):
@@ -268,12 +287,12 @@ class Data_Prep_for_Raw():
 
         # only use the flight data
         if self.only_flight_flag:
-            self.flight_ind = np.where(all_behavior[3]>0.0)[0]
+            self.flight_ind = np.where(bhv_bflying_resample>0.0)[0]
             self.all_time_flight = self.all_time[self.flight_ind]
             all_behavior = all_behavior[:, self.flight_ind]
             # all_spike = all_spike[:, flight_ind]
             # remove flying dimension from the all_behavior
-            all_behavior = np.delete(all_behavior, 3, axis=0)
+            # all_behavior = np.delete(all_behavior, 3, axis=0)
             # print (f'all_behavior.shape: {all_behavior.shape}') 
 
         # not use 3d location
@@ -1076,6 +1095,7 @@ class SubsetSequentialSampler(Sampler):
 
 def bat_data_loader(
     session_names,
+    use_speed_head_dir = False,
     use_IMU_flag = False,  # True
     use_click_flag = False, # True
     use_LFP_flag = False,  # True
@@ -1121,6 +1141,7 @@ def bat_data_loader(
         data_prep_for_raw = Data_Prep_for_Raw(
             parent_folder = parent_folder,
             su_file_path = su_file_path,
+            use_speed_head_dir = use_speed_head_dir,
             use_IMU_flag = use_IMU_flag,
             use_click_flag = use_click_flag,
             use_LFP_flag = use_LFP_flag,
