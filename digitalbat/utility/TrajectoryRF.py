@@ -34,8 +34,10 @@ class Generate_Synthetic_Trajecories():
         t = np.linspace(0, 1, T)
 
         # Smooth random warp
-        np.random.seed(seed)
-        noise = np.random.randn(T)
+        rng = np.random.default_rng(seed)
+        noise = rng.normal(size=T)
+        # np.random.seed(seed)
+        # noise = np.random.randn(T)
         noise = np.cumsum(noise)
         noise = noise / np.max(np.abs(noise))
         t_warp = t + warp_strength * noise
@@ -60,8 +62,10 @@ class Generate_Synthetic_Trajecories():
         vel_unit = vel / (vel_norm + 1e-8)
 
         # Random rotation vectors
-        np.random.seed(seed)
-        noise = np.random.randn(*vel_unit.shape) * angle_std
+        rng = np.random.default_rng(seed)
+        noise = rng.normal(size=vel_unit.shape) * angle_std
+        # np.random.seed(seed)
+        # noise = np.random.randn(*vel_unit.shape) * angle_std
         vel_perturbed = vel_unit + noise
         vel_perturbed /= (np.linalg.norm(vel_perturbed, axis=1, keepdims=True)+ 1e-8)
         # Reintegrate
@@ -155,11 +159,12 @@ class Generate_Synthetic_Trajecories():
         for ii in range(self.n_samples):
             seed = self.seed + ii
             traj = self.anchor_flight_path.copy()
-            if np.random.rand() < 0.7:
+            rng = np.random.default_rng(seed + self.n_samples)
+            if rng.uniform() < 0.7:
                 traj = self.temporal_warp(traj, self.warp_strength, seed=seed)
-            if np.random.rand() < 0.7:
+            if rng.uniform() < 0.7:
                 traj = self.directional_perturbation(traj, self.angle_std, seed=seed)
-            if np.random.rand() < 0.7:
+            if rng.uniform() < 0.7:
                 traj = self.curvature_perturbation(traj, self.curvature_mag, seed=seed)
             trajectories.append(traj)
 
