@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.interpolate import interp1d
 from scipy.stats import spearmanr
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
 
 class Generate_Synthetic_Trajecories():
     """
@@ -208,3 +210,119 @@ class Generate_Synthetic_Trajecories():
 
         return None
 
+
+class TRFEstimator:
+    """
+    Estimate how a neuron's firing depends on trajectory features (such as speed, curvature, turning angle, phase), under contrilled perturbations.
+    This gives us statistical power for one anchor flight, not across several real flights.
+    Each neuron gets its own TRF vector.
+
+    # TODO
+    In the future, if we want, we can add other trajectory features such as:
+        signed curvature (left vs right turns)
+        distance to landmarks
+        torsion (3D curvature)
+        nonlinear TRFs (splines, GAMs)
+        phase × curvature interactions
+        
+    """
+    def __init__(self, alpha=1.0):
+        """
+        alpha: ridge regularization strength
+        """
+        self.alpha = alpha
+
+    # ---------- Trajectory feature extraction ----------
+
+    def extract_features(self, traj):
+        """
+        traj: (T, 3)
+        returns dict of feature arrays, each shape (T-2,)
+        """
+        vel = np.diff(traj, axis=0)              # (T-1, 3)
+        speed = np.linalg.norm(vel, axis=1)      # (T-1,)
+
+        # heading
+        heading = vel / (speed[:, None] + 1e-8)  # (T-1, 3)
+
+        # acceleration
+        acc = np.diff(vel, axis=0)               # (T-2, 3)
+
+        # curvature
+        cross = np.cross(vel[:-1], acc)
+        curvature = np.linalg.norm(cross, axis=1) / (
+            np.linalg.norm(vel[:-1], axis=1) ** 3 + 1e-8
+        )
+
+        # turning angle
+        dot = np.sum(heading[:-1] * heading[1:], axis=1)
+        dot = np.clip(dot, -1.0, 1.0)
+        turn_rate = np.arccos(dot)
+
+        # phase (arc-length normalized)
+        arc = np.concatenate([[0], np.cumsum(speed)])
+        phase = arc[:-2] / arc[-1]
+
+        return {
+            "speed": speed[:-1],
+            "curvature": curvature,
+            "turn_rate": turn_rate,
+            "phase": phase,
+        }
+
+    # ---------- TRF fitting ----------
+
+    def fit(self, synthetic_trajs, synthetic_y_pred):
+        """
+        synthetic_trajs: (N, T, 3)
+        synthetic_y_pred: (N, T, n_neurons)
+
+        returns:
+            trf_results: list of dicts (one dict per neuron)
+        """
+        N, T, _ = synthetic_trajs.shape
+        n_neurons = synthetic_y_pred.shape[-1]
+
+        # --- build feature matrix ---
+        feature_list = []
+        y_list = [[] for _ in range(n_neurons)]
+
+        for i in range(N):
+            feats = self.extract_features(synthetic_trajs[i])
+            X_i = np.column_stack(list(feats.values()))  # (T-2, n_features)
+            feature_list.append(X_i)
+
+            for n in range(n_neurons):
+                y_list[n].append(synthetic_y_pred[i, 1:-1, n])
+
+        X = np.vstack(feature_list)  # (N*(T-2), n_features)
+        feature_names = list(feats.keys())
+
+        results = []
+
+        for n in range(n_neurons):
+            y = np.concatenate(y_list[n])
+
+            # standardize
+            Xs = StandardScaler().fit_transform(X)
+            ys = (y - y.mean()) / (y.std() + 1e-8)
+
+            # ridge regression
+            model = Ridge(alpha=self.alpha)
+            model.fit(Xs, ys)
+
+            betas = dict(zip(feature_names, model.coef_))
+
+            # rank correlations (robust sanity check)
+            corrs = {
+                name: spearmanr(X[:, i], y)[0]
+                for i, name in enumerate(feature_names)
+            }
+
+            results.append({
+                "betas": betas,
+                "spearman": corrs,
+                "r2": model.score(Xs, ys),
+            })
+
+        return results
