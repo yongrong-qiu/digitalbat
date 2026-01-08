@@ -217,6 +217,7 @@ class Time_Resolved_TRF():
     Estimate how a neuron's firing depends on trajectory features (such as speed, curvature, turning angle, phase), under contrilled perturbations.
     This gives us statistical power for one anchor flight, not across several real flights.
     Each neuron gets its own TRF vector.
+    Time_Resolved_TRF() uses time-resolved features within each synthetic trajectory .
 
     # TODO
     In the future, if we want, we can add other trajectory features such as:
@@ -445,13 +446,126 @@ class Time_Resolved_TRF():
         return results
 
 
+class Time_Resolved_Phase():
+    """
+    Phase selectivity test.
+
+    We need to:
+        * Keep synthetic trajectories as experimental units
+        * Use time-resolved responses
+        * Test whether phase explains variance after marginalizing over trajectory perturbations
+
+    Steps:
+        1. Bin time points by phase
+        2. Average responses within each phase bin
+        3. Test whether phase-tuning curves are consistent across synthetic trajectories
+        4. Compare against a phase-shuffled null
+    """
+    def __init__(self, n_bins=10, n_null=500, seed=0,):
+        self.n_bins = n_bins
+        self.n_null = n_null
+        self.seed = seed
+
+    @staticmethod
+    def phase_bins(T, n_bins=10):
+        """Phase binning"""
+        phase = np.linspace(0, 1, T)
+        bins = np.linspace(0, 1, n_bins + 1)
+        bin_idx = np.digitize(phase, bins) - 1
+        bin_idx[bin_idx == n_bins] = n_bins - 1
+        return bin_idx, n_bins
+    
+    @staticmethod
+    def phase_tuning_curves(synthetic_y_pred, n_bins=10):
+        """
+        Compute phase tuning curves
+        synthetic_y_pred: (N, T, n_neurons)
+        Returns: (N, n_bins, n_neurons)
+        """
+        N, T, n_neurons = synthetic_y_pred.shape
+        bin_idx, n_bins = Time_Resolved_Phase.phase_bins(T, n_bins)
+
+        curves = np.zeros((N, n_bins, n_neurons))
+        for s in range(N):
+            for b in range(n_bins):
+                mask = bin_idx == b
+                curves[s, b] = synthetic_y_pred[s, mask].mean(axis=0) 
+
+        return curves
+    
+    @staticmethod
+    def phase_selectivity_stat(curves):
+        """
+        Phase selectivity statistic
+        curves: (N, n_bins, n_neurons)
+        Returns: (n_neurons,)
+        """
+        # Mean tuning curve across synthetic trajectories
+        mean_curve = curves.mean(axis=0)  # (n_bins, n_neurons)
+
+        # Variance across phase
+        phase_var = mean_curve.var(axis=0)
+
+        return phase_var
+    
+    @staticmethod
+    def phase_shuffle_null(synthetic_y_pred, n_bins=10, n_null=500, seed=0):
+        rng = np.random.default_rng(seed)
+        N, T, n_neurons = synthetic_y_pred.shape
+        null_stats = np.zeros((n_null, n_neurons))
+
+        for i in range(n_null):
+            shuffled = synthetic_y_pred.copy()
+            for s in range(N):
+                shift = rng.integers(0, T)
+                shuffled[s] = np.roll(shuffled[s], shift, axis=0)
+
+            curves = Time_Resolved_Phase.phase_tuning_curves(shuffled, n_bins)
+            null_stats[i] = Time_Resolved_Phase.phase_selectivity_stat(curves)
+
+        return null_stats
+    
+    def run(self, synthetic_y_pred):
+        # Compute observed statistic
+        curves = Time_Resolved_Phase.phase_tuning_curves(synthetic_y_pred[:, :, :], n_bins=10)
+        phase_stat_obs = Time_Resolved_Phase.phase_selectivity_stat(curves)
+        # Null distribution
+        phase_stat_null = Time_Resolved_Phase.phase_shuffle_null(
+            synthetic_y_pred[:, :, :],
+            n_bins=self.n_bins,
+            n_null=self.n_null,
+            seed=self.seed,
+        )
+        # p-values
+        p_phase = np.mean(
+            phase_stat_null >= phase_stat_obs[None, :],
+            axis=0,
+        )
+
+        # for n in range(phase_stat_obs.shape[0]):
+        #     print(
+        #         f"Neuron {n}: "
+        #         f"phase_var={phase_stat_obs[n]:.4f}, "
+        #         f"p_phase={p_phase[n]:.4f}"
+        #     )
+
+        results = []
+        for ii in range(phase_stat_obs.shape[0]):
+            results.append({
+                "phase_var": phase_stat_obs[ii],
+                "p_value": p_phase[ii],
+            })
+        
+        return results
+
+
 class Trajectory_Level_TRF():
     """
     Statistical test of Trajectory Receptive Fields (TRFs)
     for a single anchor trajectory using synthetic perturbations.
     
     This analysis uses trajectory-level features collapsing over time.
-    Yet, TRFEstimator() uses time-resolved features within each synthetic trajectory (collapsing perturbations).
+    Yet, Time_Resolved_TRF() uses time-resolved features within each synthetic trajectory (collapsing perturbations).
     """
 
     def __init__(
