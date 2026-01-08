@@ -3,6 +3,7 @@ from scipy.interpolate import interp1d
 from scipy.stats import spearmanr
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
 
 class Generate_Synthetic_Trajecories():
     """
@@ -323,6 +324,179 @@ class TRFEstimator:
                 "betas": betas,
                 "spearman": corrs,
                 "r2": model.score(Xs, ys),
+            })
+
+        return results
+    
+
+class Trajectory_Level_TRF():
+    """
+    Statistical test of Trajectory Receptive Fields (TRFs)
+    for a single anchor trajectory using synthetic perturbations.
+    
+    This analysis uses trajectory-level features collapsing over time.
+    Yet, TRFEstimator() uses time-resolved features within each synthetic trajectory (collapsing perturbations).
+    """
+
+    def __init__(
+        self,
+        synthetic_trajs,      # (N, T, 3)
+        synthetic_y_pred,     # (N, T, n_neurons)
+        feature_fns=None,          # dict: name -> function(traj) -> scalar
+        alpha=1.0,            # ridge regularization
+        n_splits=5,
+        n_null=500,
+        seed=0,
+    ):
+        self.synthetic_trajs = synthetic_trajs
+        self.synthetic_y_pred = synthetic_y_pred
+        if feature_fns:
+            self.feature_fns = feature_fns
+        else:
+            feature_fns = {
+                "speed": Trajectory_Level_TRF.mean_speed,
+                "speed_var": Trajectory_Level_TRF.speed_variability,
+                "curvature": Trajectory_Level_TRF.mean_curvature,
+                "turn_rate": Trajectory_Level_TRF.mean_turn_rate,
+                # "phase": phase_center,
+            }
+            self.feature_fns = feature_fns
+        self.alpha = alpha
+        self.n_splits = n_splits
+        self.n_null = n_null
+        self.rng = np.random.default_rng(seed)
+
+        self.N, self.T, self.n_neurons = synthetic_y_pred.shape
+        self.feature_names = list(feature_fns.keys())
+
+        self.X = self._compute_feature_matrix()
+        self.Y = self._compute_response_matrix()
+
+    # -----------------------
+    # Feature & response extraction
+    # -----------------------
+    def _compute_feature_matrix(self):
+        """X: (N, n_features)"""
+        X = np.zeros((self.N, len(self.feature_fns)))
+        for i, traj in enumerate(self.synthetic_trajs):
+            for j, fn in enumerate(self.feature_fns.values()):
+                X[i, j] = fn(traj)
+        return X
+
+    def _compute_response_matrix(self):
+        """
+        Y: (N, n_neurons)
+        Trajectory-level response = mean firing rate
+        """
+        return self.synthetic_y_pred.mean(axis=1)
+
+    # -----------------------
+    # Core regression
+    # -----------------------
+    def _fit_and_score(self, X, y):
+        """
+        Cross-validated R² and betas
+        """
+        kf = KFold(self.n_splits, shuffle=True, random_state=0)
+        r2_scores = []
+        betas = []
+
+        for train_idx, test_idx in kf.split(X):
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X[train_idx])
+            X_test  = scaler.transform(X[test_idx])
+
+            model = Ridge(alpha=self.alpha)
+            model.fit(X_train, y[train_idx])
+
+            r2_scores.append(model.score(X_test, y[test_idx]))
+            betas.append(model.coef_)
+
+        return np.mean(r2_scores), np.mean(betas, axis=0)
+
+    # -----------------------
+    # Null model
+    # -----------------------
+    def _null_distribution(self, y):
+        """
+        Feature-permutation null
+        """
+        null_betas = np.zeros((self.n_null, len(self.feature_names)))
+        null_r2 = np.zeros(self.n_null)
+
+        for i in range(self.n_null):
+            X_null = self.X.copy()
+            for j in range(X_null.shape[1]):
+                self.rng.shuffle(X_null[:, j])
+
+            null_r2[i], null_betas[i] = self._fit_and_score(X_null, y)
+
+        return null_r2, null_betas
+    
+    # -----------------------
+    # feature_fns
+    # -----------------------
+    @staticmethod
+    def mean_speed(traj):
+        v = np.diff(traj, axis=0)
+        return np.linalg.norm(v, axis=1).mean()
+
+    @staticmethod
+    def speed_variability(traj):
+        v = np.diff(traj, axis=0)
+        s = np.linalg.norm(v, axis=1)
+        return s.std() / (s.mean() + 1e-8)
+
+    @staticmethod 
+    def mean_curvature(traj):
+        v = np.gradient(traj, axis=0)
+        a = np.gradient(v, axis=0)
+        num = np.linalg.norm(np.cross(v, a), axis=1)
+        denom = np.linalg.norm(v, axis=1)**3 + 1e-8
+        return np.mean(num / denom)
+
+    @staticmethod
+    def mean_turn_rate(traj):
+        v = np.diff(traj, axis=0)
+        v = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-8)
+        angles = np.arccos(np.clip(np.sum(v[:-1] * v[1:], axis=1), -1, 1))
+        return angles.mean()
+
+    @staticmethod
+    def phase_center(traj):
+        # Anchor-normalized phase (constant by construction)
+        return 0.5
+
+
+    # -----------------------
+    # Public API
+    # -----------------------
+    def run(self):
+        """
+        Returns results for all neurons
+        """
+        results = []
+
+        for neuron_idx in range(self.n_neurons):
+            y = self.Y[:, neuron_idx]
+
+            r2_obs, beta_obs = self._fit_and_score(self.X, y)
+            r2_null, beta_null = self._null_distribution(y)
+
+            p_r2 = np.mean(r2_null >= r2_obs)
+
+            p_betas = {
+                name: np.mean(np.abs(beta_null[:, i]) >= abs(beta_obs[i]))
+                for i, name in enumerate(self.feature_names)
+            }
+
+            results.append({
+                "neuron": neuron_idx,
+                "r2_obs": r2_obs,
+                "r2_null_mean": r2_null.mean(),
+                "p_r2": p_r2,
+                "betas": dict(zip(self.feature_names, beta_obs)),
+                "p_betas": p_betas,
             })
 
         return results
