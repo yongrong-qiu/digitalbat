@@ -212,7 +212,7 @@ class Generate_Synthetic_Trajecories():
         return None
 
 
-class TRFEstimator:
+class Time_Resolved_TRF():
     """
     Estimate how a neuron's firing depends on trajectory features (such as speed, curvature, turning angle, phase), under contrilled perturbations.
     This gives us statistical power for one anchor flight, not across several real flights.
@@ -227,11 +227,14 @@ class TRFEstimator:
         phase × curvature interactions
         
     """
-    def __init__(self, alpha=1.0):
+    def __init__(self, alpha=1.0, n_splits=5, n_shuffles=500, seed=0):
         """
         alpha: ridge regularization strength
         """
         self.alpha = alpha
+        self.n_splits = n_splits
+        self.n_shuffles = n_shuffles
+        self.rng = np.random.default_rng(seed)
 
     # ---------- Trajectory feature extraction ----------
 
@@ -273,7 +276,7 @@ class TRFEstimator:
 
     # ---------- TRF fitting ----------
 
-    def fit(self, synthetic_trajs, synthetic_y_pred):
+    def fit_old(self, synthetic_trajs, synthetic_y_pred):
         """
         synthetic_trajs: (N, T, 3)
         synthetic_y_pred: (N, T, n_neurons)
@@ -328,6 +331,119 @@ class TRFEstimator:
 
         return results
     
+    # ---------- Main fitting + statistics ----------
+    def _fit_and_score(self, X, y):
+        """
+        Cross-validated R² and betas
+        """
+        kf = KFold(self.n_splits, shuffle=True, random_state=0)
+        r2_scores = []
+        betas = []
+
+        for train_idx, test_idx in kf.split(X):
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X[train_idx])
+            X_test  = scaler.transform(X[test_idx])
+
+            model = Ridge(alpha=self.alpha)
+            model.fit(X_train, y[train_idx])
+
+            r2_scores.append(model.score(X_test, y[test_idx]))
+            betas.append(model.coef_)
+
+        return np.mean(r2_scores), np.mean(betas, axis=0)
+
+    def fit(self, synthetic_trajs, synthetic_y_pred):
+        """
+        synthetic_trajs: (N, T, 3)
+        synthetic_y_pred: (N, T, n_neurons)
+
+        returns:
+            trf_results: list of dicts (one dict per neuron)
+        """
+        N, T, _ = synthetic_trajs.shape
+        n_neurons = synthetic_y_pred.shape[-1]
+
+        feature_blocks = []
+        y_blocks = [[] for _ in range(n_neurons)]
+
+        for i in range(N):
+            feats = self.extract_features(synthetic_trajs[i])
+            X_i = np.column_stack(list(feats.values())) # (T-2, n_features)
+            feature_blocks.append(X_i)
+
+            for n in range(n_neurons):
+                y_blocks[n].append(synthetic_y_pred[i, 1:-1, n])
+
+        feature_names = list(feats.keys())
+        n_features = len(feature_names)
+
+        X = np.vstack(feature_blocks) # (N*(T-2), n_features)
+        block_sizes = [len(b) for b in feature_blocks]
+        # print(f'X.shape: {X.shape}')
+
+        results = []
+
+        for n in range(n_neurons):
+            y = np.concatenate(y_blocks[n])
+
+            # scaler_X = StandardScaler().fit(X)
+            # Xs = scaler_X.transform(X)
+            # ys = (y - y.mean()) / (y.std() + 1e-8)
+            # model = Ridge(alpha=self.alpha)
+            # model.fit(Xs, ys)
+            # beta_obs = model.coef_.copy()
+            # r2 = model.score(Xs, ys)
+
+            r2, beta_obs = self._fit_and_score(X, y)
+
+            # ---------- NEW: beta shuffle null ----------
+            beta_null = np.zeros((self.n_shuffles, n_features))
+            # for s in range(self.n_shuffles):
+            #     Xs_null = Xs.copy()
+            #     for j in range(n_features):
+            #         # shuffle feature j across trajectories
+            #         start = 0
+            #         perm = self.rng.permutation(N)
+            #         shuffled_col = []
+            #         for idx in perm:
+            #             size = block_sizes[idx]
+            #             shuffled_col.append(
+            #                 Xs[start:start+size, j]
+            #             )
+            #             start += size
+            #         Xs_null[:, j] = np.concatenate(shuffled_col)
+            #     model_null = Ridge(alpha=self.alpha)
+            #     model_null.fit(Xs_null, ys)
+            #     beta_null[s] = model_null.coef_
+
+            # shuffle each feature across time within each synthetic trajectory
+            for i in range(self.n_shuffles):
+                X_null = np.reshape(X.copy(), (N, T-2, n_features))
+                for j in range(n_features):
+                    self.rng.shuffle(X_null[:, :, j], axis=1)
+                _, beta_null[i,] = self._fit_and_score(np.reshape(X_null, (-1, n_features)), y)
+
+            # two-sided p-values
+            pvals = {
+                feature_names[j]:
+                np.mean(np.abs(beta_null[:, j]) >= abs(beta_obs[j]))
+                for j in range(n_features)
+            }
+            betas = dict(zip(feature_names, beta_obs))
+            corrs = {
+                name: spearmanr(X[:, i], y)[0]
+                for i, name in enumerate(feature_names)
+            }
+            results.append({
+                "betas": betas,
+                "pvals": pvals,
+                "spearman": corrs,
+                "r2": r2,
+            })
+
+        return results
+
 
 class Trajectory_Level_TRF():
     """
