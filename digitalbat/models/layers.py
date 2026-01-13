@@ -413,3 +413,27 @@ class TransformerEncoderRoPE(nn.Module):
             return out, attn_weights 
         else:
             return out
+        
+
+class RBFBasis(torch.nn.Module):
+    """
+    Spatial basis
+    RBF (Gaussian place basis)
+    """
+    def __init__(self, centers, sigma):
+        """
+        centers: (K, 3) tensor
+        sigma: float
+        """
+        super().__init__()
+        self.register_buffer("centers", centers)
+        self.sigma = sigma
+
+    def forward(self, x):
+        """
+        x: (Batch_size, T, 3)
+        returns: (Batch_size, T, K)
+        """
+        diff = x[:, :, None, :] - self.centers[None, None, :, :] # (B, T, 1, 3) - (1, 1, K, 3)
+        dist2 = (diff ** 2).sum(dim=-1)
+        return torch.exp(-dist2 / (2 * self.sigma ** 2))

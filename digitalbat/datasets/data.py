@@ -8,6 +8,8 @@ import glob
 import h5py
 from scipy.stats import binned_statistic
 from collections import namedtuple
+from sklearn.cluster import KMeans
+from scipy.spatial.distance import cdist
 
 from ..utility.utils import bandpass_filter
 from ..utility.utils import interpolate_signal_with_nans
@@ -1134,6 +1136,7 @@ def bat_data_loader(
     meta_info_dict['behavior_mean'] = {}
     meta_info_dict['behavior_std'] = {}
     meta_info_dict['spike_std'] = {}
+    meta_info_dict['spatial_centers_sigma'] = {}
 
     for session_id, session_name in enumerate(session_names):
         parent_folder = '/mnt/at-globusshare/Users/Yongrong/' + session_name
@@ -1225,9 +1228,11 @@ def bat_data_loader(
             spike_std = np.nanstd(data_output, axis=(0,1), keepdims=True)
             data_input = np.nan_to_num(data_input) # NaN to 0.0, shape: (N, window_size, num_behavior_channels)
             data_output = np.nan_to_num(data_output) # NaN to 0.0, shape: (N, window_size, num_neurons)
+            centers, sigma = compute_rbf_basis_from_training(data_input[data_mask == 1.0], K=32)
         meta_info_dict['behavior_mean'][session_name] = behavior_mean
         meta_info_dict['behavior_std'][session_name] = behavior_std
         meta_info_dict['spike_std'][session_name] = spike_std
+        meta_info_dict['spatial_centers_sigma'][session_name] = (centers, sigma)
         ind = list(range(data_input.shape[0]))
         dat = BehaviorSpikeDataset(
             samples = (data_input, data_output) if mask_train is None else (data_input, data_output, data_mask, data_flight_path_index, data_flight_type_index),
@@ -1300,3 +1305,35 @@ def bat_data_loader(
     return dataloaders_combined, behavior_dim, unit_num_dict, meta_info_dict
 
 
+def compute_rbf_basis_from_training(train_trajectories, K, random_state=0):
+    """
+    Parameters
+    ----------
+    train_trajectories : numpy array with a shape of (T, 3), concatenating all flight trajectories in the training dataset
+    K : int
+        Number of RBF centers.
+    random_state : int
+        Random seed for KMeans.
+
+    Returns
+    -------
+    centers : (K, 3) numpy array
+        RBF centers.
+    sigma : float
+        Global RBF width.
+    """
+
+    # # Concatenate all training trajectories
+    # X = np.concatenate(train_trajectories, axis=0)  # (sum_i T_i, 3)
+    # KMeans to get centers
+    kmeans = KMeans(n_clusters=K, random_state=random_state)
+    kmeans.fit(train_trajectories)
+    centers = kmeans.cluster_centers_  # (K, 3), numpy array
+    # Pairwise distances between centers
+    dists = cdist(centers, centers)  # (K, K)
+    # Exclude zero distances (diagonal)
+    nonzero_dists = dists[dists > 0]
+    # Robust estimate of spatial scale
+    sigma = np.median(nonzero_dists)
+
+    return centers, float(sigma)

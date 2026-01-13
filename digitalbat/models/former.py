@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from .layers import TransformerEncoderRoPE
+from .layers import TransformerEncoderRoPE, RBFBasis
 
 
 class Bat_Transformer(nn.Module):
@@ -31,6 +31,10 @@ class Bat_Transformer(nn.Module):
         self,
         input_dim: int,
         output_dim_dict: dict, # a dictionary of spiking unit numbers for each session, e.g., {'Dataset_3_14543_240419': 289, 'Dataset_1_32622_231009': 95}
+        add_spatial_basis: bool = False, # whether to add spatial bases to the model input or not
+        basis_type: str = "RBF", # type of spatial basis
+        # basis_num: int = 32, # number of basis
+        spatial_centers_sigma_dict = None, # a dictionary of spatial centers and sigma for each session
         latent_dim: int = 64,
         num_heads: int = 4,
         ff_dim: int = 64,
@@ -39,7 +43,22 @@ class Bat_Transformer(nn.Module):
         final_activation: nn.Module = nn.Identity(),
     ):
         super().__init__()
-        self.embed = nn.Linear(input_dim, latent_dim) # behavior embedding
+        # input embedding
+        self.add_spatial_basis = add_spatial_basis
+        if self.add_spatial_basis:
+            self.embed = nn.Linear(input_dim, latent_dim//2) # behavior embedding
+            if basis_type == 'RBF':
+                self.spatial_basis = nn.ModuleDict({
+                    session_name: RBFBasis(torch.from_numpy(centers).float(), torch.from_numpy(sigma).float())
+                    for session_name, (centers, sigma) in spatial_centers_sigma_dict.items()
+                })
+            self.basis_num = len(list(spatial_centers_sigma_dict.values())[0][0]) # number of basis
+            self.embed_place = nn.ModuleDict({
+                session_name: nn.Linear(self.basis_num, latent_dim//2) for session_name in spatial_centers_sigma_dict.keys()
+            })
+        else:
+            self.embed = nn.Linear(input_dim, latent_dim) # behavior embedding
+
         self.layers = nn.ModuleList([
             TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, dropout=dropout_prob) for _ in range(num_layers)
         ])
@@ -86,7 +105,13 @@ class Bat_Transformer(nn.Module):
         attn_mask = attn_mask[:, None, :, :] # (B, 1, T, T)
         # attn_mask = attn_mask.expand(-1, self.num_heads, -1, -1) # (B, num_heads, T, T)
 
-        x = self.embed(x)
+        if self.add_spatial_basis:
+            x_traj = self.embed(x)
+            phi_x = self.spatial_basis[session_name](x[:, :, :3]) #
+            x_place = self.embed_place[session_name](phi_x)
+            x = torch.cat((x_traj, x_place), dim=-1)
+        else:
+            x = self.embed(x)
 
         if return_attn_weights:
             attn_weights_list = []
