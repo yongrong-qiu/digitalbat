@@ -49,7 +49,7 @@ class Bat_Transformer(nn.Module):
             self.embed = nn.Linear(input_dim, latent_dim//2) # behavior embedding
             if basis_type == 'RBF':
                 self.spatial_basis = nn.ModuleDict({
-                    session_name: RBFBasis(torch.from_numpy(centers).float(), torch.from_numpy(sigma).float())
+                    session_name: RBFBasis(torch.from_numpy(centers).float(), sigma)
                     for session_name, (centers, sigma) in spatial_centers_sigma_dict.items()
                 })
             self.basis_num = len(list(spatial_centers_sigma_dict.values())[0][0]) # number of basis

@@ -1228,7 +1228,10 @@ def bat_data_loader(
             spike_std = np.nanstd(data_output, axis=(0,1), keepdims=True)
             data_input = np.nan_to_num(data_input) # NaN to 0.0, shape: (N, window_size, num_behavior_channels)
             data_output = np.nan_to_num(data_output) # NaN to 0.0, shape: (N, window_size, num_neurons)
-            centers, sigma = compute_rbf_basis_from_training(data_input[data_mask == 1.0], K=32)
+            centers, sigma = compute_rbf_basis_from_training(
+                (data_input[data_mask == 1.0] - behavior_mean.squeeze(axis=0))/behavior_std.squeeze(axis=0), 
+                K=32,
+            )
         meta_info_dict['behavior_mean'][session_name] = behavior_mean
         meta_info_dict['behavior_std'][session_name] = behavior_std
         meta_info_dict['spike_std'][session_name] = spike_std
