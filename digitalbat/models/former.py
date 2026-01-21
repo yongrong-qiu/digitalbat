@@ -43,10 +43,17 @@ class Bat_Transformer(nn.Module):
         final_activation: nn.Module = nn.Identity(),
     ):
         super().__init__()
-        # input embedding
+        
         self.add_spatial_basis = add_spatial_basis
         if self.add_spatial_basis:
             self.embed = nn.Linear(input_dim, latent_dim//2) # behavior embedding
+            self.embed_dropout = nn.Dropout(0.1)
+            # transformer
+            self.layers = nn.ModuleList([
+                TransformerEncoderRoPE(hidden_dim=latent_dim//2, num_head=num_heads, ff_dim=ff_dim//2, dropout=dropout_prob) for _ in range(num_layers)
+            ])
+
+            # discrete spatial embdding
             if basis_type == 'RBF':
                 self.spatial_basis = nn.ModuleDict({
                     session_name: RBFBasis(torch.from_numpy(centers).float(), sigma)
@@ -56,12 +63,14 @@ class Bat_Transformer(nn.Module):
             self.embed_place = nn.ModuleDict({
                 session_name: nn.Linear(self.basis_num, latent_dim//2) for session_name in spatial_centers_sigma_dict.keys()
             })
+            self.place_dropout = nn.Dropout(0.3)
         else:
             self.embed = nn.Linear(input_dim, latent_dim) # behavior embedding
-
-        self.layers = nn.ModuleList([
-            TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, dropout=dropout_prob) for _ in range(num_layers)
-        ])
+            self.embed_dropout = nn.Dropout(0.1)
+            # transformer
+            self.layers = nn.ModuleList([
+                TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, dropout=dropout_prob) for _ in range(num_layers)
+            ])
         self.num_heads = num_heads
 
         # session-specific readouts
@@ -104,15 +113,15 @@ class Bat_Transformer(nn.Module):
         attn_mask = torch.einsum("bi,bj->bij", mask.float(), mask.float()).bool() # (B, T, T), BOOL
         attn_mask = attn_mask[:, None, :, :] # (B, 1, T, T)
         # attn_mask = attn_mask.expand(-1, self.num_heads, -1, -1) # (B, num_heads, T, T)
-
+        
+        # spatial basis
         if self.add_spatial_basis:
-            x_traj = self.embed(x)
             phi_x = self.spatial_basis[session_name](x[:, :, :3]) #
-            x_place = self.embed_place[session_name](phi_x)
-            x = torch.cat((x_traj, x_place), dim=-1)
-        else:
-            x = self.embed(x)
+            x_place = self.place_dropout(self.embed_place[session_name](phi_x))
+        # behavior embedding
+        x = self.embed_dropout(self.embed(x)) 
 
+        # transformer
         if return_attn_weights:
             attn_weights_list = []
             for layer in self.layers:
@@ -143,7 +152,11 @@ class Bat_Transformer(nn.Module):
                     num_global=num_global,
                     num_random=num_random,
                 )
-    
+
+        if self.add_spatial_basis:
+            x = torch.cat((x, x_place), dim=-1)
+
+        # readout
         x = self.readouts[session_name](x)
         x = self.final_activation(x)
 
