@@ -52,7 +52,8 @@ class Bat_Transformer(nn.Module):
             self.embed_dropout = nn.Dropout(0.1)
             # transformer
             self.layers = nn.ModuleList([
-                TransformerEncoderRoPE(hidden_dim=latent_dim//2, num_head=num_heads, ff_dim=ff_dim//2, dropout=dropout_prob) for _ in range(num_layers)
+                TransformerEncoderRoPE(hidden_dim=latent_dim//2, num_head=num_heads, ff_dim=ff_dim//2,
+                                       dropout=dropout_prob, use_low_rank=use_low_rank, low_rank_r=low_rank_r) for _ in range(num_layers)
             ])
 
             # discrete spatial embdding
@@ -78,21 +79,26 @@ class Bat_Transformer(nn.Module):
             self.embed_dropout = nn.Dropout(0.1)
             # transformer
             self.layers = nn.ModuleList([
-                TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, dropout=dropout_prob) for _ in range(num_layers)
+                TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, 
+                                       dropout=dropout_prob, use_low_rank=use_low_rank, low_rank_r=low_rank_r) for _ in range(num_layers)
             ])
         self.num_heads = num_heads
 
         # session-specific readouts
-        if use_low_rank:
-            self.readouts = nn.ModuleDict({
-                session_name: nn.Sequential(nn.Linear(latent_dim, low_rank_r), nn.Linear(low_rank_r, unit_num))
-                for session_name, unit_num in output_dim_dict.items()
-            })
-        else:
-            self.readouts = nn.ModuleDict({
-                session_name: nn.Linear(latent_dim, unit_num)
-                for session_name, unit_num in output_dim_dict.items()
-            })
+        # if use_low_rank:
+        #     self.readouts = nn.ModuleDict({
+        #         session_name: nn.Sequential(nn.Linear(latent_dim, low_rank_r), nn.Linear(low_rank_r, unit_num))
+        #         for session_name, unit_num in output_dim_dict.items()
+        #     })
+        # else:
+        #     self.readouts = nn.ModuleDict({
+        #         session_name: nn.Linear(latent_dim, unit_num)
+        #         for session_name, unit_num in output_dim_dict.items()
+        #     })
+        self.readouts = nn.ModuleDict({
+            session_name: nn.Linear(latent_dim, unit_num)
+            for session_name, unit_num in output_dim_dict.items()
+        })
 
         self.final_activation = final_activation
 

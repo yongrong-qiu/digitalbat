@@ -185,7 +185,14 @@ class MultiheadAttentionRoPE(nn.Module):
         # (2, 16, 64), (2, 8, 16, 16)
 
     """
-    def __init__(self, embed_dim, num_heads, bias=True):
+    def __init__(
+        self, 
+        embed_dim, 
+        num_heads, 
+        bias=True, 
+        use_low_rank=False, # whether to use low rank matrix multiplication or not
+        low_rank_r=4
+    ):
         """
         embed_dim: total embedding dimension (e.g., 512)
         num_heads: number of attention heads (e.g., 8)
@@ -198,13 +205,20 @@ class MultiheadAttentionRoPE(nn.Module):
         self.head_dim = embed_dim // num_heads
         assert self.head_dim % 2 == 0, "RoPE requires an even head_dim."
 
-        # Linear projections for query, key, value
-        self.W_q = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.W_k = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.W_v = nn.Linear(embed_dim, embed_dim, bias=bias)
-
-        # Output projection
-        self.W_o = nn.Linear(embed_dim, embed_dim, bias=bias)
+        if use_low_rank:
+            # Linear projections for query, key, value
+            self.W_q = nn.Sequential(nn.Linear(embed_dim, low_rank_r, bias=bias), nn.Linear(low_rank_r, embed_dim, bias=bias)) 
+            self.W_k = nn.Sequential(nn.Linear(embed_dim, low_rank_r, bias=bias), nn.Linear(low_rank_r, embed_dim, bias=bias)) 
+            self.W_v = nn.Sequential(nn.Linear(embed_dim, low_rank_r, bias=bias), nn.Linear(low_rank_r, embed_dim, bias=bias)) 
+            # Output projection
+            self.W_o = nn.Sequential(nn.Linear(embed_dim, low_rank_r, bias=bias), nn.Linear(low_rank_r, embed_dim, bias=bias)) 
+        else:
+            # Linear projections for query, key, value
+            self.W_q = nn.Linear(embed_dim, embed_dim, bias=bias)
+            self.W_k = nn.Linear(embed_dim, embed_dim, bias=bias)
+            self.W_v = nn.Linear(embed_dim, embed_dim, bias=bias)
+            # Output projection
+            self.W_o = nn.Linear(embed_dim, embed_dim, bias=bias)
 
     def forward(
         self, 
@@ -336,19 +350,30 @@ class TransformerEncoderRoPE(nn.Module):
         ff_dim,
         nonlinear_module = nn.GELU(),
         dropout = 0.1,
+        use_low_rank = False, # whether to use low rank matrix multiplication or not
+        low_rank_r = 4,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_head = num_head
         self.head_dim = hidden_dim // num_head
 
-        self.attention = MultiheadAttentionRoPE(hidden_dim, num_head)
+        self.attention = MultiheadAttentionRoPE(hidden_dim, num_head, use_low_rank=use_low_rank, low_rank_r=low_rank_r)
 
-        self.ff = nn.Sequential(
-            nn.Linear(hidden_dim, ff_dim),
-            nonlinear_module,
-            nn.Linear(ff_dim, hidden_dim),
-        )
+        if use_low_rank:
+            self.ff = nn.Sequential(
+                nn.Linear(hidden_dim, low_rank_r),
+                nn.Linear(low_rank_r, ff_dim),
+                nonlinear_module,
+                nn.Linear(ff_dim, low_rank_r),
+                nn.Linear(low_rank_r, hidden_dim),
+            )
+        else:
+            self.ff = nn.Sequential(
+                nn.Linear(hidden_dim, ff_dim),
+                nonlinear_module,
+                nn.Linear(ff_dim, hidden_dim),
+            )
 
         self.dropout = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(hidden_dim)
