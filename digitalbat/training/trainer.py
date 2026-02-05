@@ -5,6 +5,7 @@ import torch.optim as optim
 import tqdm
 import copy
 from typing import Callable
+from transformers import get_cosine_schedule_with_warmup
 
 from ..utility.utils import corr, poisson_fde_population
 from ..models.layers import FocalLoss, BCEFocalCombinedLoss
@@ -292,6 +293,8 @@ def bat_former_trainer(
     num_global=2, # bigbird style sparse attention
     num_random=1, # bigbird style sparse attention
     n_epochs=200, # number of epochs to run
+    use_cosine_scheduler: bool = False, # use cosine scheduler or not
+    n_warmup=None, # number of warmup steps for learning rate
     lr=0.0001, # learning rate
     loss_fn: nn.Module | None = None, 
     valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None, 
@@ -314,6 +317,15 @@ def bat_former_trainer(
     loss_fn = loss_fn.to(device)  # Make sure the loss module is on the correct device
 
     optimizer = optim.AdamW(model.parameters(), lr=lr)
+    if use_cosine_scheduler:
+        if n_warmup is None:
+            n_warmup = int(0.1 * n_epochs)
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=n_warmup,
+            num_training_steps=n_epochs,
+            num_cycles=1.5,
+        )
  
     # Hold the best model
     best_score = - np.inf   # correlation coefficient, larger scores indicate better model
@@ -349,6 +361,8 @@ def bat_former_trainer(
                 loss.backward()
                 # update weights
                 optimizer.step()
+                if use_cosine_scheduler:
+                    scheduler.step()
 
         # evaluate accuracy at end of each epoch
         model.eval()
