@@ -41,6 +41,7 @@ class Bat_Transformer(nn.Module):
         num_layers: int = 1,
         dropout_prob: float = 0.0,
         use_low_rank: bool = False, # whether to use low rank matrix multiplication or not
+        use_low_rank_readout: bool = False, # whether to use low rank matrix multiplication for readout modules or not
         low_rank_r: int = 4,
         final_activation: nn.Module = nn.Identity(),
     ):
@@ -85,20 +86,16 @@ class Bat_Transformer(nn.Module):
         self.num_heads = num_heads
 
         # session-specific readouts
-        # if use_low_rank:
-        #     self.readouts = nn.ModuleDict({
-        #         session_name: nn.Sequential(nn.Linear(latent_dim, low_rank_r), nn.Linear(low_rank_r, unit_num))
-        #         for session_name, unit_num in output_dim_dict.items()
-        #     })
-        # else:
-        #     self.readouts = nn.ModuleDict({
-        #         session_name: nn.Linear(latent_dim, unit_num)
-        #         for session_name, unit_num in output_dim_dict.items()
-        #     })
-        self.readouts = nn.ModuleDict({
-            session_name: nn.Linear(latent_dim, unit_num)
-            for session_name, unit_num in output_dim_dict.items()
-        })
+        if use_low_rank_readout:
+            self.readouts = nn.ModuleDict({
+                session_name: nn.Sequential(nn.Linear(latent_dim, low_rank_r), nn.Linear(low_rank_r, unit_num))
+                for session_name, unit_num in output_dim_dict.items()
+            })
+        else:
+            self.readouts = nn.ModuleDict({
+                session_name: nn.Linear(latent_dim, unit_num)
+                for session_name, unit_num in output_dim_dict.items()
+            })
 
         self.final_activation = final_activation
 
