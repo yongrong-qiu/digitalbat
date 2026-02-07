@@ -65,16 +65,33 @@ class Bat_Transformer(nn.Module):
                 })
             self.basis_num = len(list(spatial_centers_sigma_dict.values())[0][0]) # number of basis
             if use_low_rank:
-                self.embed_place = nn.ModuleDict({
-                    session_name: nn.Sequential(nn.Linear(self.basis_num, low_rank_r), nn.Linear(low_rank_r, latent_dim//2))
-                    for session_name in spatial_centers_sigma_dict.keys()
-                })
-                self.place_dropout = nn.Dropout(0.1)
+                # self.embed_place = nn.ModuleDict({
+                #     session_name: nn.Sequential(nn.Linear(self.basis_num, low_rank_r), nn.Linear(low_rank_r, latent_dim//2), nn.Dropout(0.1))
+                #     for session_name in spatial_centers_sigma_dict.keys()
+                # })
+                self.embed_place = nn.Sequential(
+                    nn.Linear(self.basis_num, low_rank_r), 
+                    nn.Linear(low_rank_r, latent_dim//2), 
+                    nn.ReLU(),
+                    nn.Linear(latent_dim//2, low_rank_r), 
+                    nn.Linear(low_rank_r, latent_dim//2), 
+                    nn.ReLU(),
+                    nn.Dropout(0.1),
+                )
+
             else:
-                self.embed_place = nn.ModuleDict({
-                    session_name: nn.Linear(self.basis_num, latent_dim//2) for session_name in spatial_centers_sigma_dict.keys()
-                })
-                self.place_dropout = nn.Dropout(0.3)
+                # self.embed_place = nn.ModuleDict({
+                #     session_name: nn.Sequential(nn.Linear(self.basis_num, latent_dim//2), nn.Dropout(0.3))
+                #     for session_name in spatial_centers_sigma_dict.keys()
+                # })
+                self.embed_place = nn.Sequential(
+                    nn.Linear(self.basis_num, latent_dim//2), 
+                    nn.ReLU(),
+                    nn.Linear(latent_dim//2, latent_dim//2), 
+                    nn.ReLU(),
+                    nn.Dropout(0.3),
+                )
+
         else:
             self.embed = nn.Linear(input_dim, latent_dim) # behavior embedding
             self.embed_dropout = nn.Dropout(0.1)
@@ -93,10 +110,9 @@ class Bat_Transformer(nn.Module):
             })
         else:
             self.readouts = nn.ModuleDict({
-                session_name: nn.Linear(latent_dim, unit_num)
+                session_name: nn.Sequential(nn.Linear(latent_dim, unit_num), nn.Dropout(0.1))
                 for session_name, unit_num in output_dim_dict.items()
             })
-
         self.final_activation = final_activation
 
     def forward(
@@ -135,7 +151,7 @@ class Bat_Transformer(nn.Module):
         # spatial basis
         if self.add_spatial_basis:
             phi_x = self.spatial_basis[session_name](x[:, :, :3]) #
-            x_place = self.place_dropout(self.embed_place[session_name](phi_x))
+            x_place = self.embed_place(phi_x) # self.embed_place[session_name](phi_x)
         # behavior embedding
         x = self.embed_dropout(self.embed(x)) 
 
