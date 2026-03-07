@@ -10,6 +10,7 @@ from scipy.stats import binned_statistic
 from collections import namedtuple
 from sklearn.cluster import KMeans
 from scipy.spatial.distance import cdist
+from scipy.ndimage import gaussian_filter
 
 from ..utility.utils import bandpass_filter
 from ..utility.utils import interpolate_signal_with_nans
@@ -606,6 +607,8 @@ class Data_Prep_for_Raw():
         # print(f'flight_type_index_test: {flight_type_index_test}')
         # print(f'self.flight_type_test_indomain: {self.flight_type_test_indomain}')
         # print(f'self.flight_type_test_ood: {self.flight_type_test_ood}')
+
+        # TODO: generate simulate data of "pure place-field cells" based on the actual behavior and rate maps computed from training data
 
         # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
         # print(len(spike_train), len(spike_valid), len(spike_test))  # 22 2 13
@@ -1340,3 +1343,112 @@ def compute_rbf_basis_from_training(train_trajectories, K, random_state=0):
     sigma = np.median(nonzero_dists)
 
     return centers, float(sigma)
+
+
+class PlaceCellSimulator3D:
+
+    def __init__(self, bin_size=0.3, smoothing_sigma=None):
+        """
+        bin_size : spatial bin size (in meter or other unit)
+        smoothing_sigma : Gaussian smoothing sigma (in bins)
+        """
+        self.bin_size = bin_size
+        self.smoothing_sigma = smoothing_sigma
+
+    def _compute_bins(self, behavior_train):
+        """Compute spatial bin edges."""
+
+        all_pos = np.concatenate([b.T for b in behavior_train], axis=0)
+        mins = all_pos.min(axis=0)
+        maxs = all_pos.max(axis=0)
+
+        self.edges = [
+            np.arange(mins[i], maxs[i] + self.bin_size, self.bin_size)
+            for i in range(3)
+        ]
+        self.shape = (
+            len(self.edges[0]) - 1,
+            len(self.edges[1]) - 1,
+            len(self.edges[2]) - 1,
+        )
+
+    def fit(self, behavior_train, spike_train, dt):
+        """
+        Compute rate maps.
+
+        behavior_train : list of arrays (3,T)
+        spike_train : list of arrays (N,T)
+        dt : sampling time
+        """
+
+        self._compute_bins(behavior_train)
+        N = spike_train[0].shape[0]
+
+        occupancy = np.zeros(self.shape)
+        spike_counts = np.zeros((N,) + self.shape)
+
+        for beh, spk in zip(behavior_train, spike_train):
+            pos = beh.T
+            # -------- occupancy using histogramdd --------
+            occ, _ = np.histogramdd(pos, bins=self.edges)
+            occupancy += occ * dt
+            # -------- spike counts --------
+            for n in range(N):
+                spike_hist, _ = np.histogramdd(
+                    pos,
+                    bins=self.edges,
+                    weights=spk[n]
+                )
+                spike_counts[n] += spike_hist
+
+        rate_map = spike_counts / (occupancy + 1e-8)
+        # -------- optional Gaussian smoothing --------
+        if self.smoothing_sigma is not None:
+            for n in range(N):
+                rate_map[n] = gaussian_filter(
+                    rate_map[n],
+                    sigma=self.smoothing_sigma
+                )
+        self.rate_map = rate_map
+
+        return self.rate_map
+
+    def simulate(self, behavior_test, dt, poisson=False):
+        """
+        Generate spikes for new trajectories.
+
+        behavior_test : list of arrays (3,T)
+
+        returns
+        -------
+        spike_test : list of arrays (N,T)
+        """
+
+        N = self.rate_map.shape[0]
+        spike_test = []
+
+        for beh in behavior_test:
+            pos = beh.T
+            T = pos.shape[0]
+            ix = np.digitize(pos[:, 0], self.edges[0]) - 1
+            iy = np.digitize(pos[:, 1], self.edges[1]) - 1
+            iz = np.digitize(pos[:, 2], self.edges[2]) - 1
+
+            spikes = np.zeros((N, T))
+            valid = (
+                (ix >= 0) & (ix < self.shape[0]) &
+                (iy >= 0) & (iy < self.shape[1]) &
+                (iz >= 0) & (iz < self.shape[2])
+            )
+
+            for t in np.where(valid)[0]:
+                rate = self.rate_map[:, ix[t], iy[t], iz[t]]
+                lam = rate * dt
+                if poisson:
+                    spikes[:, t] = np.random.poisson(lam)
+                else:
+                    spikes[:, t] = lam
+
+            spike_test.append(spikes)
+
+        return spike_test
