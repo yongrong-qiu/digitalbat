@@ -626,6 +626,7 @@ class Data_Prep_for_Raw():
                 behavior_test,
                 spike_test_simulation,
                 units = [101, 130, 184],
+                dt = self.bin_width,
             )
 
         # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
@@ -1482,6 +1483,7 @@ def plot_2d_trajectory_4_simulation(
     behavior_test_simulation,
     spike_test_simulation,
     units,
+    dt,
 ):
     """
     Plot 2D trajectory for the simulated 'pure place cell'
@@ -1527,6 +1529,39 @@ def plot_2d_trajectory_4_simulation(
             if jj == 0:
                 axs[ii,jj].set_ylabel(data_label_list[ii])
             plt.colorbar(line, ax=axs[ii,jj], label="Spike count")
+            plt.tight_layout()
+
+    from ..utility.utils import generate_2d_rate_map
+    fig, axs = plt.subplots(nrows, ncols, figsize=(ncols*3, nrows*1.5))
+    for jj, unit in enumerate(units): # each neuron/unit
+        for ii in range(nrows): # training, test, test_simulation
+            loc_xx = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 0]
+            loc_yy = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 1]
+            spike_count = np.concatenate([s.T for s in spike_lists[ii]], axis=0)[:, unit]
+            #
+            x_edges, y_edges, rate_map, smoothed_rate_map = generate_2d_rate_map(
+                loc_xx=loc_xx,
+                loc_yy=loc_yy,
+                unit_spike_count=spike_count,
+                loc_xx_lim=(loc_mins[0], loc_maxs[0]),
+                loc_yy_lim=(loc_mins[1], loc_maxs[1]),
+                loc_bin_width=0.3,
+                dt=dt,
+            )
+            if ii==0: # Be carefule: for each neuron, we use the limits of the training data
+                vmin, vmax = np.min(smoothed_rate_map), np.max(smoothed_rate_map)
+            im = axs[ii,jj].imshow(smoothed_rate_map.T, origin='lower', vmin=vmin, vmax=vmax,
+                        extent=[loc_mins[0], loc_maxs[0], loc_mins[1], loc_maxs[1]],
+                        aspect='auto', cmap='hot_r')
+            if ii == 0:
+                axs[ii,jj].set_title(f"Unit: {unit}")
+            # axs[ii,jj].set_xlim(loc_mins[0], loc_maxs[0])
+            # axs[ii,jj].set_ylim(loc_mins[1], loc_maxs[1])
+            if ii == nrows-1:
+                axs[ii,jj].set_xlabel("X")
+            if jj == 0:
+                axs[ii,jj].set_ylabel(data_label_list[ii])
+            plt.colorbar(im, ax=axs[ii,jj], label="Spikes/s")
             plt.tight_layout()
 
     return None
