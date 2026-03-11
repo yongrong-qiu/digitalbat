@@ -613,7 +613,7 @@ class Data_Prep_for_Raw():
 
         # Generate simulation data of "pure place-field cells" based on the actual behavior and rate maps computed from training data
         if self.simulate_place_cell_flag:
-            place_cell_simulator_3D = PlaceCellSimulator3D(smoothing_sigma=1)
+            place_cell_simulator_3D = PlaceCellSimulator3D() # smoothing_sigma=1
             _ = place_cell_simulator_3D.fit(behavior_train, spike_train, dt=self.bin_width)
             spike_valid = place_cell_simulator_3D.simulate(behavior_valid, dt=self.bin_width)
             spike_test_simulation = place_cell_simulator_3D.simulate(behavior_test, dt=self.bin_width)
