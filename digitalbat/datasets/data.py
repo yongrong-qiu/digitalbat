@@ -613,7 +613,8 @@ class Data_Prep_for_Raw():
 
         # Generate simulation data of "pure place-field cells" based on the actual behavior and rate maps computed from training data
         if self.simulate_place_cell_flag:
-            place_cell_simulator_3D = PlaceCellSimulator3D() # smoothing_sigma=1
+            loc_bin_width = 0.1 
+            place_cell_simulator_3D = PlaceCellSimulator3D(bin_size=loc_bin_width, smoothing_sigma=1) # smoothing_sigma=1
             _ = place_cell_simulator_3D.fit(behavior_train, spike_train, dt=self.bin_width)
             spike_train_simulation = place_cell_simulator_3D.simulate(behavior_train, dt=self.bin_width)
             spike_valid_simulation = place_cell_simulator_3D.simulate(behavior_valid, dt=self.bin_width)
@@ -629,6 +630,7 @@ class Data_Prep_for_Raw():
                 behavior_test,
                 spike_test_simulation,
                 units = [101, 130, 184],
+                loc_bin_width = loc_bin_width,
                 dt = self.bin_width,
             )
 
@@ -1488,6 +1490,7 @@ def plot_2d_trajectory_4_simulation(
     behavior_test_simulation,
     spike_test_simulation,
     units,
+    loc_bin_width,
     dt,
 ):
     """
@@ -1550,12 +1553,12 @@ def plot_2d_trajectory_4_simulation(
                 unit_spike_count=spike_count,
                 loc_xx_lim=(loc_mins[0], loc_maxs[0]),
                 loc_yy_lim=(loc_mins[1], loc_maxs[1]),
-                loc_bin_width=0.3,
+                loc_bin_width=loc_bin_width,
                 dt=dt,
             )
             if ii==0: # Be carefule: for each neuron, we use the limits of the training data
                 vmin, vmax = np.min(rate_map), np.max(rate_map)
-            im = axs[ii,jj].imshow(rate_map.T, origin='lower', vmin=vmin, vmax=vmax,
+            im = axs[ii,jj].imshow(rate_map.T, origin='lower', # vmin=vmin, vmax=vmax,
                         extent=[loc_mins[0], loc_maxs[0], loc_mins[1], loc_maxs[1]],
                         aspect='auto', cmap='hot_r')
             if ii == 0:
