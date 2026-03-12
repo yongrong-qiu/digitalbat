@@ -615,12 +615,15 @@ class Data_Prep_for_Raw():
         if self.simulate_place_cell_flag:
             place_cell_simulator_3D = PlaceCellSimulator3D() # smoothing_sigma=1
             _ = place_cell_simulator_3D.fit(behavior_train, spike_train, dt=self.bin_width)
-            spike_valid = place_cell_simulator_3D.simulate(behavior_valid, dt=self.bin_width)
+            spike_train_simulation = place_cell_simulator_3D.simulate(behavior_train, dt=self.bin_width)
+            spike_valid_simulation = place_cell_simulator_3D.simulate(behavior_valid, dt=self.bin_width)
             spike_test_simulation = place_cell_simulator_3D.simulate(behavior_test, dt=self.bin_width)
             # for sanity check
             plot_2d_trajectory_4_simulation(
                 behavior_train,
                 spike_train,
+                behavior_train,
+                spike_train_simulation,
                 behavior_test,
                 spike_test,
                 behavior_test,
@@ -1478,6 +1481,8 @@ class PlaceCellSimulator3D:
 def plot_2d_trajectory_4_simulation(
     behavior_train,
     spike_train,
+    behavior_train_simulation,
+    spike_train_simulation,
     behavior_test,
     spike_test,
     behavior_test_simulation,
@@ -1497,9 +1502,9 @@ def plot_2d_trajectory_4_simulation(
     spike_mins = all_spike.min(axis=0) # shape: (N, )
     spike_maxs = all_spike.max(axis=0) # shape: (N, )
     
-    behavior_lists = [behavior_train, behavior_test, behavior_test_simulation]
-    spike_lists = [spike_train, spike_test, spike_test_simulation]
-    data_label_list = ['Train', 'Test', 'Test_sim']
+    behavior_lists = [behavior_train, behavior_train_simulation, behavior_test, behavior_test_simulation]
+    spike_lists = [spike_train, spike_train_simulation, spike_test, spike_test_simulation]
+    data_label_list = ['Train', 'Train_sim', 'Test', 'Test_sim']
 
     ncols = len(units)
     nrows = len(behavior_lists)
@@ -1549,8 +1554,8 @@ def plot_2d_trajectory_4_simulation(
                 dt=dt,
             )
             if ii==0: # Be carefule: for each neuron, we use the limits of the training data
-                vmin, vmax = np.min(smoothed_rate_map), np.max(smoothed_rate_map)
-            im = axs[ii,jj].imshow(smoothed_rate_map.T, origin='lower', vmin=vmin, vmax=vmax,
+                vmin, vmax = np.min(rate_map), np.max(rate_map)
+            im = axs[ii,jj].imshow(rate_map.T, origin='lower', vmin=vmin, vmax=vmax,
                         extent=[loc_mins[0], loc_maxs[0], loc_mins[1], loc_maxs[1]],
                         aspect='auto', cmap='hot_r')
             if ii == 0:
