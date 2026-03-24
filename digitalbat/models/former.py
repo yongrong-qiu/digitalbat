@@ -31,32 +31,33 @@ class Bat_Transformer(nn.Module):
         self,
         input_dim: int,
         output_dim_dict: dict, # a dictionary of spiking unit numbers for each session, e.g., {'Dataset_3_14543_240419': 289, 'Dataset_1_32622_231009': 95}
-        add_spatial_basis: bool = False, # whether to add spatial bases to the model input or not
+        # place
+        use_place_as_input: bool = True, # use place as input
+        # add_spatial_basis: bool = False, # whether to add spatial bases to the model input or not
         basis_type: str = "RBF", # type of spatial basis
         # basis_num: int = 32, # number of basis
         spatial_centers_sigma_dict = None, # a dictionary of spatial centers and sigma for each session
-        latent_dim: int = 64,
+        latent_dim_place: int = 32, # latent_dim for embed_place
+        # trajectory
+        use_trajectory_as_input: bool = True, # use trajectory as input
+        latent_dim: int = 32,
         num_heads: int = 4,
-        ff_dim: int = 64,
+        ff_dim: int = 32,
         num_layers: int = 1,
-        dropout_prob: float = 0.0,
-        use_low_rank: bool = False, # whether to use low rank matrix multiplication or not
+        dropout_prob: float = 0.3,
+        #
+        use_low_rank: bool = False, # whether to use low rank matrix multiplication or not for embed_place
         use_low_rank_readout: bool = False, # whether to use low rank matrix multiplication for readout modules or not
         low_rank_r: int = 4,
         final_activation: nn.Module = nn.Identity(),
     ):
         super().__init__()
-        
-        self.add_spatial_basis = add_spatial_basis
-        if self.add_spatial_basis:
-            self.embed = nn.Linear(input_dim, latent_dim//2) # behavior embedding
-            self.embed_dropout = nn.Dropout(0.1)
-            # transformer
-            self.layers = nn.ModuleList([
-                TransformerEncoderRoPE(hidden_dim=latent_dim//2, num_head=num_heads, ff_dim=ff_dim//2,
-                                       dropout=dropout_prob, use_low_rank=use_low_rank, low_rank_r=low_rank_r) for _ in range(num_layers)
-            ])
 
+        self.use_place_as_input = use_place_as_input
+        self.use_trajectory_as_input = use_trajectory_as_input
+        assert (self.use_place_as_input or self.use_trajectory_as_input), 'Use at least one input (place or trajectory)!'
+        
+        if self.use_place_as_input:
             # discrete spatial embdding
             if basis_type == 'RBF':
                 self.spatial_basis = nn.ModuleDict({
@@ -66,51 +67,50 @@ class Bat_Transformer(nn.Module):
             self.basis_num = len(list(spatial_centers_sigma_dict.values())[0][0]) # number of basis
             if use_low_rank:
                 # self.embed_place = nn.ModuleDict({
-                #     session_name: nn.Sequential(nn.Linear(self.basis_num, low_rank_r), nn.Linear(low_rank_r, latent_dim//2), nn.Dropout(0.1))
+                #     session_name: nn.Sequential(nn.Linear(self.basis_num, low_rank_r), nn.Linear(low_rank_r, latent_dim_place), nn.Dropout(0.1))
                 #     for session_name in spatial_centers_sigma_dict.keys()
                 # })
                 self.embed_place = nn.Sequential(
                     nn.Linear(self.basis_num, low_rank_r), 
-                    nn.Linear(low_rank_r, latent_dim//2), 
+                    nn.Linear(low_rank_r, latent_dim_place), 
                     nn.ReLU(),
-                    nn.Linear(latent_dim//2, low_rank_r), 
-                    nn.Linear(low_rank_r, latent_dim//2), 
+                    nn.Linear(latent_dim_place, low_rank_r), 
+                    nn.Linear(low_rank_r, latent_dim_place), 
                     nn.ReLU(),
                     nn.Dropout(0.1),
                 )
-
             else:
                 # self.embed_place = nn.ModuleDict({
-                #     session_name: nn.Sequential(nn.Linear(self.basis_num, latent_dim//2), nn.Dropout(0.3))
+                #     session_name: nn.Sequential(nn.Linear(self.basis_num, latent_dim_place), nn.Dropout(0.3))
                 #     for session_name in spatial_centers_sigma_dict.keys()
                 # })
                 self.embed_place = nn.Sequential(
-                    nn.Linear(self.basis_num, latent_dim//2), 
+                    nn.Linear(self.basis_num, latent_dim_place), 
                     nn.ReLU(),
-                    nn.Linear(latent_dim//2, latent_dim//2), 
+                    nn.Linear(latent_dim_place, latent_dim_place), 
                     nn.ReLU(),
                     nn.Dropout(0.3),
                 )
 
-        else:
-            self.embed = nn.Linear(input_dim, latent_dim) # behavior embedding
-            self.embed_dropout = nn.Dropout(0.1)
+        if self.use_trajectory_as_input:
+            self.embed_traj = nn.Linear(input_dim, latent_dim) # trajectory embedding
+            self.embed_traj_dropout = nn.Dropout(0.1)
             # transformer
             self.layers = nn.ModuleList([
                 TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, 
                                        dropout=dropout_prob, use_low_rank=use_low_rank, low_rank_r=low_rank_r) for _ in range(num_layers)
             ])
-        self.num_heads = num_heads
 
         # session-specific readouts
+        readout_latent_dim = latent_dim_place * int(self.use_place_as_input) + latent_dim * int(self.use_trajectory_as_input)
         if use_low_rank_readout:
             self.readouts = nn.ModuleDict({
-                session_name: nn.Sequential(nn.Linear(latent_dim, low_rank_r), nn.Linear(low_rank_r, unit_num))
+                session_name: nn.Sequential(nn.Linear(readout_latent_dim, low_rank_r), nn.Linear(low_rank_r, unit_num))
                 for session_name, unit_num in output_dim_dict.items()
             })
         else:
             self.readouts = nn.ModuleDict({
-                session_name: nn.Sequential(nn.Linear(latent_dim, unit_num), nn.Dropout(0.1))
+                session_name: nn.Sequential(nn.Linear(readout_latent_dim, unit_num), nn.Dropout(0.1))
                 for session_name, unit_num in output_dim_dict.items()
             })
         self.final_activation = final_activation
@@ -148,53 +148,60 @@ class Bat_Transformer(nn.Module):
         attn_mask = attn_mask[:, None, :, :] # (B, 1, T, T)
         # attn_mask = attn_mask.expand(-1, self.num_heads, -1, -1) # (B, num_heads, T, T)
         
-        # spatial basis
-        if self.add_spatial_basis:
-            phi_x = self.spatial_basis[session_name](x[:, :, :3]) #
-            x_place = self.embed_place(phi_x) # self.embed_place[session_name](phi_x)
-        # behavior embedding
-        x = self.embed_dropout(self.embed(x)) 
+        # place
+        if self.use_place_as_input:
+            x_place_input = self.spatial_basis[session_name](x[:, :, :3]) #
+            x_place_embed = self.embed_place(x_place_input) # self.embed_place[session_name](phi_x)
 
-        # transformer
-        if return_attn_weights:
-            attn_weights_list = []
-            for layer in self.layers:
-                x, attn_weights = layer(
-                    x, 
-                    x, 
-                    x, 
-                    attn_mask=attn_mask, 
-                    is_causal=is_causal, 
-                    return_attn_weights=return_attn_weights,
-                    is_bigbird=is_bigbird,
-                    attention_window_size=attention_window_size,
-                    num_global=num_global,
-                    num_random=num_random,
-                )
-                attn_weights_list.append(attn_weights)
-        else:
-            for layer in self.layers:
-                x = layer(
-                    x, 
-                    x, 
-                    x, 
-                    attn_mask=attn_mask, 
-                    is_causal=is_causal, 
-                    return_attn_weights=return_attn_weights,
-                    is_bigbird=is_bigbird,
-                    attention_window_size=attention_window_size,
-                    num_global=num_global,
-                    num_random=num_random,
-                )
+        # trajectory
+        if self.use_trajectory_as_input:
+            # embedding
+            x_traj_input = x.clone()
+            x_traj_embed = self.embed_traj_dropout(self.embed_traj(x_traj_input)) 
+            # transformer
+            if return_attn_weights:
+                attn_weights_list = []
+                for layer in self.layers:
+                    x_traj_embed, attn_weights = layer(
+                        x_traj_embed, 
+                        x_traj_embed, 
+                        x_traj_embed, 
+                        attn_mask=attn_mask, 
+                        is_causal=is_causal, 
+                        return_attn_weights=return_attn_weights,
+                        is_bigbird=is_bigbird,
+                        attention_window_size=attention_window_size,
+                        num_global=num_global,
+                        num_random=num_random,
+                    )
+                    attn_weights_list.append(attn_weights)
+            else:
+                for layer in self.layers:
+                    x_traj_embed = layer(
+                        x_traj_embed, 
+                        x_traj_embed, 
+                        x_traj_embed, 
+                        attn_mask=attn_mask, 
+                        is_causal=is_causal, 
+                        return_attn_weights=return_attn_weights,
+                        is_bigbird=is_bigbird,
+                        attention_window_size=attention_window_size,
+                        num_global=num_global,
+                        num_random=num_random,
+                    )
 
-        if self.add_spatial_basis:
-            x = torch.cat((x, x_place), dim=-1)
+        if self.use_place_as_input and (not self.use_trajectory_as_input):
+            x_embed = x_place_embed.clone()
+        elif (not self.use_place_as_input) and self.use_trajectory_as_input:
+            x_embed = x_traj_embed.clone()
+        elif self.use_place_as_input and self.use_trajectory_as_input:
+            x_embed = torch.cat((x_place_embed, x_traj_embed), dim=-1)
 
         # readout
-        x = self.readouts[session_name](x)
-        x = self.final_activation(x)
+        x_embed = self.readouts[session_name](x_embed)
+        x_out = self.final_activation(x_embed)
 
         if return_attn_weights:
-            return x, attn_weights_list
+            return x_out, attn_weights_list
         else:
-            return x
+            return x_out
