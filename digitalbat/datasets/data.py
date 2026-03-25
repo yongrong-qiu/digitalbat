@@ -617,8 +617,8 @@ class Data_Prep_for_Raw():
             place_cell_simulator_3D = PlaceCellSimulator3D(bin_size=loc_bin_width, smoothing_sigma=1) # smoothing_sigma=1
             _ = place_cell_simulator_3D.fit(behavior_train, spike_train, dt=self.bin_width)
             spike_train_simulation = place_cell_simulator_3D.simulate(behavior_train, dt=self.bin_width)
-            spike_valid_simulation = place_cell_simulator_3D.simulate(behavior_valid, dt=self.bin_width)
-            spike_test_simulation = place_cell_simulator_3D.simulate(behavior_test, dt=self.bin_width)
+            # spike_valid_simulation = place_cell_simulator_3D.simulate(behavior_valid, dt=self.bin_width)
+            # spike_test_simulation = place_cell_simulator_3D.simulate(behavior_test, dt=self.bin_width)
             # # for sanity check
             # plot_2d_trajectory_4_simulation(
             #     behavior_train,
@@ -634,8 +634,8 @@ class Data_Prep_for_Raw():
             #     dt = self.bin_width,
             # )
             spike_train = spike_train_simulation[:]
-            spike_valid = spike_valid_simulation[:]
-            spike_test = spike_test_simulation[:]
+            # spike_valid = spike_valid_simulation[:]
+            # spike_test = spike_test_simulation[:]
 
         # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
         # print(len(spike_train), len(spike_valid), len(spike_test))  # 22 2 13
