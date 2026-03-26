@@ -65,6 +65,7 @@ class Data_Prep_for_Raw():
         type_valid_num=1,  # for splitting flight clustering data
         special_id_count_thresh=3,  # for splitting flight clustering data
         only_use_special_id_4train_flag=False, # Only use the "special_id" flight types (e.g., flight clusters with more than "special_id_count_thresh" repeats) for training 
+        time_shuffle_for_trajecotry_flag=False, # Whether to shuffle temporal order of trajectory
         simulate_place_cell_flag=False, # Whether to generate simulation data of pure place cells using training data.
         # After splitting fight-clustering data into train, validation and test, we may want to use/split each flight trajectory as/into one/multiple data samples.
         # With such data, we can build a network (such as Transformer) to model the temporal dependency of animal behavior (and neural activity) during each flight 
@@ -88,6 +89,7 @@ class Data_Prep_for_Raw():
         self.type_valid_num = type_valid_num
         self.special_id_count_thresh = special_id_count_thresh
         self.only_use_special_id_4train_flag = only_use_special_id_4train_flag
+        self.time_shuffle_for_trajecotry_flag = time_shuffle_for_trajecotry_flag
         self.simulate_place_cell_flag = simulate_place_cell_flag
         self.split_each_trajectory_flag = split_each_trajectory_flag
         self.window_size = window_size
@@ -610,6 +612,19 @@ class Data_Prep_for_Raw():
         # print(f'flight_type_index_test: {flight_type_index_test}')
         # print(f'self.flight_type_test_indomain: {self.flight_type_test_indomain}')
         # print(f'self.flight_type_test_ood: {self.flight_type_test_ood}')
+
+        # Shuffle temporal order for each trajectory
+        if self.time_shuffle_for_trajecotry_flag:
+            behavior_train_shuffle = []
+            spike_train_shuffle = []
+            train_num = len(behavior_train)
+            for ii in range(train_num):
+                np.random.seed(1666 + ii)
+                inds = np.random.choice(behavior_train[ii].shape[1], behavior_train[ii].shape[1], replace=False)
+                behavior_train_shuffle.append(behavior_train[ii][:, inds])
+                spike_train_shuffle.append(spike_train[ii][:, inds])
+            behavior_train = behavior_train_shuffle[:]
+            spike_train = spike_train_shuffle[:]
 
         # Generate simulation data of "pure place-field cells" based on the actual behavior and rate maps computed from training data
         if self.simulate_place_cell_flag:
@@ -1142,6 +1157,7 @@ def bat_data_loader(
     special_id_count_thresh=3,  # for splitting flight clustering data
     only_use_special_id_4train_flag=False,
     shuffle_flag=False, # shuffle the training data
+    time_shuffle_for_trajecotry_flag=False, # shuffle temporal order for each trajectory
     simulate_place_cell_flag=False,
     split_each_trajectory_flag=False, 
     window_size = 20, 
@@ -1189,6 +1205,7 @@ def bat_data_loader(
             type_valid_num = type_valid_num,
             special_id_count_thresh = special_id_count_thresh,
             only_use_special_id_4train_flag = only_use_special_id_4train_flag,
+            time_shuffle_for_trajecotry_flag = time_shuffle_for_trajecotry_flag,
             simulate_place_cell_flag = simulate_place_cell_flag,
             split_each_trajectory_flag = split_each_trajectory_flag,
             window_size = window_size, 
