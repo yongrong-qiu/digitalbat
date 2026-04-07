@@ -57,3 +57,68 @@ The `output_dim_dict` parameter (e.g., `{'Dataset_3_14543_240419': 289, 'Dataset
 Trainers accept custom `valid_fn(y_true, y_pred) -> array` returning per-neuron scores. Common choices:
 - `corr(y_true, y_pred, axis=0)` - Pearson correlation
 - `poisson_fde_population(y_true, y_pred)` - Poisson fraction deviance explained
+
+## Typical Workflow
+
+### High-Level Data Loading
+
+Use `bat_data_loader` for end-to-end data preparation:
+
+```python
+from digitalbat.datasets.data import bat_data_loader
+
+data_config = dict(
+    use_speed_head_dir=False,
+    use_IMU_flag=False,
+    use_click_flag=False,
+    use_LFP_flag=False,
+    only_flight_flag=True,
+    spike_count_flag=True,
+    bin_width=0.10,  # seconds
+    split_flights_for_train='random',  # or 'manual'
+    split_each_trajectory_flag=True,
+    window_size=None,
+    session_names=['Dataset_3_14543_240419', ...],
+)
+
+dataloaders, meta_info_dict = bat_data_loader(data_config)
+```
+
+Returns:
+- `dataloaders['train'|'valid'|'test'][session_name]` - PyTorch DataLoaders
+- `meta_info_dict` - contains `unit_num_dict`, `behavior_dim`, `spatial_centers_sigma`, `flight_type_test_ood`, `flight_type_test_indomain`
+
+### Batch Structure
+
+When `split_each_trajectory_flag=True`, batches are namedtuples with fields:
+- `batch.behavior` - shape `(N, T, behavior_dim)`
+- `batch.spike` - shape `(N, T, num_neurons)`
+- `batch.mask` - shape `(N, T)`, 1.0 for valid timesteps
+- `batch.flight_path_index` - trajectory IDs
+- `batch.flight_type_index` - cluster type IDs
+
+### Model Forward Pass
+
+```python
+y_pred = model(
+    session_name,
+    X_batch,           # behavior tensor
+    mask_batch,        # validity mask
+    is_causal=False,
+    is_bigbird=False,
+)
+# Apply mask for loss: loss_fn(y_pred[mask == 1.0], y_true[mask == 1.0])
+```
+
+### Evaluation Pattern
+
+```python
+model.eval()
+for session_name, session_data in dataloaders['test'].items():
+    y_val_list, y_pred_list = [], []
+    for batch in session_data:
+        y_pred = model(session_name, batch.behavior.to(device), batch.mask.to(device))
+        y_val_list.append(batch.spike[batch.mask == 1.0].numpy())
+        y_pred_list.append(y_pred[batch.mask == 1.0].detach().cpu().numpy())
+    scores = valid_fn(np.vstack(y_val_list), np.vstack(y_pred_list))
+```
