@@ -9,6 +9,7 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from matplotlib import cm
 import torch
 import pandas as pd
@@ -503,6 +504,105 @@ def plot_3d_trajectory(
     cax.set_ylabel(cax_ylabel)
     # cbar = fig.colorbar(lc, ax=ax, shrink=0.5)
     # cbar.set_label("Time [s]")
+    return None
+
+
+def plot_trajectory_saliency_ax(ax, trajectory, saliency_matrix, t_resp_idx, loc_xyz_lim):
+    """
+    trajectory: (90, 3) array of (x, y, z)
+    saliency_matrix: (90, 90) array (Response Time x Location Time)
+    t_resp_idx: The specific time point of the neural response to analyze
+    """
+    
+    # 1. Extract the saliency vector for the chosen response time
+    # This tells us how much each point in the trajectory (t') 
+    # contributed to the response at t_resp_idx.
+    weights = saliency_matrix[t_resp_idx, :] 
+    # # 2. Setup the 3D plot
+    # fig = plt.figure(figsize=(3, 2))
+    # ax = fig.add_subplot(111, projection='3d')
+    # 3. Create segments for the 3D LineCollection
+    # Each segment is a pair of points: [(x1,y1,z1), (x2,y2,z2)]
+    points = trajectory.reshape(-1, 1, 3)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+    # 4. Create the 3D LineCollection with a colormap
+    norm = plt.Normalize(weights.min(), weights.max())
+    lc = Line3DCollection(segments, cmap='hot', norm=norm)
+    # Set the values used for colormapping to our saliency weights
+    lc.set_array(weights)
+    lc.set_linewidth(2)
+    # 5. Add to plot
+    line = ax.add_collection3d(lc)
+    # 6. Highlight the bat's actual position at t_resp_idx
+    curr_pos = trajectory[t_resp_idx]
+    ax.scatter(curr_pos[0], curr_pos[1], curr_pos[2], 
+               color='cyan', s=50, label='Current Pos.', edgecolors='k')
+    # Plotting adjustments
+    if loc_xyz_lim is not None:
+        ax.set_xlim(loc_xyz_lim[0,:])
+        ax.set_ylim(loc_xyz_lim[1,:])
+        ax.set_zlim(loc_xyz_lim[2,:])
+        # Calculate the range for each axis
+        # Set aspect ratio proportional to the data ranges
+        ax.set_box_aspect((loc_xyz_lim[0,1] - loc_xyz_lim[0,0], loc_xyz_lim[1,1] - loc_xyz_lim[1,0], loc_xyz_lim[2,1] - loc_xyz_lim[2,0]))
+
+        # wireframe box
+        x_lim = loc_xyz_lim[0,:]
+        y_lim = loc_xyz_lim[1,:]
+        z_lim = loc_xyz_lim[2,:]
+        # Bottom square
+        ax.plot([x_lim[0], x_lim[1], x_lim[1], x_lim[0], x_lim[0]], 
+                [y_lim[0], y_lim[0], y_lim[1], y_lim[1], y_lim[0]], 
+                z_lim[0], color='k', lw=0.5)
+        # Top square
+        ax.plot([x_lim[0], x_lim[1], x_lim[1], x_lim[0], x_lim[0]], 
+                [y_lim[0], y_lim[0], y_lim[1], y_lim[1], y_lim[0]], 
+                z_lim[1], color='k', lw=0.5)
+        # Vertical connectors
+        for x in x_lim:
+            for y in y_lim:
+                ax.plot([x, x], [y, y], [z_lim[0], z_lim[1]], color='k', lw=0.5)
+                
+    ax.set_title(f'Saliency at t={t_resp_idx}')
+    ax.grid(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_zticks([])
+    # Hide the three axis spines
+    ax.xaxis.line.set_color((1.0, 1.0, 1.0, 0.0))
+    ax.yaxis.line.set_color((1.0, 1.0, 1.0, 0.0))
+    ax.zaxis.line.set_color((1.0, 1.0, 1.0, 0.0))
+
+    # ax.set_xlabel('X (m)')
+    # ax.set_ylabel('Y (m)')
+    # ax.set_zlabel('Z (m)')
+    # ax.set_title(f'Saliency Map for Response at t={t_resp_idx}')
+    # fig.colorbar(line, ax=ax, label='Saliency')
+    # plt.legend()
+    # plt.show()
+
+    return line # Return for colorbar if needed
+
+def plot_trajectory_saliency(trajectory, saliency_matrix, t_resp_idx, loc_xyz_lim):
+    """
+    For a given trajectory and a neuron, plot the saliency for the response at a given time point w.r.t the trajectory
+    trajectory: (90, 3) array of (x, y, z)
+    saliency_matrix: (90, 90) array (Response Time x Location Time)
+    t_resp_idx: a list of time points
+    """
+    # Configuration
+    # t_points = [10, 40, 80] # The indices you want to show in a row
+    n_plots = len(t_resp_idx)
+    
+    # Create the figure with multiple 3D subplots
+    fig, axes = plt.subplots(1, n_plots, figsize=(2.5 * n_plots, 2), subplot_kw={'projection': '3d'})
+    # Loop through and plot
+    for i, t_idx in enumerate(t_resp_idx):
+        last_line = plot_trajectory_saliency_ax(axes[i], trajectory, saliency_matrix, t_idx, loc_xyz_lim)
+    
+    # Optional: Single colorbar for the whole row
+    # fig.colorbar(last_line, ax=axes.ravel().tolist(), shrink=0.5, label='Saliency')
+    # plt.show()
     return None
 
 

@@ -56,6 +56,7 @@ class Data_Prep_for_Raw():
         use_LFP_flag,
         use_ripple_flag,
         only_flight_flag,
+        firing_rate_criterion_flog=False, # default: no firing_rate threshold to exclude neurons
         no_3d_location=False, # default: we use 3d locations
         spike_count_flag=False, # default: we use spiking event, not spike counts 
         bin_width=0.010, # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
@@ -83,6 +84,7 @@ class Data_Prep_for_Raw():
         self.use_LFP_flag = use_LFP_flag
         self.use_ripple_flag = use_ripple_flag
         self.only_flight_flag = only_flight_flag
+        self.firing_rate_criterion_flog = firing_rate_criterion_flog
         self.no_3d_location = no_3d_location
         self.spike_count_flag = spike_count_flag
         self.type_train_num = type_train_num
@@ -109,6 +111,7 @@ class Data_Prep_for_Raw():
         self.flight_ind = None
         self.all_time_flight = None # after interpolation (binning), the time of each data point during flight
         self.spike_ratio = None # spike ratio for each unit after resampling
+        self.firing_rate = None # firing rate for each unit 
 
         self.flight_cluster_alpha = flight_cluster_alpha
         self.flight_cluster_results = None
@@ -393,7 +396,13 @@ class Data_Prep_for_Raw():
 
         # spike ratio for each neuron
         self.spike_ratio = np.sum((all_spike>0) * 1.0, axis=1)/all_spike.shape[1]
+        firing_rate = np.sum(all_spike, axis=1)/(all_spike.shape[1] * self.bin_width)
+        if self.firing_rate_criterion_flog:
+            self.neuron_ind = np.where(firing_rate>0.3)[0] # 0.3 Hz, based on Dotson & Yartsev 2021
+            firing_rate = firing_rate[self.neuron_ind]
+            all_spike = all_spike[self.neuron_ind]
 
+        self.firing_rate = firing_rate
         self.all_spike = all_spike
 
         self._spike_ready = True
@@ -1148,6 +1157,7 @@ def bat_data_loader(
     use_LFP_flag = False,  # True
     use_ripple_flag = False,
     only_flight_flag = True,  # True
+    firing_rate_criterion_flog = False, 
     no_3d_location = False, # False
     spike_count_flag = True,
     bin_width = 0.10, # 0.10, in seconds
@@ -1197,6 +1207,7 @@ def bat_data_loader(
             use_LFP_flag = use_LFP_flag,
             use_ripple_flag = use_ripple_flag,
             only_flight_flag = only_flight_flag,
+            firing_rate_criterion_flog = firing_rate_criterion_flog,
             no_3d_location = no_3d_location,
             spike_count_flag = spike_count_flag,
             bin_width = bin_width, 
@@ -1216,7 +1227,7 @@ def bat_data_loader(
         all_behavior = data_prep_for_raw.get_all_behavior()
         meta_info_dict['r_lim'][session_name] = data_prep_for_raw.r_lim
         all_spike = data_prep_for_raw.get_all_spike()
-        spike_ratio = data_prep_for_raw.spike_ratio
+        # spike_ratio = data_prep_for_raw.spike_ratio
         # print(f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (3, 2820), 3 represents behavior features
         # print(f'all_spike.shape: {all_spike.shape}') # all_spike.shape: (95, 2820), 95 represents number of units
         # print(f'spike_ratio.shape: {spike_ratio.shape}') # spike_ratio.shape: (95,)
