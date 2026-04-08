@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Editing Rules
+
+**Do not modify the `digitalbat/` package without explicit permission.** Only modify:
+- Notebooks (`notebooks/`)
+- Temporary files (`tmp/`)
+
 ## Project Overview
 
 Digital twin model for bat hippocampal neurons. Predicts neural spiking activity from behavioral variables (3D location, trajectory, IMU) during free flight, and decodes behavior from neural activity.

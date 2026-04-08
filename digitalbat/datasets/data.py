@@ -77,7 +77,7 @@ class Data_Prep_for_Raw():
     ):
         super().__init__()
         self.parent_folder = parent_folder
-        self.su_file_path = glob.glob(su_file_path)  # a list of strings
+        self.su_file_path = sorted(glob.glob(su_file_path))  # a list of strings
         self.use_speed_head_dir = use_speed_head_dir
         self.use_IMU_flag = use_IMU_flag
         self.use_click_flag = use_click_flag
@@ -1175,6 +1175,7 @@ def bat_data_loader(
     stride_test = 20, 
     batch_size_train=None, # batch_size for training data
     batch_size_test=None,
+    parent_folder=None,
 ):
     """
     Dataloaders for multiple sessions of bat data.
@@ -1196,10 +1197,10 @@ def bat_data_loader(
     meta_info_dict['spatial_centers_sigma'] = {}
 
     for session_id, session_name in enumerate(session_names):
-        parent_folder = '/mnt/at-globusshare/Users/Yongrong/' + session_name
-        su_file_path = '/mnt/at-globusshare/Users/Yongrong/To_transfer/out_Gunits_probe*_' + session_name + '.mat'
+        session_folder = parent_folder + session_name
+        su_file_path = parent_folder + '/To_transfer/out_Gunits_probe*_' + session_name + '.mat'
         data_prep_for_raw = Data_Prep_for_Raw(
-            parent_folder = parent_folder,
+            parent_folder = session_folder,
             su_file_path = su_file_path,
             use_speed_head_dir = use_speed_head_dir,
             use_IMU_flag = use_IMU_flag,
