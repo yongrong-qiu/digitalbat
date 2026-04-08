@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Notebooks (`notebooks/`)
 - Temporary files (`tmp/`)
 
+**For running Python code**: Write scripts to `tmp/*.py` files and execute them with `python tmp/script.py`. Do not use `python << 'EOF'` heredoc statements, as these are flagged for potential obfuscation and require manual acceptance.
+
 ## Project Overview
 
 Digital twin model for bat hippocampal neurons. Predicts neural spiking activity from behavioral variables (3D location, trajectory, IMU) during free flight, and decodes behavior from neural activity.
