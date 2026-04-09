@@ -1198,7 +1198,7 @@ def bat_data_loader(
 
     for session_id, session_name in enumerate(session_names):
         session_folder = parent_folder + session_name
-        su_file_path = parent_folder + '/To_transfer/out_Gunits_probe*_' + session_name + '.mat'
+        su_file_path = parent_folder + '/To_transfer/out_Gunits_probe*_' + session_name + '_with_metrics.mat'
         data_prep_for_raw = Data_Prep_for_Raw(
             parent_folder = session_folder,
             su_file_path = su_file_path,

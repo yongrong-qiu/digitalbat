@@ -8,7 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Notebooks (`notebooks/`)
 - Temporary files (`tmp/`)
 
-**For running Python code**: Write scripts to `tmp/*.py` files and execute them with `python tmp/script.py`. Do not use `python << 'EOF'` heredoc statements, as these are flagged for potential obfuscation and require manual acceptance.
+**Plotting**: Prefer seaborn over matplotlib for all visualizations.
+
+**For running Python code**: Write scripts to `tmp/*.py` files and execute them with `python tmp/script.py`. Do not use `python << 'EOF'` heredoc statements or `python -c "..."` inline commands (especially multi-line ones), as these are flagged for potential obfuscation and require manual acceptance. Newlines followed by `#` inside a quoted argument can hide arguments from path validation.
 
 ## Project Overview
 
