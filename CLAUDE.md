@@ -16,6 +16,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. Read Before Writing: After every prompt, execute a read command on the relevant cell(s) of the notebook before performing a write operation, reducing the chance of outdated content causing an overwrite.
 2. Explicit Cell Targeting: Always get the specific cell IDs first, and then use the cell_id parameter to target the exact position, preventing the tool from arbitrarily replacing cells.
 
+**Reverting changes**: Be extremeley cautious when using `git checkout` or `git restore` to revert notebook changes — this discards ALL uncommitted edits, including the user's own work. To undo only your last edit, re-read the current file state and apply a targeted fix. If you need a previous version of specific lines, use `git show HEAD:path` to read it without overwriting the working copy.
+
 **For running Python code**: Write scripts to `tmp/*.py` files and execute them with `python tmp/script.py`. Do not use `python << 'EOF'` heredoc statements or `python -c "..."` inline commands (especially multi-line ones), as these are flagged for potential obfuscation and require manual acceptance. Newlines followed by `#` inside a quoted argument can hide arguments from path validation.
 
 ## Project Overview
