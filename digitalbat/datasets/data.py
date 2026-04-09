@@ -326,12 +326,21 @@ class Data_Prep_for_Raw():
 
         su_goods_cluster_id = []
         su_goods_time = []
+        su_goods_pType = []
         for temppath in self.su_file_path:
             su_good = loadmat(temppath)
             temp_cluster_id = np.array([x[0][0,0] for x in su_good['out_Gunits']['cluster_id']])
             temp_good1_time = [x[0][:,0]/1e6 for x in su_good['out_Gunits']['spikeTimes_usec']]
+            # pType: putative cell type (stored in the same out_Gunits struct).
+            # Use object dtype so strings / scalars / arrays all survive.
+            temp_pType = np.array(
+                [np.squeeze(x[0]).item() if np.squeeze(x[0]).ndim == 0 else np.squeeze(x[0])
+                 for x in su_good['out_Gunits']['pType']],
+                dtype=object,
+            )
             su_goods_cluster_id.append(temp_cluster_id)
             su_goods_time.append(temp_good1_time)
+            su_goods_pType.append(list(temp_pType))
 
         # merge units
         mergesFile = glob.glob(self.parent_folder + '/merges_Dataset_*.mat')[0]
@@ -374,6 +383,15 @@ class Data_Prep_for_Raw():
                 valid_indices = [i for i, t in enumerate(time_list) if len(t) > 0]
                 su_goods_time[ii] = [time_list[i] for i in valid_indices]
                 su_goods_cluster_id[ii] = [cluster_id_list[i] for i in valid_indices]
+                su_goods_pType[ii] = [su_goods_pType[ii][i] for i in valid_indices]
+
+        # Flatten pType across probes so it is aligned row-for-row with all_spike
+        # before any downstream filtering (only_flight_flag does not touch rows,
+        # but the firing-rate criterion below does).
+        pType_all = np.array(
+            [pt for probe_pTypes in su_goods_pType for pt in probe_pTypes],
+            dtype=object,
+        )
 
         # su_goods_time = [su_good1_time, su_good2_time, su_good3_time]
         all_spike = []
@@ -401,9 +419,11 @@ class Data_Prep_for_Raw():
             self.neuron_ind = np.where(firing_rate>0.3)[0] # 0.3 Hz, based on Dotson & Yartsev 2021
             firing_rate = firing_rate[self.neuron_ind]
             all_spike = all_spike[self.neuron_ind]
+            pType_all = pType_all[self.neuron_ind]
 
         self.firing_rate = firing_rate
         self.all_spike = all_spike
+        self.pType = pType_all
 
         self._spike_ready = True
 
@@ -1195,6 +1215,7 @@ def bat_data_loader(
     meta_info_dict['behavior_std'] = {}
     meta_info_dict['spike_std'] = {}
     meta_info_dict['spatial_centers_sigma'] = {}
+    meta_info_dict['pType'] = {}
 
     for session_id, session_name in enumerate(session_names):
         session_folder = parent_folder + session_name
@@ -1228,6 +1249,7 @@ def bat_data_loader(
         all_behavior = data_prep_for_raw.get_all_behavior()
         meta_info_dict['r_lim'][session_name] = data_prep_for_raw.r_lim
         all_spike = data_prep_for_raw.get_all_spike()
+        meta_info_dict['pType'][session_name] = data_prep_for_raw.pType
         # spike_ratio = data_prep_for_raw.spike_ratio
         # print(f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (3, 2820), 3 represents behavior features
         # print(f'all_spike.shape: {all_spike.shape}') # all_spike.shape: (95, 2820), 95 represents number of units
