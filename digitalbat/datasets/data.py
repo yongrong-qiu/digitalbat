@@ -74,6 +74,7 @@ class Data_Prep_for_Raw():
         window_size: int|None = None, # for splitting each trajectory into multiple samples
         stride_train: int|None = None, # splitting each trajectory into multiple samples, for training data
         stride_test: int|None = None, # splitting each trajectory into multiple samples, for test data
+        max_acceleration: float|None = None, # m/s²; exclude flights whose peak acceleration exceeds this
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -113,6 +114,7 @@ class Data_Prep_for_Raw():
         self.spike_ratio = None # spike ratio for each unit after resampling
         self.firing_rate = None # firing rate for each unit 
 
+        self.max_acceleration = max_acceleration
         self.flight_cluster_alpha = flight_cluster_alpha
         self.flight_cluster_results = None
         self.all_behavior_clustered = None  # a list of arrays, each array contains behavior for each trajectory
@@ -511,6 +513,24 @@ class Data_Prep_for_Raw():
         # np.random.seed(100)
         # np.random.shuffle(all_behavior_clustered)
         # np.random.shuffle(all_spike_clustered)
+
+        # Filter out flights with acceleration artifacts
+        if self.max_acceleration is not None:
+            keep = []
+            for i, beh in enumerate(all_behavior_clustered):
+                pos = beh[:3, :].T  # (T, 3)
+                vel = np.gradient(pos, self.bin_width, axis=0)
+                acc = np.gradient(vel, self.bin_width, axis=0)
+                peak_acc = np.linalg.norm(acc, axis=1).max()
+                if peak_acc <= self.max_acceleration:
+                    keep.append(i)
+            n_removed = len(all_behavior_clustered) - len(keep)
+            if n_removed > 0:
+                print(f'  Acceleration filter: removed {n_removed}/{len(all_behavior_clustered)} flights '
+                      f'(peak |acc| > {self.max_acceleration} m/s²)')
+            all_behavior_clustered = [all_behavior_clustered[i] for i in keep]
+            all_behavior_type = [all_behavior_type[i] for i in keep]
+            all_spike_clustered = [all_spike_clustered[i] for i in keep]
 
         self.all_behavior_clustered = all_behavior_clustered
         self.all_behavior_type = all_behavior_type
@@ -1175,6 +1195,7 @@ def bat_data_loader(
     stride_test = 20, 
     batch_size_train=None, # batch_size for training data
     batch_size_test=None,
+    max_acceleration=None, # m/s²; exclude flights whose peak acceleration exceeds this
 ):
     """
     Dataloaders for multiple sessions of bat data.
@@ -1220,8 +1241,9 @@ def bat_data_loader(
             simulate_place_cell_flag = simulate_place_cell_flag,
             split_each_trajectory_flag = split_each_trajectory_flag,
             window_size = window_size, 
-            stride_train = stride_train, 
-            stride_test = stride_test, 
+            stride_train = stride_train,
+            stride_test = stride_test,
+            max_acceleration = max_acceleration,
         )
         
         all_behavior = data_prep_for_raw.get_all_behavior()
