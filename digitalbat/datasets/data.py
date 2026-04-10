@@ -394,6 +394,7 @@ class Data_Prep_for_Raw():
             [pt for probe_pTypes in su_goods_pType for pt in probe_pTypes],
             dtype=object,
         )
+        self.probe_id = np.concatenate([np.full(len(t), i) for i, t in enumerate(su_goods_time)])
 
         # su_goods_time = [su_good1_time, su_good2_time, su_good3_time]
         all_spike = []
@@ -422,6 +423,7 @@ class Data_Prep_for_Raw():
             firing_rate = firing_rate[self.neuron_ind]
             all_spike = all_spike[self.neuron_ind]
             pType_all = pType_all[self.neuron_ind]
+            self.probe_id = self.probe_id[self.neuron_ind]
 
         self.firing_rate = firing_rate
         self.all_spike = all_spike
@@ -1237,6 +1239,7 @@ def bat_data_loader(
     meta_info_dict['spike_std'] = {}
     meta_info_dict['spatial_centers_sigma'] = {}
     meta_info_dict['pType'] = {}
+    meta_info_dict['probe_id'] = {}
 
     for session_id, session_name in enumerate(session_names):
         session_folder = parent_folder + session_name
@@ -1272,6 +1275,7 @@ def bat_data_loader(
         meta_info_dict['r_lim'][session_name] = data_prep_for_raw.r_lim
         all_spike = data_prep_for_raw.get_all_spike()
         meta_info_dict['pType'][session_name] = data_prep_for_raw.pType
+        meta_info_dict['probe_id'][session_name] = data_prep_for_raw.probe_id
         # spike_ratio = data_prep_for_raw.spike_ratio
         # print(f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (3, 2820), 3 represents behavior features
         # print(f'all_spike.shape: {all_spike.shape}') # all_spike.shape: (95, 2820), 95 represents number of units
