@@ -60,7 +60,7 @@ def model_train_mlp(
         return np.nanmean(corr(y_true, sigmoid(y_pred).round(), axis=0))
     valid_fn = valid_fn or default_valid_fn
 
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
     batch_start = np.arange(0, len(X_train), batch_size)
  
     # Hold the best model
@@ -161,8 +161,8 @@ def bat_mlp_trainer(
         return np.nanmean(corr(y_true, sigmoid(y_pred).round(), axis=0))
     valid_fn = valid_fn or default_valid_fn
 
-    optimizer = optim.Adam(model.parameters(), lr=lr)
- 
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
+
     # Hold the best model
     best_score = - np.inf   # the best area under the precision-recall curve, init to negative infinity
     best_weights = None
@@ -235,10 +235,10 @@ def bat_mlp_behavior_trainer(
     model = model.to(device)
     loss_fn = loss_fn.to(device)  # Make sure the loss function is on the correct device
 
-    optimizer = optim.Adam(model.parameters(), lr=lr)
- 
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
+
     # Hold the best model
-    best_score = - np.inf   
+    best_score = - np.inf
     best_weights = None
     val_scores = []
  
@@ -296,9 +296,11 @@ def bat_former_trainer(
     use_cosine_scheduler: bool = False, # use cosine scheduler or not
     n_warmup=None, # number of warmup steps for learning rate
     lr=0.0001, # learning rate
+    weight_decay=0.0, # L2 regularization
     loss_fn: nn.Module | None = None, 
     valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None, 
     valid_stat='mean', # after computing validation scores for all neurons, we calculate a single number (statistics) as 'val_score' for these neurons
+    early_stopping_patience: int | None = None, # stop if no improvement for this many epochs
     save_model: bool = False, # whether to save model or not
     model_name: str = 'best_model_weights.pth',
     # verbose=False, # not display the progress
@@ -316,7 +318,7 @@ def bat_former_trainer(
     model = model.to(device)
     loss_fn = loss_fn.to(device)  # Make sure the loss module is on the correct device
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     if use_cosine_scheduler:
         if n_warmup is None:
             n_warmup = int(0.1 * n_epochs)
@@ -331,7 +333,8 @@ def bat_former_trainer(
     best_score = - np.inf   # correlation coefficient, larger scores indicate better model
     best_weights = None
     val_scores = []
- 
+    epochs_without_improvement = 0
+
     for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
         model.train()
         for session_name, session_data in dataloaders['train'].items():
@@ -401,6 +404,12 @@ def bat_former_trainer(
         if val_score > best_score:
             best_score = val_score
             best_weights = copy.deepcopy(model.state_dict())
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
+                print(f"Early stopping at epoch {epoch + 1} (no improvement for {early_stopping_patience} epochs)")
+                break
 
     # save model, restore model and return best accuracy
     if save_model:

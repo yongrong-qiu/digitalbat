@@ -665,6 +665,14 @@ def poisson_fde_population(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray
     return fdes
 
 
+# Valid function: FDE only on well-fit neurons (FDE > 0)
+def poisson_fde_population_filtered(y_true, y_pred):
+    """
+    Compute FDE for a population of neurons, only on well-fit neurons (FDE > 0)
+    """
+    fdes = poisson_fde_population(y_true, y_pred)
+    return fdes[fdes > 0]  # Only neurons with FDE > 0
+
 # ---------------------------------------------------------------------
 # Utility function: Arc length computation
 # ---------------------------------------------------------------------

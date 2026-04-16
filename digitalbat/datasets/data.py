@@ -78,7 +78,7 @@ class Data_Prep_for_Raw():
     ):
         super().__init__()
         self.parent_folder = parent_folder
-        self.su_file_path = glob.glob(su_file_path)  # a list of strings
+        self.su_file_path = sorted(glob.glob(su_file_path))  # a list of strings
         self.use_speed_head_dir = use_speed_head_dir
         self.use_IMU_flag = use_IMU_flag
         self.use_click_flag = use_click_flag
@@ -328,12 +328,25 @@ class Data_Prep_for_Raw():
 
         su_goods_cluster_id = []
         su_goods_time = []
+        su_goods_pType = []
+        su_goods_position = []  # mean spike position (µm) per neuron
         for temppath in self.su_file_path:
             su_good = loadmat(temppath)
             temp_cluster_id = np.array([x[0][0,0] for x in su_good['out_Gunits']['cluster_id']])
             temp_good1_time = [x[0][:,0]/1e6 for x in su_good['out_Gunits']['spikeTimes_usec']]
+            # pType: putative cell type (stored in the same out_Gunits struct).
+            # Use object dtype so strings / scalars / arrays all survive.
+            temp_pType = np.array(
+                [np.squeeze(x[0]).item() if np.squeeze(x[0]).ndim == 0 else np.squeeze(x[0])
+                 for x in su_good['out_Gunits']['pType']],
+                dtype=object,
+            )
+            # Mean spike position from center-of-mass estimates
+            temp_position = [x[0].mean(axis=0) for x in su_good['out_Gunits']['spikePos_um']]
             su_goods_cluster_id.append(temp_cluster_id)
             su_goods_time.append(temp_good1_time)
+            su_goods_pType.append(list(temp_pType))
+            su_goods_position.append(temp_position)
 
         # merge units
         mergesFile = glob.glob(self.parent_folder + '/merges_Dataset_*.mat')[0]
@@ -373,9 +386,25 @@ class Data_Prep_for_Raw():
                 # print(f"Merged units {cluster_ids} into unit {cluster_ids[0]} with {len(clean_merged_times)} spikes remaining.")
                 # remove the merged-away empty units from your lists (su_goods_time and su_goods_cluster_id)
                 # Keep only those entries that have spike times
+                # Average positions of merged units into the surviving unit
+                pos_list = su_goods_position[ii]
+                merged_pos = np.mean([pos_list[idx] for idx in merge_indices], axis=0)
+                pos_list[merge_indices[0]] = merged_pos
                 valid_indices = [i for i, t in enumerate(time_list) if len(t) > 0]
                 su_goods_time[ii] = [time_list[i] for i in valid_indices]
                 su_goods_cluster_id[ii] = [cluster_id_list[i] for i in valid_indices]
+                su_goods_pType[ii] = [su_goods_pType[ii][i] for i in valid_indices]
+                su_goods_position[ii] = [pos_list[i] for i in valid_indices]
+
+        # Flatten pType across probes so it is aligned row-for-row with all_spike
+        # before any downstream filtering (only_flight_flag does not touch rows,
+        # but the firing-rate criterion below does).
+        pType_all = np.array(
+            [pt for probe_pTypes in su_goods_pType for pt in probe_pTypes],
+            dtype=object,
+        )
+        self.probe_id = np.concatenate([np.full(len(t), i) for i, t in enumerate(su_goods_time)])
+        self.neuron_position = np.vstack([pos for probe_pos in su_goods_position for pos in probe_pos])
 
         # su_goods_time = [su_good1_time, su_good2_time, su_good3_time]
         all_spike = []
@@ -403,9 +432,13 @@ class Data_Prep_for_Raw():
             self.neuron_ind = np.where(firing_rate>0.3)[0] # 0.3 Hz, based on Dotson & Yartsev 2021
             firing_rate = firing_rate[self.neuron_ind]
             all_spike = all_spike[self.neuron_ind]
+            pType_all = pType_all[self.neuron_ind]
+            self.probe_id = self.probe_id[self.neuron_ind]
+            self.neuron_position = self.neuron_position[self.neuron_ind]
 
         self.firing_rate = firing_rate
         self.all_spike = all_spike
+        self.pType = pType_all
 
         self._spike_ready = True
 
@@ -1195,6 +1228,7 @@ def bat_data_loader(
     stride_test = 20, 
     batch_size_train=None, # batch_size for training data
     batch_size_test=None,
+    parent_folder=None,
     max_acceleration=None, # m/s²; exclude flights whose peak acceleration exceeds this
 ):
     """
@@ -1215,12 +1249,15 @@ def bat_data_loader(
     meta_info_dict['behavior_std'] = {}
     meta_info_dict['spike_std'] = {}
     meta_info_dict['spatial_centers_sigma'] = {}
+    meta_info_dict['pType'] = {}
+    meta_info_dict['probe_id'] = {}
+    meta_info_dict['neuron_position'] = {}
 
     for session_id, session_name in enumerate(session_names):
-        parent_folder = '/mnt/at-globusshare/Users/Yongrong/' + session_name
-        su_file_path = '/mnt/at-globusshare/Users/Yongrong/To_transfer/out_Gunits_probe*_' + session_name + '.mat'
+        session_folder = parent_folder + session_name
+        su_file_path = parent_folder + '/To_transfer/out_Gunits_probe*_' + session_name + '_with_metrics.mat'
         data_prep_for_raw = Data_Prep_for_Raw(
-            parent_folder = parent_folder,
+            parent_folder = session_folder,
             su_file_path = su_file_path,
             use_speed_head_dir = use_speed_head_dir,
             use_IMU_flag = use_IMU_flag,
@@ -1249,6 +1286,9 @@ def bat_data_loader(
         all_behavior = data_prep_for_raw.get_all_behavior()
         meta_info_dict['r_lim'][session_name] = data_prep_for_raw.r_lim
         all_spike = data_prep_for_raw.get_all_spike()
+        meta_info_dict['pType'][session_name] = data_prep_for_raw.pType
+        meta_info_dict['probe_id'][session_name] = data_prep_for_raw.probe_id
+        meta_info_dict['neuron_position'][session_name] = data_prep_for_raw.neuron_position
         # spike_ratio = data_prep_for_raw.spike_ratio
         # print(f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (3, 2820), 3 represents behavior features
         # print(f'all_spike.shape: {all_spike.shape}') # all_spike.shape: (95, 2820), 95 represents number of units
