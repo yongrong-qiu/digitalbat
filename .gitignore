@@ -1,5 +1,6 @@
 tmp/
 notebooks/out/
+out/
 
 # PyTorch
 *.pth
