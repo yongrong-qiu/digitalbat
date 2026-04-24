@@ -1367,3 +1367,167 @@ class OrthogonalityPermutationTest:
         plt.tight_layout()
 
 
+def list_pad_concatenate(spike_list):
+    """
+    spike_list: a list of 2D or 3D arrays.
+    
+    - Concatenates along Axis 0 (Timepoints).
+    - Pads Axis 1 (Locations) with NaN to match the largest found in the list.
+    - Pads Axis 2 (Neurons), if it exists, to match the largest found in the list.
+    """
+    if not spike_list:
+        return np.array([])
+    # 1. Determine the dimensionality (2D or 3D)
+    # We assume all arrays in the list have the same number of dimensions
+    ndim = spike_list[0].ndim
+    # 2. Find maximums for each dimension starting from axis 1
+    # max_dims will store [max_axis_1, max_axis_2]
+    max_dims = []
+    for d in range(1, ndim):
+        max_dims.append(max(arr.shape[d] for arr in spike_list))
+    padded_list = []
+    for arr in spike_list:
+        # 3. Build a dynamic pad_width tuple
+        # Axis 0: Always (0, 0) because we are concatenating here
+        pad_config = [(0, 0)]
+        # Axis 1 and (if exists) Axis 2
+        for d in range(1, ndim):
+            padding_needed = max_dims[d-1] - arr.shape[d]
+            pad_config.append((0, padding_needed))
+        # 4. Apply padding
+        # astype(float) is required to support np.nan
+        padded_arr = np.pad(
+            arr.astype(float), 
+            pad_width=pad_config, 
+            mode='constant', 
+            constant_values=np.nan
+        )
+        padded_list.append(padded_arr)
+        
+    # 5. Concatenate along the first dimension (Axis 0)
+    return np.concatenate(padded_list, axis=0)
+
+
+def compute_angles(vel):
+    """
+    vel: numpy array of shape (T, 3) representing [vx, vy, vz]
+    Returns azimuth and elevation in degrees.
+    """
+    vx = vel[:, 0]
+    vy = vel[:, 1]
+    vz = vel[:, 2]
+
+    # 1. Compute Azimuth (Yaw)
+    # np.arctan2(y, x) handles the quadrant signs automatically
+    azimuth = np.arctan2(vy, vx)
+
+    # 2. Compute Elevation (Pitch)
+    # We need the horizontal magnitude (projection on xy-plane)
+    horizontal_mag = np.sqrt(vx**2 + vy**2)
+    elevation = np.arctan2(vz, horizontal_mag)
+
+    return np.degrees(azimuth), np.degrees(elevation)
+
+
+def generate_landmark_dicts(xyz_dict, landmark_phy, threshold=0.3):
+    reward_dict = {}
+    perch_dict = {}
+    for key, coords in xyz_dict.items():
+        # 1. Identify which dataset ID this key belongs to (e.g., 'Dataset_1')
+        dataset_id = None
+        for ds_name in landmark_phy.keys():
+            if ds_name in key:
+                dataset_id = ds_name
+                break
+        if dataset_id is None:
+            print(f"Warning: No matching dataset found in landmark_phy for key {key}")
+            continue
+        # Get the specific landmarks for this dataset
+        landmarks = landmark_phy[dataset_id]  
+        # 2. Helper function to find points within threshold of any landmark in a set
+        def get_proximity_mask(data_pts, landmark_pts):
+            # Use broadcasting: 
+            # data_pts: (N, 1, 3) minus landmark_pts: (1, M, 3)
+            # Resulting dists: (N, M)
+            dists = np.linalg.norm(data_pts[:, np.newaxis, :] - landmark_pts[np.newaxis, :, :], axis=2)
+            # Logical OR: Is the point within threshold of ANY landmark?
+            is_near = np.any(dists < threshold, axis=1)
+            return is_near
+        # 3. Process Reward Locations
+        rew_landmarks = landmarks['rew_locs']
+        reward_dict[key] = get_proximity_mask(coords, rew_landmarks)
+        # 4. Process Perch Locations
+        perch_landmarks = landmarks['perch_locs']
+        perch_dict[key] = get_proximity_mask(coords, perch_landmarks)
+    return reward_dict, perch_dict
+
+
+def extract_flight_type_saliency(
+    all_saliency, 
+    all_flight_session, 
+    all_rel_time, 
+    all_reward, 
+    all_perch, 
+    corr_dict, 
+    corr_threshold=0.2,
+):
+    """
+    Generate a dictionary: each key is a flight type such as ('Reward', 'Perch') and corresponding values are a list of 2D arrays, 
+    each array with a shape of (number_of_timepoints_within_flight, number_of_neurons), representing neuronal responses at each flight trajectory. 
+    And we also have a threshold 'corr_threshold' to use only neurons with predictive correlation values larger than the threshold.
+    """
+    # 1. Initialize the dictionary with flight types as keys
+    flight_types = [
+        ('Reward', 'Reward'), ('Reward', 'Perch'), ('Reward', 'Other'),
+        ('Perch', 'Reward'), ('Perch', 'Perch'), ('Perch', 'Other'),
+        ('Other', 'Reward'), ('Other', 'Perch'), ('Other', 'Other')
+    ]
+    result_dict = {ft: [] for ft in flight_types}
+    # 2. Identify flight segments using relative time resets (0.0 to 1.0)
+    # diff < 0 indicates the end of one flight and the start of the next
+    jumps = np.where(np.diff(all_rel_time) < 0)[0]
+    starts = np.concatenate(([0], jumps + 1))
+    ends = np.concatenate((jumps, [len(all_rel_time) - 1]))
+
+    for s, e in zip(starts, ends):
+        # 3. Determine the Flight Type for this segment
+        def get_loc_type(idx):
+            if all_reward[idx]: return 'Reward'
+            if all_perch[idx]: return 'Perch'
+            return 'Other'
+        current_ft = (get_loc_type(s), get_loc_type(e))
+        
+        # 4. Identify the Session Key
+        # Format: 'Dataset_3_14543_240419_f1' -> Key: 'Dataset_3_14543_240419'
+        full_flight_id = all_flight_session[s]
+        session_key = "_".join(full_flight_id.split("_")[:-1])
+        if session_key not in corr_dict:
+            continue
+
+        # 5. Filter Neurons by Correlation and Padding
+        # Get correlations for this specific session
+        session_corrs = corr_dict[session_key] # shape: (num_neurons_in_session,)
+        
+        # # Create a mask for neurons that:
+        # # a) Exist in this session (not NaN in the spike data)
+        # # b) Pass the correlation threshold
+        # # Note: all_true_spike[s, :] is the row for the first timepoint of the flight
+        # is_not_nan = ~np.isnan(all_true_spike[s, :len(session_corrs)])
+        # is_above_threshold = session_corrs > corr_threshold
+        # # Combined mask for the second dimension
+        # # We handle potential size mismatch if session_corrs is shorter than 317
+        # neuron_mask = np.zeros(all_true_spike.shape[1], dtype=bool)
+        # valid_len = min(len(is_above_threshold), len(is_not_nan))
+        # neuron_mask[:valid_len] = is_not_nan[:valid_len] & is_above_threshold[:valid_len]
+
+        # Create a mask for neurons that passes the correlation threshold
+        # because we know that num_neurons_in_session is not larger than all_true_spike.shape[-1]
+        neuron_mask = np.where(session_corrs > corr_threshold)[0]
+
+        # 6. Extract the slice and store
+        # Shape: (timepoints_in_segment, selected_neurons)
+        flight_response = all_saliency[s : e + 1, :e-s+1, neuron_mask]
+        if flight_response.shape[1] > 0:
+            result_dict[current_ft].append(flight_response)
+
+    return result_dict
