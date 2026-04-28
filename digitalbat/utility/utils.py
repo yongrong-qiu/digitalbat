@@ -176,7 +176,7 @@ def generate_2d_rate_map(
     unit_spike_count: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
-    loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
+    loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
 ):
     """
@@ -262,8 +262,9 @@ def plot_2d_rate_map(
     spike_count_pred: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
-    loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
+    loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
+    colorbar_label: str = "Spikes/s", # label for the colorbar
 ):
     """
     For a specific "unit" and a specific "target_type", plot the 2d rate map for the recorded and predicted data
@@ -297,14 +298,14 @@ def plot_2d_rate_map(
     axs[0].set_title(f"Unit: {unit}; type: {target_type}; recorded")
     axs[0].set_xlabel("X position")
     axs[0].set_ylabel("Y position")
-    plt.colorbar(im0, ax=axs[0], label="Spikes/s")
+    plt.colorbar(im0, ax=axs[0], label=colorbar_label)
     im1 = axs[1].imshow(smoothed_rate_map_pred.T, origin='lower', vmin=vmin, vmax=vmax,
                         extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
                         aspect='auto', cmap='hot_r')
     axs[1].set_title("Predicted")
     axs[1].set_xlabel("X position")
     # axs[1].set_ylabel("Y position")
-    plt.colorbar(im1, ax=axs[1], label="Spikes/s")
+    plt.colorbar(im1, ax=axs[1], label=colorbar_label)
     plt.tight_layout()
 
 def plot_2d_trajectory_response(
@@ -316,6 +317,7 @@ def plot_2d_trajectory_response(
     spike_count_pred: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
+    colorbar_label: str = "Spike count", # label for the colorbar
 ):
     """
     2D trajectory with colors indicating neural responses along the path
@@ -341,14 +343,14 @@ def plot_2d_trajectory_response(
     axs[0].set_ylim(loc_yy_lim)
     axs[0].set_xlabel("X position")
     axs[0].set_ylabel("Y position")
-    plt.colorbar(line, ax=axs[0], label="Spike count")
+    plt.colorbar(line, ax=axs[0], label=colorbar_label)
     line = axs[1].add_collection(lc_pred)
     axs[1].set_title("Predicted")
     axs[1].set_xlabel("X position")
     axs[1].set_xlim(loc_xx_lim)
     axs[1].set_ylim(loc_yy_lim)
     # axs[1].set_ylabel("Y position")
-    plt.colorbar(line, ax=axs[1], label="Spike count")
+    plt.colorbar(line, ax=axs[1], label=colorbar_label)
     plt.tight_layout()
     return None
 
