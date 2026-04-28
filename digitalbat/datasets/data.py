@@ -155,11 +155,16 @@ class Data_Prep_for_Raw():
         # bhv_v_abs[np.where(bhv_v_abs > bhv_thresh)] = bhv_thresh
         bhv_r = bhv['r'] # 3D position
         if 'Dataset_2' in self.parent_folder:
+            bhv_r = bhv_r.copy()
+            bhv_r[:, 0] = -bhv_r[:, 0]
             bhv_t = bhv['t'][:,0]
         else:
             bhv_t = bhv['t'][0,:] # np.arange(len(bhv_v_abs))/bhv['Fs'][0]
         # boundaries of the room/outdoor arena
         self.r_lim = bhv['r_lim']
+        if 'Dataset_2' in self.parent_folder:
+            self.r_lim = self.r_lim.copy()
+            self.r_lim[0, :] = -self.r_lim[0, ::-1]
 
         # IMU
         if self.use_IMU_flag:
