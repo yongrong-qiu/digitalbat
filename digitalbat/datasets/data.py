@@ -409,6 +409,7 @@ class Data_Prep_for_Raw():
             dtype=object,
         )
         self.probe_id = np.concatenate([np.full(len(t), i) for i, t in enumerate(su_goods_time)])
+        self.cluster_id = np.concatenate([np.asarray(c, dtype=int) for c in su_goods_cluster_id])
         self.neuron_position = np.vstack([pos for probe_pos in su_goods_position for pos in probe_pos])
 
         # su_goods_time = [su_good1_time, su_good2_time, su_good3_time]
@@ -439,6 +440,7 @@ class Data_Prep_for_Raw():
             all_spike = all_spike[self.neuron_ind]
             pType_all = pType_all[self.neuron_ind]
             self.probe_id = self.probe_id[self.neuron_ind]
+            self.cluster_id = self.cluster_id[self.neuron_ind]
             self.neuron_position = self.neuron_position[self.neuron_ind]
 
         self.firing_rate = firing_rate
