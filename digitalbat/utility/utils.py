@@ -1364,4 +1364,141 @@ class OrthogonalityPermutationTest:
         plt.legend()
         plt.tight_layout()
 
+    @staticmethod
+    def _summary_statistic(dists_condensed, stat):
+        """Compute a scalar summary of a condensed cosine-distance vector.
+
+        cosine_similarity = 1 - cosine_distance, so a population is "less
+        orthogonal" when |cos sim| is large on average, or when the spread of
+        cos sim is wider than expected.
+        """
+        cos_sim = 1.0 - dists_condensed
+        if stat == "mean_abs_cos_sim":
+            return np.mean(np.abs(cos_sim), axis=-1)
+        if stat == "mean_cos_sim":
+            return np.mean(cos_sim, axis=-1)
+        if stat == "var_cos_sim":
+            return np.var(cos_sim, axis=-1)
+        raise ValueError(f"Unknown stat: {stat}")
+
+    def _compute_shuffle_weights_null(self):
+        """Build a shuffle_weights null over pairwise distances.
+
+        shuffle_neurons leaves the multiset of pairwise distances unchanged
+        (pdist is invariant to row permutations), so any whole-population
+        summary is degenerate under that null. This method always uses
+        shuffle_weights and caches the result on the instance.
+        """
+        if hasattr(self, "_null_dists_shuffle_weights"):
+            return self._null_dists_shuffle_weights
+
+        n_pairs = self.n * (self.n - 1) // 2
+        out = np.zeros((self.n_perm, n_pairs), dtype=np.float32)
+        for k in range(self.n_perm):
+            Xp = np.empty_like(self.Xs)
+            for i in range(self.n):
+                Xp[i] = self.rng.permutation(self.Xs[i])
+            out[k] = pdist(Xp, metric=self.metric)
+
+        self._null_dists_shuffle_weights = out
+        return out
+
+    def compute_distribution_pvalue(
+        self,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+    ):
+        """Test whether the observed pairwise cosine-similarity distribution
+        across all neurons in the session is *less orthogonal* than chance.
+
+        Parameters
+        ----------
+        stat : {"mean_abs_cos_sim", "mean_cos_sim", "var_cos_sim"}
+            Summary statistic computed over all neuron pairs:
+              - "mean_abs_cos_sim": mean |1 - d|. Higher = less orthogonal.
+              - "mean_cos_sim":     mean (1 - d). Tests systematic alignment bias.
+              - "var_cos_sim":      var (1 - d). Higher = wider spread than chance.
+        alternative : {"greater", "less", "two-sided"}
+            Direction of the test. Default "greater" answers
+            "is the observed statistic above the null?" — for mean |cos sim|
+            and var, that is the "less orthogonal than chance" direction.
+
+        Returns
+        -------
+        dict with keys: stat, alternative, observed, null, p_value.
+        Also cached on self as self.distribution_test_[stat].
+        """
+        if not hasattr(self, "dist_obs_condensed"):
+            self.compute_observed()
+        null_dists = self._compute_shuffle_weights_null()
+
+        observed = self._summary_statistic(self.dist_obs_condensed, stat)
+        null = self._summary_statistic(null_dists, stat)
+
+        if alternative == "greater":
+            p = (1 + np.sum(null >= observed)) / (1 + self.n_perm)
+        elif alternative == "less":
+            p = (1 + np.sum(null <= observed)) / (1 + self.n_perm)
+        elif alternative == "two-sided":
+            null_centered = null - np.mean(null)
+            obs_centered = observed - np.mean(null)
+            p = (1 + np.sum(np.abs(null_centered) >= np.abs(obs_centered))) / (1 + self.n_perm)
+        else:
+            raise ValueError(f"Unknown alternative: {alternative}")
+
+        result = {
+            "stat": stat,
+            "alternative": alternative,
+            "observed": float(observed),
+            "null": null,
+            "p_value": float(p),
+        }
+        if not hasattr(self, "distribution_test_"):
+            self.distribution_test_ = {}
+        self.distribution_test_[stat] = result
+        return result
+
+    def plot_null_vs_observed_distribution(
+        self,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+        bins=40,
+        ax=None,
+    ):
+        """Histogram the null distribution of a population-level summary
+        statistic with the observed value drawn as a vertical line.
+
+        Calls compute_distribution_pvalue() if results aren't cached.
+        """
+        cache = getattr(self, "distribution_test_", {})
+        if stat not in cache:
+            self.compute_distribution_pvalue(stat=stat, alternative=alternative)
+        res = self.distribution_test_[stat]
+
+        label_map = {
+            "mean_abs_cos_sim": r"$\langle |\cos\,\mathrm{sim}| \rangle$",
+            "mean_cos_sim":     r"$\langle \cos\,\mathrm{sim} \rangle$",
+            "var_cos_sim":      r"$\mathrm{Var}(\cos\,\mathrm{sim})$",
+        }
+        xlabel = label_map.get(stat, stat)
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(4, 3))
+        ax.hist(res["null"], bins=bins, density=True, alpha=0.7, color="gray")
+        ax.axvline(
+            res["observed"],
+            linestyle="--", linewidth=2, c="k",
+            label=f"Observed = {res['observed']:.4f}",
+        )
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Density")
+        ax.set_title(
+            f"Population orthogonality test ({stat})\n"
+            f"{self.session_name}: n={self.n} neurons, "
+            f"p = {res['p_value']:.3f} ({res['alternative']})"
+        )
+        ax.legend()
+        plt.tight_layout()
+        return ax
+
 
