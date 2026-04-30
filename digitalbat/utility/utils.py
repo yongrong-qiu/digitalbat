@@ -1525,9 +1525,9 @@ def extract_flight_type_saliency(
         neuron_mask = np.where(session_corrs > corr_threshold)[0]
 
         # 6. Extract the slice and store
-        # Shape: (timepoints_in_segment, selected_neurons)
+        # Shape: (timepoints_in_segment, timepoints_in_segment, selected_neurons)
         flight_response = all_saliency[s : e + 1, :e-s+1, neuron_mask]
-        if flight_response.shape[1] > 0:
+        if flight_response.shape[-1] > 0:
             result_dict[current_ft].append(flight_response)
 
     return result_dict
