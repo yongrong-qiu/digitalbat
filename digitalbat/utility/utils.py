@@ -1501,4 +1501,139 @@ class OrthogonalityPermutationTest:
         plt.tight_layout()
         return ax
 
+    @classmethod
+    def run_across_sessions(
+        cls,
+        X,
+        df,
+        session_names=None,
+        *,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+        n_perm=1000,
+        random_state=0,
+        bat_col="bat",
+        extra_cols=(),
+    ):
+        """Run the population orthogonality test on each session and return
+        a tidy DataFrame in the same shape as Mantel-test outputs (one row
+        per session with 'r', 'p', 'perm_rs' columns).
+
+        The returned frame can be passed directly to plot_session_boxplot
+        below, or to a Mantel-style helper such as plot_mantel_boxplots,
+        producing one boxplot of pooled null draws across sessions with one
+        colored dot per session for the observed statistic.
+
+        Parameters
+        ----------
+        X : ndarray, (n_neurons, n_features)
+            Readout weights, aligned with df rows.
+        df : pandas.DataFrame
+            Must contain 'session_name'. If `bat_col` is present it is used
+            to populate a 'bat' column on the result for hue-based plotting.
+            Any column listed in `extra_cols` is forwarded as well (taken
+            from the first row of each session).
+        session_names : list[str] | None
+            Sessions to test. None = all unique session_names in df.
+        stat, alternative, n_perm, random_state :
+            Forwarded to compute_distribution_pvalue / __init__.
+        bat_col : str
+            Column to copy into the 'bat' field of the output (used as
+            hue when plotting).
+        extra_cols : iterable[str]
+            Additional df columns to attach per session.
+        """
+        if session_names is None:
+            session_names = df["session_name"].unique().tolist()
+
+        records = []
+        for s in session_names:
+            sess_mask = df["session_name"] == s
+            if int(sess_mask.sum()) < 2:
+                continue
+            tester = cls(
+                X=X, df=df, session_name=s,
+                n_perm=n_perm, random_state=random_state,
+                null_model="shuffle_weights",
+            )
+            res = tester.compute_distribution_pvalue(
+                stat=stat, alternative=alternative,
+            )
+            first_row = df.loc[sess_mask].iloc[0]
+            rec = dict(
+                comparison=f"orthogonality ({stat})",
+                session=s,
+                r=res["observed"],
+                p=res["p_value"],
+                perm_rs=res["null"],
+                n_neurons=tester.n,
+                n_pairs=tester.n * (tester.n - 1) // 2,
+                bat=first_row[bat_col] if bat_col in df.columns else None,
+            )
+            for c in extra_cols:
+                if c in df.columns:
+                    rec[c] = first_row[c]
+            records.append(rec)
+        return pd.DataFrame(records)
+
+    @staticmethod
+    def plot_session_boxplot(
+        results_df,
+        *,
+        comparison_col="comparison",
+        hue_col="bat",
+        ylabel=None,
+        zero_line=False,
+        ncols=4,
+    ):
+        """Mantel-style plot of run_across_sessions output: per comparison,
+        a grey boxplot of pooled null draws across sessions overlaid with
+        one strip-plot dot per session colored by `hue_col`. Stars
+        annotate sessions where p < {0.05, 0.01, 0.001}.
+        """
+        import math
+        import seaborn as sns
+
+        comparisons = list(results_df[comparison_col].unique())
+        n = len(comparisons)
+        ncols_actual = min(n, ncols)
+        nrows = math.ceil(n / ncols_actual)
+        fig, axes = plt.subplots(
+            nrows, ncols_actual,
+            figsize=(4 * ncols_actual, 4 * nrows),
+            squeeze=False,
+        )
+        for idx, comp in enumerate(comparisons):
+            ax = axes[idx // ncols_actual, idx % ncols_actual]
+            sub = results_df[results_df[comparison_col] == comp].reset_index(drop=True)
+            if len(sub) == 0:
+                ax.set_visible(False)
+                continue
+            all_nulls = np.concatenate(sub["perm_rs"].values)
+            sns.boxplot(y=all_nulls, color="0.85", width=0.4,
+                        whis=(0.5, 99.5), fliersize=0, ax=ax)
+            sns.stripplot(
+                data=sub, y="r",
+                hue=hue_col if hue_col in sub.columns else None,
+                ax=ax, size=8, jitter=0.1, zorder=5,
+                edgecolor="k", linewidth=0.5,
+            )
+            for _, row in sub.iterrows():
+                star = ("***" if row["p"] < 0.001 else
+                        "**"  if row["p"] < 0.01  else
+                        "*"   if row["p"] < 0.05  else "")
+                if star:
+                    ax.text(0.25, row["r"], star, ha="left", va="center", fontsize=8)
+            ax.set_ylabel(ylabel or "observed statistic")
+            ax.set_title(comp, fontsize=9)
+            if zero_line:
+                ax.axhline(0, color="k", linewidth=0.5, linestyle="--")
+            ax.set_xticks([])
+            if hue_col in sub.columns and ax.get_legend() is not None:
+                ax.legend(title=hue_col, fontsize=7, title_fontsize=7)
+        for idx in range(n, nrows * ncols_actual):
+            axes.flat[idx].set_visible(False)
+        plt.tight_layout()
+        return fig
+
 
