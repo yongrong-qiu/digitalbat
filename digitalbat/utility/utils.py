@@ -176,7 +176,7 @@ def generate_2d_rate_map(
     unit_spike_count: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
-    loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
+    loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
 ):
     """
@@ -262,9 +262,8 @@ def plot_2d_rate_map(
     spike_count_pred: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
-    loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
+    loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
-    colorbar_label: str = "Spikes/s", # label for the colorbar
 ):
     """
     For a specific "unit" and a specific "target_type", plot the 2d rate map for the recorded and predicted data
@@ -298,14 +297,14 @@ def plot_2d_rate_map(
     axs[0].set_title(f"Unit: {unit}; type: {target_type}; recorded")
     axs[0].set_xlabel("X position")
     axs[0].set_ylabel("Y position")
-    plt.colorbar(im0, ax=axs[0], label=colorbar_label)
+    plt.colorbar(im0, ax=axs[0], label="Spikes/s")
     im1 = axs[1].imshow(smoothed_rate_map_pred.T, origin='lower', vmin=vmin, vmax=vmax,
                         extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
                         aspect='auto', cmap='hot_r')
     axs[1].set_title("Predicted")
     axs[1].set_xlabel("X position")
     # axs[1].set_ylabel("Y position")
-    plt.colorbar(im1, ax=axs[1], label=colorbar_label)
+    plt.colorbar(im1, ax=axs[1], label="Spikes/s")
     plt.tight_layout()
 
 def plot_2d_trajectory_response(
@@ -317,7 +316,6 @@ def plot_2d_trajectory_response(
     spike_count_pred: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
-    colorbar_label: str = "Spike count", # label for the colorbar
 ):
     """
     2D trajectory with colors indicating neural responses along the path
@@ -343,14 +341,14 @@ def plot_2d_trajectory_response(
     axs[0].set_ylim(loc_yy_lim)
     axs[0].set_xlabel("X position")
     axs[0].set_ylabel("Y position")
-    plt.colorbar(line, ax=axs[0], label=colorbar_label)
+    plt.colorbar(line, ax=axs[0], label="Spike count")
     line = axs[1].add_collection(lc_pred)
     axs[1].set_title("Predicted")
     axs[1].set_xlabel("X position")
     axs[1].set_xlim(loc_xx_lim)
     axs[1].set_ylim(loc_yy_lim)
     # axs[1].set_ylabel("Y position")
-    plt.colorbar(line, ax=axs[1], label=colorbar_label)
+    plt.colorbar(line, ax=axs[1], label="Spike count")
     plt.tight_layout()
     return None
 
@@ -1365,6 +1363,278 @@ class OrthogonalityPermutationTest:
         )
         plt.legend()
         plt.tight_layout()
+
+    @staticmethod
+    def _summary_statistic(dists_condensed, stat):
+        """Compute a scalar summary of a condensed cosine-distance vector.
+
+        cosine_similarity = 1 - cosine_distance, so a population is "less
+        orthogonal" when |cos sim| is large on average, or when the spread of
+        cos sim is wider than expected.
+        """
+        cos_sim = 1.0 - dists_condensed
+        if stat == "mean_abs_cos_sim":
+            return np.mean(np.abs(cos_sim), axis=-1)
+        if stat == "mean_cos_sim":
+            return np.mean(cos_sim, axis=-1)
+        if stat == "var_cos_sim":
+            return np.var(cos_sim, axis=-1)
+        raise ValueError(f"Unknown stat: {stat}")
+
+    def _compute_shuffle_weights_null(self):
+        """Build a shuffle_weights null over pairwise distances.
+
+        shuffle_neurons leaves the multiset of pairwise distances unchanged
+        (pdist is invariant to row permutations), so any whole-population
+        summary is degenerate under that null. This method always uses
+        shuffle_weights and caches the result on the instance.
+        """
+        if hasattr(self, "_null_dists_shuffle_weights"):
+            return self._null_dists_shuffle_weights
+
+        n_pairs = self.n * (self.n - 1) // 2
+        out = np.zeros((self.n_perm, n_pairs), dtype=np.float32)
+        for k in range(self.n_perm):
+            Xp = np.empty_like(self.Xs)
+            for i in range(self.n):
+                Xp[i] = self.rng.permutation(self.Xs[i])
+            out[k] = pdist(Xp, metric=self.metric)
+
+        self._null_dists_shuffle_weights = out
+        return out
+
+    def compute_distribution_pvalue(
+        self,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+    ):
+        """Test whether the observed pairwise cosine-similarity distribution
+        across all neurons in the session is *less orthogonal* than chance.
+
+        Parameters
+        ----------
+        stat : {"mean_abs_cos_sim", "mean_cos_sim", "var_cos_sim"}
+            Summary statistic computed over all neuron pairs:
+              - "mean_abs_cos_sim": mean |1 - d|. Higher = less orthogonal.
+              - "mean_cos_sim":     mean (1 - d). Tests systematic alignment bias.
+              - "var_cos_sim":      var (1 - d). Higher = wider spread than chance.
+        alternative : {"greater", "less", "two-sided"}
+            Direction of the test. Default "greater" answers
+            "is the observed statistic above the null?" — for mean |cos sim|
+            and var, that is the "less orthogonal than chance" direction.
+
+        Returns
+        -------
+        dict with keys: stat, alternative, observed, null, p_value.
+        Also cached on self as self.distribution_test_[stat].
+        """
+        if not hasattr(self, "dist_obs_condensed"):
+            self.compute_observed()
+        null_dists = self._compute_shuffle_weights_null()
+
+        observed = self._summary_statistic(self.dist_obs_condensed, stat)
+        null = self._summary_statistic(null_dists, stat)
+
+        if alternative == "greater":
+            p = (1 + np.sum(null >= observed)) / (1 + self.n_perm)
+        elif alternative == "less":
+            p = (1 + np.sum(null <= observed)) / (1 + self.n_perm)
+        elif alternative == "two-sided":
+            null_centered = null - np.mean(null)
+            obs_centered = observed - np.mean(null)
+            p = (1 + np.sum(np.abs(null_centered) >= np.abs(obs_centered))) / (1 + self.n_perm)
+        else:
+            raise ValueError(f"Unknown alternative: {alternative}")
+
+        result = {
+            "stat": stat,
+            "alternative": alternative,
+            "observed": float(observed),
+            "null": null,
+            "p_value": float(p),
+        }
+        if not hasattr(self, "distribution_test_"):
+            self.distribution_test_ = {}
+        self.distribution_test_[stat] = result
+        return result
+
+    def plot_null_vs_observed_distribution(
+        self,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+        bins=40,
+        ax=None,
+    ):
+        """Histogram the null distribution of a population-level summary
+        statistic with the observed value drawn as a vertical line.
+
+        Calls compute_distribution_pvalue() if results aren't cached.
+        """
+        cache = getattr(self, "distribution_test_", {})
+        if stat not in cache:
+            self.compute_distribution_pvalue(stat=stat, alternative=alternative)
+        res = self.distribution_test_[stat]
+
+        label_map = {
+            "mean_abs_cos_sim": r"$\langle |\cos\,\mathrm{sim}| \rangle$",
+            "mean_cos_sim":     r"$\langle \cos\,\mathrm{sim} \rangle$",
+            "var_cos_sim":      r"$\mathrm{Var}(\cos\,\mathrm{sim})$",
+        }
+        xlabel = label_map.get(stat, stat)
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(4, 3))
+        ax.hist(res["null"], bins=bins, density=True, alpha=0.7, color="gray")
+        ax.axvline(
+            res["observed"],
+            linestyle="--", linewidth=2, c="k",
+            label=f"Observed = {res['observed']:.4f}",
+        )
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Density")
+        ax.set_title(
+            f"Population orthogonality test ({stat})\n"
+            f"{self.session_name}: n={self.n} neurons, "
+            f"p = {res['p_value']:.3f} ({res['alternative']})"
+        )
+        ax.legend()
+        plt.tight_layout()
+        return ax
+
+    @classmethod
+    def run_across_sessions(
+        cls,
+        X,
+        df,
+        session_names=None,
+        *,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+        n_perm=1000,
+        random_state=0,
+        bat_col="bat",
+        extra_cols=(),
+    ):
+        """Run the population orthogonality test on each session and return
+        a tidy DataFrame in the same shape as Mantel-test outputs (one row
+        per session with 'r', 'p', 'perm_rs' columns).
+
+        The returned frame can be passed directly to plot_session_boxplot
+        below, or to a Mantel-style helper such as plot_mantel_boxplots,
+        producing one boxplot of pooled null draws across sessions with one
+        colored dot per session for the observed statistic.
+
+        Parameters
+        ----------
+        X : ndarray, (n_neurons, n_features)
+            Readout weights, aligned with df rows.
+        df : pandas.DataFrame
+            Must contain 'session_name'. If `bat_col` is present it is used
+            to populate a 'bat' column on the result for hue-based plotting.
+            Any column listed in `extra_cols` is forwarded as well (taken
+            from the first row of each session).
+        session_names : list[str] | None
+            Sessions to test. None = all unique session_names in df.
+        stat, alternative, n_perm, random_state :
+            Forwarded to compute_distribution_pvalue / __init__.
+        bat_col : str
+            Column to copy into the 'bat' field of the output (used as
+            hue when plotting).
+        extra_cols : iterable[str]
+            Additional df columns to attach per session.
+        """
+        if session_names is None:
+            session_names = df["session_name"].unique().tolist()
+
+        records = []
+        for s in session_names:
+            sess_mask = df["session_name"] == s
+            if int(sess_mask.sum()) < 2:
+                continue
+            tester = cls(
+                X=X, df=df, session_name=s,
+                n_perm=n_perm, random_state=random_state,
+                null_model="shuffle_weights",
+            )
+            res = tester.compute_distribution_pvalue(
+                stat=stat, alternative=alternative,
+            )
+            first_row = df.loc[sess_mask].iloc[0]
+            rec = dict(
+                comparison=f"orthogonality ({stat})",
+                session=s,
+                r=res["observed"],
+                p=res["p_value"],
+                perm_rs=res["null"],
+                n_neurons=tester.n,
+                n_pairs=tester.n * (tester.n - 1) // 2,
+                bat=first_row[bat_col] if bat_col in df.columns else None,
+            )
+            for c in extra_cols:
+                if c in df.columns:
+                    rec[c] = first_row[c]
+            records.append(rec)
+        return pd.DataFrame(records)
+
+    @staticmethod
+    def plot_session_boxplot(
+        results_df,
+        *,
+        comparison_col="comparison",
+        hue_col="bat",
+        ylabel=None,
+        zero_line=False,
+        ncols=4,
+    ):
+        """Mantel-style plot of run_across_sessions output: per comparison,
+        a grey boxplot of pooled null draws across sessions overlaid with
+        one strip-plot dot per session colored by `hue_col`. Stars
+        annotate sessions where p < {0.05, 0.01, 0.001}.
+        """
+        import math
+        import seaborn as sns
+
+        comparisons = list(results_df[comparison_col].unique())
+        n = len(comparisons)
+        ncols_actual = min(n, ncols)
+        nrows = math.ceil(n / ncols_actual)
+        fig, axes = plt.subplots(
+            nrows, ncols_actual,
+            figsize=(4 * ncols_actual, 4 * nrows),
+            squeeze=False,
+        )
+        for idx, comp in enumerate(comparisons):
+            ax = axes[idx // ncols_actual, idx % ncols_actual]
+            sub = results_df[results_df[comparison_col] == comp].reset_index(drop=True)
+            if len(sub) == 0:
+                ax.set_visible(False)
+                continue
+            all_nulls = np.concatenate(sub["perm_rs"].values)
+            sns.boxplot(y=all_nulls, color="0.85", width=0.4,
+                        whis=(0.5, 99.5), fliersize=0, ax=ax)
+            sns.stripplot(
+                data=sub, y="r",
+                hue=hue_col if hue_col in sub.columns else None,
+                ax=ax, size=8, jitter=0.1, zorder=5,
+                edgecolor="k", linewidth=0.5,
+            )
+            for _, row in sub.iterrows():
+                star = ("***" if row["p"] < 0.001 else
+                        "**"  if row["p"] < 0.01  else
+                        "*"   if row["p"] < 0.05  else "")
+                if star:
+                    ax.text(0.25, row["r"], star, ha="left", va="center", fontsize=8)
+            ax.set_ylabel(ylabel or "observed statistic")
+            ax.set_title(comp, fontsize=9)
+            if zero_line:
+                ax.axhline(0, color="k", linewidth=0.5, linestyle="--")
+            ax.set_xticks([])
+            if hue_col in sub.columns and ax.get_legend() is not None:
+                ax.legend(title=hue_col, fontsize=7, title_fontsize=7)
+        for idx in range(n, nrows * ncols_actual):
+            axes.flat[idx].set_visible(False)
+        plt.tight_layout()
+        return fig
 
 
 def list_pad_concatenate(spike_list):

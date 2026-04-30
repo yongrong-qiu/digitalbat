@@ -74,7 +74,7 @@ class Data_Prep_for_Raw():
         window_size: int|None = None, # for splitting each trajectory into multiple samples
         stride_train: int|None = None, # splitting each trajectory into multiple samples, for training data
         stride_test: int|None = None, # splitting each trajectory into multiple samples, for test data
-        max_acceleration: float|None = None, # m/s²; exclude flights whose peak acceleration exceeds this
+        max_acceleration: float|None = 40, # m/s²; exclude flights whose peak acceleration exceeds this
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -155,11 +155,16 @@ class Data_Prep_for_Raw():
         # bhv_v_abs[np.where(bhv_v_abs > bhv_thresh)] = bhv_thresh
         bhv_r = bhv['r'] # 3D position
         if 'Dataset_2' in self.parent_folder:
+            bhv_r = bhv_r.copy()
+            bhv_r[:, 0] = -bhv_r[:, 0]
             bhv_t = bhv['t'][:,0]
         else:
             bhv_t = bhv['t'][0,:] # np.arange(len(bhv_v_abs))/bhv['Fs'][0]
         # boundaries of the room/outdoor arena
         self.r_lim = bhv['r_lim']
+        if 'Dataset_2' in self.parent_folder:
+            self.r_lim = self.r_lim.copy()
+            self.r_lim[0, :] = -self.r_lim[0, ::-1]
 
         # IMU
         if self.use_IMU_flag:
@@ -404,6 +409,7 @@ class Data_Prep_for_Raw():
             dtype=object,
         )
         self.probe_id = np.concatenate([np.full(len(t), i) for i, t in enumerate(su_goods_time)])
+        self.cluster_id = np.concatenate([np.asarray(c, dtype=int) for c in su_goods_cluster_id])
         self.neuron_position = np.vstack([pos for probe_pos in su_goods_position for pos in probe_pos])
 
         # su_goods_time = [su_good1_time, su_good2_time, su_good3_time]
@@ -434,6 +440,7 @@ class Data_Prep_for_Raw():
             all_spike = all_spike[self.neuron_ind]
             pType_all = pType_all[self.neuron_ind]
             self.probe_id = self.probe_id[self.neuron_ind]
+            self.cluster_id = self.cluster_id[self.neuron_ind]
             self.neuron_position = self.neuron_position[self.neuron_ind]
 
         self.firing_rate = firing_rate
@@ -1210,7 +1217,7 @@ def bat_data_loader(
     use_LFP_flag = False,  # True
     use_ripple_flag = False,
     only_flight_flag = True,  # True
-    firing_rate_criterion_flag = False, 
+    firing_rate_criterion_flag = False,
     no_3d_location = False, # False
     spike_count_flag = True,
     bin_width = 0.10, # 0.10, in seconds
@@ -1229,7 +1236,7 @@ def bat_data_loader(
     batch_size_train=None, # batch_size for training data
     batch_size_test=None,
     parent_folder=None,
-    max_acceleration=None, # m/s²; exclude flights whose peak acceleration exceeds this
+    max_acceleration=40, # m/s²; exclude flights whose peak acceleration exceeds this
 ):
     """
     Dataloaders for multiple sessions of bat data.
