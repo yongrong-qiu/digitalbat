@@ -41,9 +41,9 @@ def make_bat_former(behavior_dim, unit_num_dict, meta_info_dict):
 
 
 def make_model_name(seed, lr=DEFAULT_LR, weight_decay=DEFAULT_WEIGHT_DECAY,
-                    out_dir='./out'):
-    """Standard checkpoint path: ``<out_dir>/bat_former_seed_{seed}_lr_<lr>_wd_<wd>.pth``."""
-    return f'{out_dir}/bat_former_seed_{seed}_lr_{lr:.2e}_wd_{weight_decay:.2e}.pth'
+                    out_dir='./out', suffix=''):
+    """Standard checkpoint path: ``<out_dir>/bat_former_seed_{seed}_lr_<lr>_wd_<wd>{suffix}.pth``."""
+    return f'{out_dir}/bat_former_seed_{seed}_lr_{lr:.2e}_wd_{weight_decay:.2e}{suffix}.pth'
 
 
 def make_trainer_config(model, dataloaders, device, model_name,
