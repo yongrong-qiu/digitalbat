@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.sampler import SubsetRandomSampler
@@ -67,7 +66,6 @@ class Data_Prep_for_Raw():
         special_id_count_thresh=3,  # for splitting flight clustering data
         only_use_special_id_4train_flag=False, # Only use the "special_id" flight types (e.g., flight clusters with more than "special_id_count_thresh" repeats) for training 
         time_shuffle_for_trajecotry_flag=False, # Whether to shuffle temporal order of trajectory
-        simulate_place_cell_flag=False, # Whether to generate simulation data of pure place cells using training data.
         # After splitting fight-clustering data into train, validation and test, we may want to use/split each flight trajectory as/into one/multiple data samples.
         # With such data, we can build a network (such as Transformer) to model the temporal dependency of animal behavior (and neural activity) during each flight 
         split_each_trajectory_flag=False, 
@@ -93,7 +91,6 @@ class Data_Prep_for_Raw():
         self.special_id_count_thresh = special_id_count_thresh
         self.only_use_special_id_4train_flag = only_use_special_id_4train_flag
         self.time_shuffle_for_trajecotry_flag = time_shuffle_for_trajecotry_flag
-        self.simulate_place_cell_flag = simulate_place_cell_flag
         self.split_each_trajectory_flag = split_each_trajectory_flag
         self.window_size = window_size
         self.stride_train = stride_train
@@ -695,32 +692,6 @@ class Data_Prep_for_Raw():
             behavior_train = behavior_train_shuffle[:]
             spike_train = spike_train_shuffle[:]
 
-        # Generate simulation data of "pure place-field cells" based on the actual behavior and rate maps computed from training data
-        if self.simulate_place_cell_flag:
-            loc_bin_width = 0.1 
-            place_cell_simulator_3D = PlaceCellSimulator3D(bin_size=loc_bin_width, smoothing_sigma=1) # smoothing_sigma=1
-            _ = place_cell_simulator_3D.fit(behavior_train, spike_train, dt=self.bin_width)
-            spike_train_simulation = place_cell_simulator_3D.simulate(behavior_train, dt=self.bin_width)
-            # spike_valid_simulation = place_cell_simulator_3D.simulate(behavior_valid, dt=self.bin_width)
-            # spike_test_simulation = place_cell_simulator_3D.simulate(behavior_test, dt=self.bin_width)
-            # # for sanity check
-            # plot_2d_trajectory_4_simulation(
-            #     behavior_train,
-            #     spike_train,
-            #     behavior_train,
-            #     spike_train_simulation,
-            #     behavior_test,
-            #     spike_test,
-            #     behavior_test,
-            #     spike_test_simulation,
-            #     units = [101, 130, 184], # For 'Dataset_3_29959_240403'
-            #     loc_bin_width = loc_bin_width,
-            #     dt = self.bin_width,
-            # )
-            spike_train = spike_train_simulation[:]
-            # spike_valid = spike_valid_simulation[:]
-            # spike_test = spike_test_simulation[:]
-
         # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
         # print(len(spike_train), len(spike_valid), len(spike_test))  # 22 2 13
         # shuffle the training trajectories
@@ -1228,8 +1199,7 @@ def bat_data_loader(
     only_use_special_id_4train_flag=False,
     shuffle_flag=False, # shuffle the training data
     time_shuffle_for_trajecotry_flag=False, # shuffle temporal order for each trajectory
-    simulate_place_cell_flag=False,
-    split_each_trajectory_flag=False, 
+    split_each_trajectory_flag=False,
     window_size = 20, 
     stride_train = 20, 
     stride_test = 20, 
@@ -1282,7 +1252,6 @@ def bat_data_loader(
             special_id_count_thresh = special_id_count_thresh,
             only_use_special_id_4train_flag = only_use_special_id_4train_flag,
             time_shuffle_for_trajecotry_flag = time_shuffle_for_trajecotry_flag,
-            simulate_place_cell_flag = simulate_place_cell_flag,
             split_each_trajectory_flag = split_each_trajectory_flag,
             window_size = window_size, 
             stride_train = stride_train,
@@ -1582,98 +1551,3 @@ class PlaceCellSimulator3D:
             spike_test.append(spikes)
 
         return spike_test
-    
-
-def plot_2d_trajectory_4_simulation(
-    behavior_train,
-    spike_train,
-    behavior_train_simulation,
-    spike_train_simulation,
-    behavior_test,
-    spike_test,
-    behavior_test_simulation,
-    spike_test_simulation,
-    units,
-    loc_bin_width,
-    dt,
-):
-    """
-    Plot 2D trajectory for the simulated 'pure place cell'
-    behavior_train : list of arrays (3,T)
-    spike_train : list of arrays (N,T)
-    """
-    all_pos = np.concatenate([b.T for b in behavior_train], axis=0)
-    loc_mins = all_pos.min(axis=0) # shape: (3, )
-    loc_maxs = all_pos.max(axis=0) # shape: (3, )
-    all_spike = np.concatenate([b.T for b in spike_train], axis=0)
-    spike_mins = all_spike.min(axis=0) # shape: (N, )
-    spike_maxs = all_spike.max(axis=0) # shape: (N, )
-    
-    behavior_lists = [behavior_train, behavior_train_simulation, behavior_test, behavior_test_simulation]
-    spike_lists = [spike_train, spike_train_simulation, spike_test, spike_test_simulation]
-    data_label_list = ['Train', 'Train_sim', 'Test', 'Test_sim']
-
-    ncols = len(units)
-    nrows = len(behavior_lists)
-    fig, axs = plt.subplots(nrows, ncols, figsize=(ncols*3, nrows*1.5))
-    for ii in range(nrows): # training, test, test_simulation
-        for jj, unit in enumerate(units): # each neuron/unit
-            loc_xx = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 0]
-            loc_yy = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 1]
-            spike_count = np.concatenate([s.T for s in spike_lists[ii]], axis=0)[:, unit]
-            # Make line segments between successive points
-            points = np.array([loc_xx, loc_yy]).T.reshape(-1, 1, 2)
-            segments = np.concatenate([points[:-1], points[1:]], axis=1)
-            # Normalize spike counts for colormap
-            norm = plt.Normalize(spike_mins[unit], spike_maxs[unit])
-            # Create a line collection with color mapping
-            lc = LineCollection(segments, cmap='hot', norm=norm)
-            lc.set_array(spike_count)
-            lc.set_linewidth(1)
-            # plot
-            line = axs[ii,jj].add_collection(lc)
-            if ii == 0:
-                axs[ii,jj].set_title(f"Unit: {unit}")
-            axs[ii,jj].set_xlim(loc_mins[0], loc_maxs[0])
-            axs[ii,jj].set_ylim(loc_mins[1], loc_maxs[1])
-            if ii == nrows-1:
-                axs[ii,jj].set_xlabel("X")
-            if jj == 0:
-                axs[ii,jj].set_ylabel(data_label_list[ii])
-            plt.colorbar(line, ax=axs[ii,jj], label="Spike count")
-            plt.tight_layout()
-
-    from ..utility.utils import generate_2d_rate_map
-    fig, axs = plt.subplots(nrows, ncols, figsize=(ncols*3, nrows*1.5))
-    for jj, unit in enumerate(units): # each neuron/unit
-        for ii in range(nrows): # training, test, test_simulation
-            loc_xx = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 0]
-            loc_yy = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 1]
-            spike_count = np.concatenate([s.T for s in spike_lists[ii]], axis=0)[:, unit]
-            #
-            x_edges, y_edges, rate_map, smoothed_rate_map = generate_2d_rate_map(
-                loc_xx=loc_xx,
-                loc_yy=loc_yy,
-                unit_spike_count=spike_count,
-                loc_xx_lim=(loc_mins[0], loc_maxs[0]),
-                loc_yy_lim=(loc_mins[1], loc_maxs[1]),
-                loc_bin_width=loc_bin_width,
-                dt=dt,
-            )
-            if ii==0: # Be carefule: for each neuron, we use the limits of the training data
-                vmin, vmax = np.min(rate_map), np.max(rate_map)
-            im = axs[ii,jj].imshow(rate_map.T, origin='lower', # vmin=vmin, vmax=vmax,
-                        extent=[loc_mins[0], loc_maxs[0], loc_mins[1], loc_maxs[1]],
-                        aspect='auto', cmap='hot_r')
-            if ii == 0:
-                axs[ii,jj].set_title(f"Unit: {unit}")
-            # axs[ii,jj].set_xlim(loc_mins[0], loc_maxs[0])
-            # axs[ii,jj].set_ylim(loc_mins[1], loc_maxs[1])
-            if ii == nrows-1:
-                axs[ii,jj].set_xlabel("X")
-            if jj == 0:
-                axs[ii,jj].set_ylabel(data_label_list[ii])
-            plt.colorbar(im, ax=axs[ii,jj], label="Spikes/s")
-            plt.tight_layout()
-
-    return None
