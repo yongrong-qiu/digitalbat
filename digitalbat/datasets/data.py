@@ -74,7 +74,7 @@ class Data_Prep_for_Raw():
         window_size: int|None = None, # for splitting each trajectory into multiple samples
         stride_train: int|None = None, # splitting each trajectory into multiple samples, for training data
         stride_test: int|None = None, # splitting each trajectory into multiple samples, for test data
-        max_acceleration: float|None = None, # m/s²; exclude flights whose peak acceleration exceeds this
+        max_acceleration: float|None = 40, # m/s²; exclude flights whose peak acceleration exceeds this
     ):
         super().__init__()
         self.parent_folder = parent_folder
@@ -1236,7 +1236,7 @@ def bat_data_loader(
     batch_size_train=None, # batch_size for training data
     batch_size_test=None,
     parent_folder=None,
-    max_acceleration=None, # m/s²; exclude flights whose peak acceleration exceeds this
+    max_acceleration=40, # m/s²; exclude flights whose peak acceleration exceeds this
 ):
     """
     Dataloaders for multiple sessions of bat data.
