@@ -24,9 +24,15 @@ from digitalbat.decoding.pp_decoder import (
     eval_s2s_pp,
     make_pp_dataloaders,
     make_s2s_pp,
+    make_synthetic_pp_flights,
     run_s2s_pp_optuna,
     s2s_pp_objective,
     train_s2s_pp,
+)
+from digitalbat.decoding.trajectory_plots import (
+    plot_trajectory_grid,
+    plot_trajectory_zoom_3d,
+    polylines_from_per_timestep_df,
 )
 
 __all__ = [
@@ -44,9 +50,13 @@ __all__ = [
     "make_nb_continuity",
     "make_pp_dataloaders",
     "make_s2s_pp",
+    "make_synthetic_pp_flights",
     "nb_cont_pp_objective",
     "nb_pp_objective",
     "per_neuron_val_poisson_info",
+    "plot_trajectory_grid",
+    "plot_trajectory_zoom_3d",
+    "polylines_from_per_timestep_df",
     "position_to_flat_bin",
     "predict_lagged",
     "run_nb_pp_optuna",

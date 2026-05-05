@@ -13,8 +13,12 @@ comparison plots.
 """
 from __future__ import annotations
 
+import os
+import pickle
+
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from digitalbat.models.decoder import (
     NaiveBayes_Continuity_Decoder,
@@ -298,67 +302,146 @@ def session_arrays_from_pp_flights(flights, session_name):
     }
 
 
-def _fit_predict_one_session(session_name, train, valid, eval_, r_lim, *,
-                             nb_best, nb_cont_best, dt):
-    """Fit NB / NB-cont / NB-lag on (train, valid) and predict on eval_.
+def _params_substr(params, max_len=120):
+    """Filename-safe substring encoding a hyperparameter dict.
 
-    Each of `train`, `valid`, `eval_` is a dict matching `gather_session_arrays`
-    output. Returns a list of per-timestep record dicts (extends one decoder
-    after another).
+    Sorted by key so the same params always produce the same string. Long
+    encodings get truncated and md5-hashed so filenames stay reasonable.
     """
-    train_p2d = np.column_stack([train['pos_x'], train['pos_y']])
-    train_p3d = np.column_stack([train['pos_x'], train['pos_y'], train['pos_z']])
+    parts = [
+        f'{k}_{v:.2f}' if isinstance(v, float) else f'{k}_{v}'
+        for k, v in sorted(params.items())
+    ]
+    s = '_'.join(parts)
+    if len(s) > max_len:
+        import hashlib
+        h = hashlib.md5(s.encode()).hexdigest()[:8]
+        s = s[:max_len - 9] + '_' + h
+    return s
+
+
+def _nb_cache_path(decoder_name, ndim, session, params, output_dir, seed, tag=''):
+    """Per-session NB cache filename keyed on decoder + ndim + hyperparams.
+
+    `tag` lets callers separate caches for distinct training-data sources
+    (e.g. real vs synthetic pseudo-population) without changing `output_dir`.
+    """
+    suffix = f'_{tag}' if tag else ''
+    return os.path.join(
+        output_dir,
+        f'nb_pp_{decoder_name}_{ndim}d_seed_{seed}_{session}_'
+        f'{_params_substr(params)}{suffix}.pkl',
+    )
+
+
+def _fit_or_load_nb(decoder_name, ndim, session, full_params, *,
+                    train, valid, r_lim, dt, cache_dir, seed, tag=''):
+    """Fit (or load from disk) one per-session NB and return a payload dict.
+
+    `full_params` covers everything the fit depends on:
+      - 'naive_bayes'      : {'sigma', 'n_bins_*', 'min_occupancy', 'use_uniform_prior'}
+      - 'nb_continuity'    : the NB params above + {'c_speed'}
+      - 'naive_bayes_lag'  : the NB params above (lags are derived from data)
+
+    Returns a dict with keys depending on `decoder_name`:
+      - 'naive_bayes'      : {'kind', 'model'}
+      - 'nb_continuity'    : {'kind', 'model'}
+      - 'naive_bayes_lag'  : {'kind', 'model', 'chosen_lags'}
+    """
+    cache_path = (_nb_cache_path(decoder_name, ndim, session, full_params,
+                                 cache_dir, seed, tag=tag) if cache_dir else None)
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path, 'rb') as f:
+            return pickle.load(f)
+
+    cols = ['pos_x', 'pos_y'] + (['pos_z'] if ndim == 3 else [])
+    train_pos = np.column_stack([train[c] for c in cols])
+
+    if decoder_name == 'naive_bayes':
+        model = make_nb(ndim, r_lim, full_params, dt).fit(train['spikes'], train_pos)
+        payload = {'kind': 'naive_bayes', 'model': model}
+    elif decoder_name == 'nb_continuity':
+        nb_hp = {k: v for k, v in full_params.items() if k != 'c_speed'}
+        model = make_nb_continuity(
+            ndim, r_lim, full_params['c_speed'], nb_hp, dt,
+        ).fit(
+            train['spikes'], train_pos,
+            flight_id=train['flight_id'], t_idx=train['t_idx'], dt=dt,
+        )
+        payload = {'kind': 'nb_continuity', 'model': model}
+    elif decoder_name == 'naive_bayes_lag':
+        chosen_lags, _, rmaps, shared = fit_lagsweep_and_select(
+            ndim, r_lim, full_params, train, valid, dt,
+        )
+        model = assemble_lag_nb(shared, rmaps, chosen_lags)
+        payload = {'kind': 'naive_bayes_lag',
+                   'model': model, 'chosen_lags': chosen_lags}
+    else:
+        raise ValueError(f'unknown decoder_name: {decoder_name!r}')
+
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, 'wb') as f:
+            pickle.dump(payload, f)
+    return payload
+
+
+def _predict_with_payload(payload, eval_):
+    """Run prediction with a (cached or freshly fit) NB payload."""
+    kind = payload['kind']
+    model = payload['model']
+    if kind == 'naive_bayes':
+        pos_dec, _ = model.predict(eval_['spikes'])
+    elif kind == 'nb_continuity':
+        pos_dec, _ = model.predict(
+            eval_['spikes'],
+            flight_id=eval_['flight_id'], t_idx=eval_['t_idx'],
+        )
+    elif kind == 'naive_bayes_lag':
+        pos_dec = predict_lagged(
+            model, eval_['spikes'], eval_['flight_id'], payload['chosen_lags'],
+        )
+    else:
+        raise ValueError(f'unknown kind: {kind!r}')
+    return pos_dec
+
+
+def _fit_predict_one_session(session_name, train, valid, eval_, r_lim, *,
+                             nb_best, nb_cont_best, dt,
+                             cache_dir=None, seed=1, tag=''):
+    """Fit (or load) NB / NB-cont / NB-lag on (train, valid) and predict on eval_.
+
+    When `cache_dir` is given, each per-session per-decoder per-ndim NB is
+    cached to disk keyed on its hyperparameters; subsequent runs with the
+    same hyperparameters skip fitting.
+    """
     eval_p2d = np.column_stack([eval_['pos_x'], eval_['pos_y']])
     eval_p3d = np.column_stack([eval_['pos_x'], eval_['pos_y'], eval_['pos_z']])
     out = []
 
-    # Vanilla NB
-    nb_2d = make_nb(2, r_lim, nb_best[2], dt).fit(train['spikes'], train_p2d)
-    nb_3d = make_nb(3, r_lim, nb_best[3], dt).fit(train['spikes'], train_p3d)
-    pos_dec_2d, _ = nb_2d.predict(eval_['spikes'])
-    pos_dec_3d, _ = nb_3d.predict(eval_['spikes'])
-    out.extend(_per_timestep_records(
-        session_name, eval_, eval_p2d, eval_p3d,
-        pos_dec_2d, pos_dec_3d, 'naive_bayes', dt,
-    ))
+    plans = [
+        ('naive_bayes',     {2: nb_best[2],
+                             3: nb_best[3]}),
+        ('nb_continuity',   {2: {**nb_best[2], **nb_cont_best[2]},
+                             3: {**nb_best[3], **nb_cont_best[3]}}),
+        ('naive_bayes_lag', {2: nb_best[2],
+                             3: nb_best[3]}),
+    ]
 
-    # NB + continuity
-    nb_c_2d = make_nb_continuity(
-        2, r_lim, nb_cont_best[2]['c_speed'], nb_best[2], dt,
-    ).fit(
-        train['spikes'], train_p2d,
-        flight_id=train['flight_id'], t_idx=train['t_idx'], dt=dt,
-    )
-    nb_c_3d = make_nb_continuity(
-        3, r_lim, nb_cont_best[3]['c_speed'], nb_best[3], dt,
-    ).fit(
-        train['spikes'], train_p3d,
-        flight_id=train['flight_id'], t_idx=train['t_idx'], dt=dt,
-    )
-    pos_dec_2d, _ = nb_c_2d.predict(
-        eval_['spikes'], flight_id=eval_['flight_id'], t_idx=eval_['t_idx'])
-    pos_dec_3d, _ = nb_c_3d.predict(
-        eval_['spikes'], flight_id=eval_['flight_id'], t_idx=eval_['t_idx'])
-    out.extend(_per_timestep_records(
-        session_name, eval_, eval_p2d, eval_p3d,
-        pos_dec_2d, pos_dec_3d, 'nb_continuity', dt,
-    ))
-
-    # NB with per-neuron lag
-    lags_2d, _, rmaps_2d, shared_2d = fit_lagsweep_and_select(
-        2, r_lim, nb_best[2], train, valid, dt,
-    )
-    lags_3d, _, rmaps_3d, shared_3d = fit_lagsweep_and_select(
-        3, r_lim, nb_best[3], train, valid, dt,
-    )
-    nb_lag_2d = assemble_lag_nb(shared_2d, rmaps_2d, lags_2d)
-    nb_lag_3d = assemble_lag_nb(shared_3d, rmaps_3d, lags_3d)
-    pos_dec_2d = predict_lagged(nb_lag_2d, eval_['spikes'], eval_['flight_id'], lags_2d)
-    pos_dec_3d = predict_lagged(nb_lag_3d, eval_['spikes'], eval_['flight_id'], lags_3d)
-    out.extend(_per_timestep_records(
-        session_name, eval_, eval_p2d, eval_p3d,
-        pos_dec_2d, pos_dec_3d, 'naive_bayes_lag', dt,
-    ))
+    for decoder_name, ndim_params in plans:
+        payloads = {}
+        for ndim in (2, 3):
+            payloads[ndim] = _fit_or_load_nb(
+                decoder_name, ndim, session_name, ndim_params[ndim],
+                train=train, valid=valid, r_lim=r_lim, dt=dt,
+                cache_dir=cache_dir, seed=seed, tag=tag,
+            )
+        pos_dec_2d = _predict_with_payload(payloads[2], eval_)
+        pos_dec_3d = _predict_with_payload(payloads[3], eval_)
+        out.extend(_per_timestep_records(
+            session_name, eval_, eval_p2d, eval_p3d,
+            pos_dec_2d, pos_dec_3d, decoder_name, dt,
+        ))
 
     return out
 
@@ -582,6 +665,7 @@ def run_nb_pp_optuna(flights_train, flights_valid, meta_info_dict, dt, *,
 def fit_all_nb_decoders_from_pp(flights_train, flights_valid, flights_eval,
                                 meta_info_dict, *,
                                 nb_best, nb_cont_best, dt,
+                                output_dir='./out', seed=1, tag='',
                                 min_train=100, min_eval=10, verbose=False):
     """Fit NB / NB-cont / NB-lag per session using bat_former pseudo-population.
 
@@ -589,6 +673,12 @@ def fit_all_nb_decoders_from_pp(flights_train, flights_valid, flights_eval,
     are bat_former encoder outputs (3369-dim pseudo-population) rather than
     raw spike counts. NB is still per-session because position bins live in
     the session's room — only the input features are pooled-multi-session.
+
+    Caching: each (session, decoder, ndim, hyperparam-set) NB fit is pickled
+    to `{output_dir}/nb_pp_{decoder}_{ndim}d_seed_{seed}_{session}_{substr}.pkl`.
+    On re-run, fits with matching hyperparameters load from disk and skip
+    re-fitting; new hyperparameter sets trigger a fresh fit and save. Pass
+    `output_dir=None` to disable caching.
 
     Parameters mirror `fit_all_nb_decoders`, with `flights_*` lists in the
     format produced by `extract_flights` in `notebooks/pv_decode.ipynb`
@@ -605,7 +695,7 @@ def fit_all_nb_decoders_from_pp(flights_train, flights_valid, flights_eval,
     """
     sessions = sorted({f['session'] for f in flights_eval})
     records = []
-    for session_name in sessions:
+    for session_name in tqdm(sessions, desc='NB decoders (pp)'):
         train = session_arrays_from_pp_flights(flights_train, session_name)
         valid = session_arrays_from_pp_flights(flights_valid, session_name)
         eval_ = session_arrays_from_pp_flights(flights_eval, session_name)
@@ -621,6 +711,7 @@ def fit_all_nb_decoders_from_pp(flights_train, flights_valid, flights_eval,
         records.extend(_fit_predict_one_session(
             session_name, train, valid, eval_, r_lim,
             nb_best=nb_best, nb_cont_best=nb_cont_best, dt=dt,
+            cache_dir=output_dir, seed=seed, tag=tag,
         ))
         if verbose:
             print(f'  {session_name}: done '

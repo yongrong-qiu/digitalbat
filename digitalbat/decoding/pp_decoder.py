@@ -1,5 +1,8 @@
-"""Pseudo-population helpers: feed bat_former encoder predictions into per-session
-decoders that originally consumed raw spike counts.
+"""Pseudo-population helpers + synthetic-pseudo-pop builder.
+
+Feeds bat_former encoder predictions into per-session decoders that
+originally consumed raw spike counts, and provides the synthetic-train
+counterpart (per-session 3D rate maps fit on the real pseudo-population).
 
 The PV-Perceiver decoders in `notebooks/pv_decode.ipynb` read from a 3369-dim
 "pseudo-population" — the bat_former encoder's latent run through every
@@ -28,7 +31,63 @@ import numpy as np
 import pandas as pd
 import torch
 
+from digitalbat.datasets.data import PlaceCellSimulator3D
 from digitalbat.models.decoder import Bat_Transformer_Decoder, bat_decoder_trainer
+
+
+def make_synthetic_pp_flights(real_flights_train, dt, *,
+                              bin_size=0.3, smoothing_sigma=1.0,
+                              poisson=False, seed=0):
+    """Build synthetic pseudo-pop train flights via per-session 3D rate maps.
+
+    Mirrors `digitalbat.datasets.synthetic.make_synthetic_train_dataloaders`
+    but operates on the pseudo-population output of `extract_flights` rather
+    than dataloader spike batches. Per session, fit a `PlaceCellSimulator3D`
+    on (xyz, pv) from real training flights, then re-evaluate the rate map at
+    each flight's xyz to produce a synthetic pseudo-population polyline.
+
+    Parameters
+    ----------
+    real_flights_train : list of dicts with 'pv' (T, n_pseudo), 'xyz' (T, 3),
+        'session', 'flight_id', 'flight_type' — output of `extract_flights`.
+    dt : float — bin width in seconds (matches `data_config['bin_width']`).
+    bin_size : spatial bin size in meters for rate-map fitting.
+    smoothing_sigma : Gaussian smoothing sigma in bins; `None` disables.
+    poisson : if True, sample `np.random.poisson(rate*dt)`. If False, use the
+        deterministic mean `rate*dt`. Default False because pseudo-pop values
+        are continuous predicted rates rather than integer spike counts.
+    seed : RNG seed for reproducibility (only matters when `poisson=True`).
+
+    Returns
+    -------
+    syn_flights : list of dicts in the same format as the input, with 'pv'
+        replaced by the rate-map-driven synthetic pseudo-population. xyz,
+        session, flight_id, flight_type are unchanged.
+    simulators : dict {session_name: PlaceCellSimulator3D}.
+    """
+    if poisson:
+        np.random.seed(seed)
+
+    sessions = sorted({f['session'] for f in real_flights_train})
+    simulators = {}
+    for sn in sessions:
+        sess = [f for f in real_flights_train if f['session'] == sn]
+        beh = [f['xyz'].T for f in sess]   # list of (3, T_flight)
+        spk = [f['pv'].T for f in sess]    # list of (n_pseudo, T_flight)
+        sim = PlaceCellSimulator3D(bin_size=bin_size,
+                                   smoothing_sigma=smoothing_sigma)
+        sim.fit(beh, spk, dt=dt)
+        simulators[sn] = sim
+
+    syn_flights = []
+    for f in real_flights_train:
+        sim = simulators[f['session']]
+        syn_pv_T = sim.simulate([f['xyz'].T], dt=dt, poisson=poisson)[0]  # (n_pseudo, T)
+        new_f = dict(f)
+        new_f['pv'] = syn_pv_T.T.astype(np.float32, copy=False)
+        syn_flights.append(new_f)
+
+    return syn_flights, simulators
 
 
 def build_pp_lookup(flights):
