@@ -1,4 +1,9 @@
 """Cross-notebook decoding pipelines (Naive Bayes variants, pseudo-pop wrappers)."""
+from digitalbat.decoding.geometry import (
+    compute_mean_squared_jerk,
+    discrete_frechet,
+    longest_contiguous_run,
+)
 from digitalbat.decoding.nb_pipeline import (
     LAG_BINS,
     NB_CONT_SIGMA_CLIP,
@@ -17,6 +22,18 @@ from digitalbat.decoding.nb_pipeline import (
     run_nb_pp_optuna,
     session_arrays_from_pp_flights,
     shift_spikes_per_neuron,
+)
+from digitalbat.decoding.perceiver_pipeline import (
+    PVTrajectoryDataset,
+    build_super_ensemble,
+    evaluate_perceiver,
+    extract_pseudo_pop_flights,
+    extract_real_flights,
+    fixed_perceiver_config,
+    perceiver_per_timestep_df,
+    suggest_perceiver_hyperparams,
+    train_perceiver,
+    trial_callback,
 )
 from digitalbat.decoding.pp_decoder import (
     PseudoPopLoader,
@@ -38,19 +55,29 @@ from digitalbat.decoding.trajectory_plots import (
 __all__ = [
     "LAG_BINS",
     "NB_CONT_SIGMA_CLIP",
+    "PVTrajectoryDataset",
     "PseudoPopLoader",
     "assemble_lag_nb",
     "build_pp_lookup",
+    "build_super_ensemble",
+    "compute_mean_squared_jerk",
+    "discrete_frechet",
     "eval_s2s_pp",
+    "evaluate_perceiver",
+    "extract_pseudo_pop_flights",
+    "extract_real_flights",
     "fit_all_nb_decoders",
     "fit_all_nb_decoders_from_pp",
     "fit_lagsweep_and_select",
+    "fixed_perceiver_config",
     "gather_session_arrays",
+    "longest_contiguous_run",
     "make_nb",
     "make_nb_continuity",
     "make_pp_dataloaders",
     "make_s2s_pp",
     "make_synthetic_pp_flights",
+    "perceiver_per_timestep_df",
     "nb_cont_pp_objective",
     "nb_pp_objective",
     "per_neuron_val_poisson_info",
@@ -64,5 +91,8 @@ __all__ = [
     "s2s_pp_objective",
     "session_arrays_from_pp_flights",
     "shift_spikes_per_neuron",
+    "suggest_perceiver_hyperparams",
+    "train_perceiver",
     "train_s2s_pp",
+    "trial_callback",
 ]
