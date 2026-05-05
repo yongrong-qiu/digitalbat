@@ -188,6 +188,12 @@ class PerceiverIOTrajectoryDecoder(nn.Module):
                 nn.Linear(C, C),
             )
 
+        # Per-neuron identity embedding: lets the encoder distinguish *which*
+        # neuron fired, not just the distribution of rates. Without this the
+        # rate_mlp is shared across neurons and the encoder cross-attention is
+        # permutation-invariant in N — destroying place-coding information.
+        self.neuron_embed = nn.Parameter(torch.randn(N, C) * 0.02)
+
         self.input_dropout = nn.Dropout(config.dropout_rate)
 
         # Module 2: Encoder (cross-attention from latent to neurons)
@@ -246,6 +252,10 @@ class PerceiverIOTrajectoryDecoder(nn.Module):
             window = 2 * config.T_max
         else:
             window = config.T_max
+        # T_max = 0 → single-query (Δt=0) ablation. window is otherwise unused
+        # (Fourier features at t=0 collapse to a constant regardless of freq),
+        # but we still need a finite min_freq to avoid 1/0.
+        window = max(window, config.dt)
         min_freq = 1.0 / window
         max_freq = 1.0 / (2 * config.dt)
         return fourier_features(query_times, min_freq, max_freq, config.n_fourier_bands)
@@ -272,6 +282,7 @@ class PerceiverIOTrajectoryDecoder(nn.Module):
             neuron_tokens = self.rate_mlp(pv.unsqueeze(-1))  # (B, N, C)
         else:
             neuron_tokens = pv.unsqueeze(-1)  # (B, N, 1)
+        neuron_tokens = neuron_tokens + self.neuron_embed  # broadcast over batch
 
         # Encode
         latent = self.latent_array.unsqueeze(0).expand(B, -1, -1)  # (B, L, D)
