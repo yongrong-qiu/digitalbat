@@ -18,6 +18,7 @@ models — same hyperparameters, one PerceiverIOTrajectoryDecoder per session).
 from __future__ import annotations
 
 import copy
+import random as _stdlib_random
 from typing import Iterable, Mapping, Optional, Sequence
 
 import numpy as np
@@ -261,6 +262,11 @@ def suggest_perceiver_hyperparams(trial, time_mode, n_neurons, T_max, dt, *,
     `d_head` is searched instead of `n_heads` so the categorical space stays
     static across trials (Optuna requires a fixed value space). `n_heads` is
     derived as `D // d_head`; trials where `d_head > D` are pruned.
+
+    `n_neurons` may be either an `int` (single-session: shared `Parameter(N, C)`
+    neuron embedding) or a `dict[str, int]` mapping session names to per-session
+    neuron counts (multi-session: per-session `ParameterDict`, mirroring
+    `Bat_Transformer_Decoder.readins`).
     """
     C = trial.suggest_categorical('C', [8, 16, 32, 64, 128])
     L = trial.suggest_categorical('L', [8, 16, 32, 64])
@@ -278,8 +284,8 @@ def suggest_perceiver_hyperparams(trial, time_mode, n_neurons, T_max, dt, *,
     lambda_valid = trial.suggest_float('lambda_valid', 0.01, 1.0)
     batch_size = trial.suggest_categorical('batch_size', [16, 32, 64, 128])
 
-    return PerceiverIOConfig(
-        n_neurons=n_neurons, C=C, L=L, D=D, n_heads=n_heads,
+    cfg_kwargs = dict(
+        C=C, L=L, D=D, n_heads=n_heads,
         n_process_layers=n_process_layers, D_ff_multiplier=D_ff_multiplier,
         time_mode=time_mode, T_max=T_max, dt=dt,
         n_fourier_bands=n_fourier_bands, learning_rate=learning_rate,
@@ -287,6 +293,9 @@ def suggest_perceiver_hyperparams(trial, time_mode, n_neurons, T_max, dt, *,
         lambda_valid=lambda_valid, batch_size=batch_size,
         max_epochs=max_epochs, warmup_steps=warmup_steps,
     )
+    if isinstance(n_neurons, dict):
+        return PerceiverIOConfig(input_dim_dict=dict(n_neurons), **cfg_kwargs)
+    return PerceiverIOConfig(n_neurons=n_neurons, **cfg_kwargs)
 
 
 def fixed_perceiver_config(best_params, time_mode, n_neurons, T_max, dt, *,
@@ -317,45 +326,106 @@ def trial_callback(study, trial):
         print(f'  trial {trial.number}: FAIL')
 
 
+def _build_loaders(flights, config, samples_per_flight, rng_seed,
+                   batch_size, shuffle, num_workers, pin):
+    """Internal: turn a flat list OR a {sn: list} dict into per-key DataLoaders.
+
+    Returns `(loaders_dict, datasets_dict, multi_session: bool)`.  In the
+    single-session path the keys are `(None,)` so callers can iterate uniformly
+    over `loaders.items()`.
+    """
+    if isinstance(flights, dict):
+        datasets = {
+            sn: PVTrajectoryDataset(
+                fl, config.time_mode, config.T_max, config.dt,
+                samples_per_flight=samples_per_flight,
+                rng=np.random.default_rng(rng_seed + i),
+            )
+            for i, (sn, fl) in enumerate(flights.items())
+        }
+        loaders = {
+            sn: DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                           drop_last=False, num_workers=num_workers, pin_memory=pin)
+            for sn, ds in datasets.items()
+        }
+        return loaders, datasets, True
+
+    ds = PVTrajectoryDataset(
+        flights, config.time_mode, config.T_max, config.dt,
+        samples_per_flight=samples_per_flight,
+        rng=np.random.default_rng(rng_seed),
+    )
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                        drop_last=False, num_workers=num_workers, pin_memory=pin)
+    return {None: loader}, {None: ds}, False
+
+
+def _round_robin_batches(loaders, rng):
+    """Yield `(session_name, batch)` over per-session loaders in random order.
+
+    Each session contributes its own per-epoch worth of batches; the order in
+    which sessions are sampled is random so optimization sees a mix of session
+    inputs across the epoch. With one-key (`{None: loader}`) loaders this
+    degenerates to plain in-order iteration of that loader.
+    """
+    iters = {sn: iter(loader) for sn, loader in loaders.items()}
+    sns = list(iters.keys())
+    while sns:
+        sn = rng.choice(sns) if len(sns) > 1 else sns[0]
+        try:
+            yield sn, next(iters[sn])
+        except StopIteration:
+            sns.remove(sn)
+
+
 def train_perceiver(config, flights_train, flights_valid, device, *,
                     trial=None, verbose=True,
                     samples_per_flight_train=10, samples_per_flight_val=10,
                     random_seed=1, num_workers=2, val_batch_size=256):
     """Train a `PerceiverIOTrajectoryDecoder`. Returns (best_val_r2, weights, history).
 
+    `flights_train` / `flights_valid` may be:
+      - a flat list of flight dicts (single-session, shared `neuron_embed`), or
+      - a `dict[session_name -> list of flights]` (multi-session). In the dict
+        case the model must be configured with `input_dim_dict` matching those
+        keys, and per-session DataLoaders are round-robin'd within each epoch
+        so a mix of session inputs reaches the optimizer in shuffled order.
+
     `trial` enables Optuna pruning; pass the active trial through. With
     `num_workers > 0` the workers are forked per-epoch (no `persistent_workers`),
-    so `train_ds.resample()` between epochs takes effect for every iteration.
+    so `dataset.resample()` between epochs takes effect for every iteration.
 
     Early stops on validation R² (across all valid (B, O) targets) with
     `config.patience` epochs of no improvement.
     """
     set_random_state(random_seed)
 
-    train_ds = PVTrajectoryDataset(
-        flights_train, config.time_mode, config.T_max, config.dt,
-        samples_per_flight=samples_per_flight_train,
-        rng=np.random.default_rng(random_seed),
+    pin = (device == 'cuda')
+    train_loaders, train_dss, multi_session = _build_loaders(
+        flights_train, config, samples_per_flight_train, random_seed,
+        batch_size=config.batch_size, shuffle=True,
+        num_workers=num_workers, pin=pin,
     )
-    val_ds = PVTrajectoryDataset(
-        flights_valid, config.time_mode, config.T_max, config.dt,
-        samples_per_flight=samples_per_flight_val,
-        rng=np.random.default_rng(random_seed + 1),
+    val_loaders, _, _ = _build_loaders(
+        flights_valid, config, samples_per_flight_val, random_seed + 1,
+        batch_size=val_batch_size, shuffle=False,
+        num_workers=num_workers, pin=pin,
     )
 
-    pin = (device == 'cuda')
-    train_loader = DataLoader(train_ds, batch_size=config.batch_size,
-                              shuffle=True, drop_last=False,
-                              num_workers=num_workers, pin_memory=pin)
-    val_loader = DataLoader(val_ds, batch_size=val_batch_size, shuffle=False,
-                            num_workers=num_workers, pin_memory=pin)
+    if multi_session and config.input_dim_dict is None:
+        raise ValueError(
+            "flights_train is a dict but config.input_dim_dict is None — "
+            "build the config with `input_dim_dict={sn: K_sn}` so the model "
+            "has per-session neuron embeddings."
+        )
 
     model = PerceiverIOTrajectoryDecoder(config).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    total_steps = config.max_epochs * len(train_loader)
+    batches_per_epoch = sum(len(l) for l in train_loaders.values())
+    total_steps = config.max_epochs * batches_per_epoch
 
     def lr_lambda(step):
         if step < config.warmup_steps:
@@ -373,13 +443,15 @@ def train_perceiver(config, flights_train, flights_valid, device, *,
     iterator = (tqdm.tqdm(range(config.max_epochs), desc='Training')
                 if verbose else range(config.max_epochs))
     for epoch in iterator:
-        train_ds.resample()
+        for ds in train_dss.values():
+            ds.resample()
+        epoch_rng = _stdlib_random.Random(random_seed * 100003 + epoch)
 
         model.train()
         epoch_loss, n_batches = 0.0, 0
-        for pv, pos_tgt, vmask, _, _ in train_loader:
+        for sn, (pv, pos_tgt, vmask, _, _) in _round_robin_batches(train_loaders, epoch_rng):
             pv, pos_tgt, vmask = pv.to(device), pos_tgt.to(device), vmask.to(device)
-            pos_pred, valid_logit, _, _ = model(pv)
+            pos_pred, valid_logit, _, _ = model(pv, session_name=sn)
             loss, _, _ = model.compute_loss(pos_pred, valid_logit, pos_tgt, vmask)
 
             optimizer.zero_grad()
@@ -396,14 +468,15 @@ def train_perceiver(config, flights_train, flights_valid, device, *,
         all_pos_true, all_pos_pred = [], []
         all_valid_true, all_valid_logit = [], []
         with torch.no_grad():
-            for pv, pos_tgt, vmask, _, _ in val_loader:
-                pv, pos_tgt, vmask = pv.to(device), pos_tgt.to(device), vmask.to(device)
-                pos_pred, valid_logit, _, _ = model(pv)
-                mask_bool = vmask.bool()
-                all_pos_true.append(pos_tgt[mask_bool].cpu().numpy())
-                all_pos_pred.append(pos_pred[mask_bool].cpu().numpy())
-                all_valid_true.append(vmask.cpu().numpy().ravel())
-                all_valid_logit.append(valid_logit.cpu().numpy().ravel())
+            for sn, val_loader in val_loaders.items():
+                for pv, pos_tgt, vmask, _, _ in val_loader:
+                    pv, pos_tgt, vmask = pv.to(device), pos_tgt.to(device), vmask.to(device)
+                    pos_pred, valid_logit, _, _ = model(pv, session_name=sn)
+                    mask_bool = vmask.bool()
+                    all_pos_true.append(pos_tgt[mask_bool].cpu().numpy())
+                    all_pos_pred.append(pos_pred[mask_bool].cpu().numpy())
+                    all_valid_true.append(vmask.cpu().numpy().ravel())
+                    all_valid_logit.append(valid_logit.cpu().numpy().ravel())
 
         pos_true_np = np.concatenate(all_pos_true)
         pos_pred_np = np.concatenate(all_pos_pred)
@@ -445,18 +518,14 @@ def train_perceiver(config, flights_train, flights_valid, device, *,
 # Evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate_perceiver(model, flights, config, device, *,
-                       samples_per_flight=10, batch_size=256, num_workers=0,
-                       rng_seed=0):
-    """Evaluate on `flights`. Returns a long-format DataFrame, one row per query.
+def _evaluate_perceiver_single(model, flights, config, device, *,
+                               session_name, samples_per_flight,
+                               batch_size, num_workers, rng_seed):
+    """Inner: run `evaluate_perceiver` on a single flat list of flights.
 
-    Each (flight, t_sample) snippet contributes O records (= len(query_times)).
-    Records carry `time_mode`, `query_time`, `t_abs` (absolute flight time of
-    the queried bin), `delta_t` (offset from the PV-sample bin), the predicted
-    and ground-truth (x, y, z), and the validity logit/target. `err_3d` is set
-    on rows where `valid_true == 1.0`.
+    `session_name` is forwarded to every model call (None for single-session
+    models, the session string for multi-session ones).
     """
-    model.eval()
     ds = PVTrajectoryDataset(
         flights, config.time_mode, config.T_max, config.dt,
         samples_per_flight=samples_per_flight,
@@ -469,7 +538,7 @@ def evaluate_perceiver(model, flights, config, device, *,
     with torch.no_grad():
         for pv, pos_tgt, vmask, t_sample_batch, fi_batch in loader:
             pv = pv.to(device)
-            pos_pred, valid_logit, _, _ = model(pv)
+            pos_pred, valid_logit, _, _ = model(pv, session_name=session_name)
             pos_pred = pos_pred.cpu().numpy()
             valid_logit = valid_logit.cpu().numpy()
             pos_tgt = pos_tgt.numpy()
@@ -510,14 +579,49 @@ def evaluate_perceiver(model, flights, config, device, *,
                         'y_pred': pos_pred[b, i, 1],
                         'z_pred': pos_pred[b, i, 2],
                     })
+    return pd.DataFrame(records)
 
-    df = pd.DataFrame(records)
-    valid = df['valid_true'] == 1.0
-    df.loc[valid, 'err_3d'] = np.sqrt(
-        (df.loc[valid, 'x_true'] - df.loc[valid, 'x_pred']) ** 2 +
-        (df.loc[valid, 'y_true'] - df.loc[valid, 'y_pred']) ** 2 +
-        (df.loc[valid, 'z_true'] - df.loc[valid, 'z_pred']) ** 2
-    )
+
+def evaluate_perceiver(model, flights, config, device, *,
+                       samples_per_flight=10, batch_size=256, num_workers=0,
+                       rng_seed=0):
+    """Evaluate on `flights`. Returns a long-format DataFrame, one row per query.
+
+    `flights` may be a flat list (single-session model) or
+    `dict[session_name -> list of flights]` (multi-session model). In the dict
+    case each session is evaluated with its own `session_name` and the results
+    are concatenated.
+
+    Each (flight, t_sample) snippet contributes O records (= len(query_times)).
+    Records carry `time_mode`, `query_time`, `t_abs` (absolute flight time of
+    the queried bin), `delta_t` (offset from the PV-sample bin), the predicted
+    and ground-truth (x, y, z), and the validity logit/target. `err_3d` is set
+    on rows where `valid_true == 1.0`.
+    """
+    model.eval()
+    if isinstance(flights, dict):
+        pieces = []
+        for sn, fl in flights.items():
+            pieces.append(_evaluate_perceiver_single(
+                model, fl, config, device,
+                session_name=sn, samples_per_flight=samples_per_flight,
+                batch_size=batch_size, num_workers=num_workers, rng_seed=rng_seed,
+            ))
+        df = pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+    else:
+        df = _evaluate_perceiver_single(
+            model, flights, config, device,
+            session_name=None, samples_per_flight=samples_per_flight,
+            batch_size=batch_size, num_workers=num_workers, rng_seed=rng_seed,
+        )
+
+    if len(df):
+        valid = df['valid_true'] == 1.0
+        df.loc[valid, 'err_3d'] = np.sqrt(
+            (df.loc[valid, 'x_true'] - df.loc[valid, 'x_pred']) ** 2 +
+            (df.loc[valid, 'y_true'] - df.loc[valid, 'y_pred']) ** 2 +
+            (df.loc[valid, 'z_true'] - df.loc[valid, 'z_pred']) ** 2
+        )
     return df
 
 

@@ -20,7 +20,23 @@ from torch import Tensor, nn
 
 @dataclass
 class PerceiverIOConfig:
+    """Configuration for `PerceiverIOTrajectoryDecoder`.
+
+    Two input modes:
+      - **Single-session** (default): set `n_neurons` to the (fixed) input width.
+        The model uses one shared `neuron_embed: Parameter(N, C)`.
+      - **Multi-session**: set `input_dim_dict={session_name: K_session}`. The
+        model uses one `Parameter(K_session, C)` per session inside a
+        `ParameterDict`; `n_neurons` is overwritten with `max(K_session)` purely
+        for compatibility with code that still inspects it.
+
+    The shared rate_mlp + cross-attention encoder + processor + decoder are
+    identical in both modes — only the per-neuron embedding becomes
+    session-specific. This is the Perceiver analog of `Bat_Transformer_Decoder`'s
+    per-session linear readin (whose columns are per-neuron latent embeddings).
+    """
     n_neurons: int = 2000
+    input_dim_dict: dict | None = None
     C: int = 16
     L: int = 64
     D: int = 128
@@ -50,6 +66,10 @@ class PerceiverIOConfig:
                 f"d_head={self.D // self.n_heads} must be >= 4 "
                 f"(D={self.D}, n_heads={self.n_heads})"
             )
+        if self.input_dim_dict is not None:
+            # Keep `n_neurons` consistent with the multi-session widths so any
+            # caller that still reads it gets a sensible value.
+            self.n_neurons = max(self.input_dim_dict.values())
 
 
 def fourier_features(t: Tensor, min_freq: float, max_freq: float, n_bands: int) -> Tensor:
@@ -192,7 +212,18 @@ class PerceiverIOTrajectoryDecoder(nn.Module):
         # neuron fired, not just the distribution of rates. Without this the
         # rate_mlp is shared across neurons and the encoder cross-attention is
         # permutation-invariant in N — destroying place-coding information.
-        self.neuron_embed = nn.Parameter(torch.randn(N, C) * 0.02)
+        # Single-session: one Parameter(N, C). Multi-session: one
+        # Parameter(K_sn, C) per session (analog of per-session readin
+        # columns in Bat_Transformer_Decoder).
+        if config.input_dim_dict is None:
+            self.neuron_embed = nn.Parameter(torch.randn(N, C) * 0.02)
+            self.neuron_embeds = None
+        else:
+            self.neuron_embed = None
+            self.neuron_embeds = nn.ParameterDict({
+                sn: nn.Parameter(torch.randn(K_sn, C) * 0.02)
+                for sn, K_sn in config.input_dim_dict.items()
+            })
 
         self.input_dropout = nn.Dropout(config.dropout_rate)
 
@@ -260,10 +291,15 @@ class PerceiverIOTrajectoryDecoder(nn.Module):
         max_freq = 1.0 / (2 * config.dt)
         return fourier_features(query_times, min_freq, max_freq, config.n_fourier_bands)
 
-    def forward(self, population_vector: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def forward(self, population_vector: Tensor,
+                session_name: str | None = None
+                ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Args:
-            population_vector: (batch, N) firing rates
+            population_vector: (batch, N) firing rates. Multi-session callers
+                must pass `session_name`; N must equal `input_dim_dict[session_name]`.
+            session_name: required when the model was built with
+                `input_dim_dict`; ignored otherwise.
 
         Returns:
             position_pred: (batch, O, 3)
@@ -282,7 +318,17 @@ class PerceiverIOTrajectoryDecoder(nn.Module):
             neuron_tokens = self.rate_mlp(pv.unsqueeze(-1))  # (B, N, C)
         else:
             neuron_tokens = pv.unsqueeze(-1)  # (B, N, 1)
-        neuron_tokens = neuron_tokens + self.neuron_embed  # broadcast over batch
+
+        if self.neuron_embeds is not None:
+            if session_name is None:
+                raise ValueError(
+                    "Multi-session PerceiverIOTrajectoryDecoder requires "
+                    "`session_name` in forward()."
+                )
+            embed = self.neuron_embeds[session_name]
+        else:
+            embed = self.neuron_embed
+        neuron_tokens = neuron_tokens + embed  # broadcast over batch
 
         # Encode
         latent = self.latent_array.unsqueeze(0).expand(B, -1, -1)  # (B, L, D)
