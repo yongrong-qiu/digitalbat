@@ -7,7 +7,7 @@ import copy
 from typing import Callable
 from transformers import get_cosine_schedule_with_warmup
 
-from ..utility.utils import corr, poisson_fde_population
+from ..utility.utils import corr, poisson_fde_population, round_robin_session_batches
 from ..models.layers import FocalLoss, BCEFocalCombinedLoss
 
 
@@ -170,21 +170,19 @@ def bat_mlp_trainer(
  
     for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
         model.train()
-        for session_name, session_data in dataloaders['train'].items():
-            # print(session_name, session_data)
-            for batch_id, batch in enumerate(session_data):
-                # print(batch[0].shape, batch[1].shape) # (N, behavior_feature), (N, spiking_unit_number)
-                # take a batch
-                X_batch = batch[0].to(device)
-                y_batch = batch[1].to(device)
-                # forward pass
-                y_pred = model(session_name, X_batch)
-                loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
-                # backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                # update weights
-                optimizer.step()
+        # Round-robin per-session batches: see `round_robin_session_batches`.
+        for session_name, batch in round_robin_session_batches(dataloaders['train']):
+            # batch[0]: (N, behavior_feature)  batch[1]: (N, spiking_unit_number)
+            X_batch = batch[0].to(device)
+            y_batch = batch[1].to(device)
+            # forward pass
+            y_pred = model(session_name, X_batch)
+            loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
+            # backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            # update weights
+            optimizer.step()
 
         # evaluate accuracy at end of each epoch
         model.eval()
@@ -244,21 +242,20 @@ def bat_mlp_behavior_trainer(
  
     for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
         model.train()
-        for session_name, session_data in dataloaders['train'].items():
-            # print(session_name, session_data)
-            for batch_id, batch in enumerate(session_data):
-                # print(batch[0].shape, batch[1].shape) # (N, behavior_feature), (N, spiking_unit_number)
-                # take a batch
-                X_batch = batch[1].to(device) # use spikes as model input
-                y_batch = batch[0].to(device)
-                # forward pass
-                y_pred = model(session_name, X_batch)
-                loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
-                # backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                # update weights
-                optimizer.step()
+        # Round-robin per-session batches: see `round_robin_session_batches`.
+        for session_name, batch in round_robin_session_batches(dataloaders['train']):
+            # batch[0]: (N, behavior_feature)  batch[1]: (N, spiking_unit_number)
+            # use spikes as model input, behavior as target
+            X_batch = batch[1].to(device)
+            y_batch = batch[0].to(device)
+            # forward pass
+            y_pred = model(session_name, X_batch)
+            loss = loss_fn(y_pred, y_batch)
+            # backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            # update weights
+            optimizer.step()
 
         # evaluate accuracy at end of each epoch
         model.eval()
@@ -337,35 +334,33 @@ def bat_former_trainer(
 
     for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
         model.train()
-        for session_name, session_data in dataloaders['train'].items():
-            # print(session_name, session_data)
-            for batch_id, batch in enumerate(session_data):
-                # print(batch[0].shape, batch[1].shape, batch[2].shape) 
-                # behavior (N, window_size, behavior_feature), spike (N, window_size, unit_number), mask (N, window_size)
-                # take a batch
-                X_batch = batch.behavior.to(device)
-                y_batch = batch.spike.to(device)
-                mask_batch = batch.mask.to(device)
-                # forward pass
-                y_pred = model(
-                    session_name, 
-                    X_batch, 
-                    mask_batch, 
-                    is_causal=is_causal, 
-                    is_bigbird=is_bigbird,
-                    attention_window_size=attention_window_size,
-                    num_global=num_global,
-                    num_random=num_random,
-                )
-                # y_pred.shape: (14, 20, 289), y_pred[mask_batch == 1.0].shape: (260, 289)
-                loss = loss_fn(y_pred[mask_batch == 1.0], y_batch[mask_batch == 1.0]) # compute loss only on valid timesteps
-                # backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                # update weights
-                optimizer.step()
-                if use_cosine_scheduler:
-                    scheduler.step()
+        # Round-robin per-session batches: see `round_robin_session_batches`.
+        for session_name, batch in round_robin_session_batches(dataloaders['train']):
+            # behavior (N, window_size, behavior_feature)
+            # spike    (N, window_size, unit_number)
+            # mask     (N, window_size)
+            X_batch = batch.behavior.to(device)
+            y_batch = batch.spike.to(device)
+            mask_batch = batch.mask.to(device)
+            # forward pass
+            y_pred = model(
+                session_name,
+                X_batch,
+                mask_batch,
+                is_causal=is_causal,
+                is_bigbird=is_bigbird,
+                attention_window_size=attention_window_size,
+                num_global=num_global,
+                num_random=num_random,
+            )
+            loss = loss_fn(y_pred[mask_batch == 1.0], y_batch[mask_batch == 1.0])
+            # backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            # update weights
+            optimizer.step()
+            if use_cosine_scheduler:
+                scheduler.step()
 
         # evaluate accuracy at end of each epoch
         model.eval()

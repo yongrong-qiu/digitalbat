@@ -1,3 +1,5 @@
+import random as _stdlib_random
+
 import numpy as np
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.interpolate import interp1d
@@ -17,6 +19,43 @@ from scipy.spatial.distance import pdist, squareform
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
+
+
+def round_robin_session_batches(loaders, rng=None):
+    """Yield `(session_name, batch)` from per-session DataLoaders, interleaved.
+
+    Each session contributes its own per-epoch worth of batches, but the order
+    of (session → batch) draws is uniformly random over the still-active set.
+    Compared to draining each session sequentially, this:
+      - keeps Adam's running m/v reflective of the joint multi-session
+        gradient distribution (no end-of-epoch momentum bias toward the last
+        session trained),
+      - avoids stale per-session readin parameters (`Bat_Transformer.readouts`,
+        `Bat_Transformer_Decoder.readins`, `PerceiverIOTrajectoryDecoder.neuron_embeds`),
+        since every session's parameter is re-touched throughout the epoch
+        alongside an up-to-date shared backbone.
+
+    Parameters
+    ----------
+    loaders : Mapping[str, DataLoader]
+        Per-session loaders. A one-key mapping (`{None: loader}`) degenerates
+        to plain in-order iteration of that single loader.
+    rng : random.Random | None
+        Seedable RNG for the session draws. If None, a fresh one is created
+        seeded from torch's current RNG state — so callers who set
+        `torch.manual_seed` upstream still get reproducible orderings.
+    """
+    if rng is None:
+        seed = int(torch.randint(0, 2 ** 31, (1,)).item())
+        rng = _stdlib_random.Random(seed)
+    iters = {sn: iter(loader) for sn, loader in loaders.items()}
+    active = list(iters.keys())
+    while active:
+        sn = rng.choice(active) if len(active) > 1 else active[0]
+        try:
+            yield sn, next(iters[sn])
+        except StopIteration:
+            active.remove(sn)
 
 
 def bandpass_filter(signal, fs, band):
