@@ -33,6 +33,8 @@ import torch.optim as optim
 import tqdm
 from torch import nn
 
+from ..utility.utils import round_robin_session_batches
+
 from .layers import TransformerEncoderRoPE
 
 
@@ -210,29 +212,32 @@ def bat_decoder_trainer(
 
     for epoch in tqdm.tqdm(range(n_epochs), desc="Decoder training"):
         model.train()
-        for session_name, session_data in dataloaders["train"].items():
-            for batch in session_data:
-                X = batch.spike.to(device)
-                y = batch.behavior[:, :, :pos_dims].to(device)
-                m = batch.mask.to(device)
-                y_pred = model(
-                    session_name, X, m,
-                    is_causal=is_causal,
-                    is_bigbird=is_bigbird,
-                    attention_window_size=attention_window_size,
-                    num_global=num_global,
-                    num_random=num_random,
-                )
-                loss = loss_fn(y_pred[m == 1.0], y[m == 1.0])
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+        # Round-robin per-session batches: see `round_robin_session_batches`.
+        for session_name, batch in round_robin_session_batches(dataloaders["train"]):
+            X = batch.spike.to(device)
+            y = batch.behavior[:, :, :pos_dims].to(device)
+            m = batch.mask.to(device)
+            y_pred = model(
+                session_name, X, m,
+                is_causal=is_causal,
+                is_bigbird=is_bigbird,
+                attention_window_size=attention_window_size,
+                num_global=num_global,
+                num_random=num_random,
+            )
+            loss = loss_fn(y_pred[m == 1.0], y[m == 1.0])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
+        # Validation is pooled across sessions and flights: every valid
+        # timestep contributes one row to a single (N_total, pos_dims) array,
+        # `valid_fn` is called once, and `valid_stat` aggregates the resulting
+        # per-pos-dim score vector. Matches `train_perceiver`'s pooled R².
         model.eval()
-        per_session_scores = []
+        all_yt, all_yp = [], []
         with torch.no_grad():
             for session_name, session_data in dataloaders["valid"].items():
-                yt_list, yp_list = [], []
                 for batch in session_data:
                     X = batch.spike.to(device)
                     y = batch.behavior[:, :, :pos_dims].to(device)
@@ -245,21 +250,21 @@ def bat_decoder_trainer(
                         num_global=num_global,
                         num_random=num_random,
                     )
-                    yt_list.append(y[m == 1.0].cpu().numpy())
-                    yp_list.append(y_pred[m == 1.0].cpu().numpy())
-                if not yt_list:
-                    continue
-                yt_np = np.vstack(yt_list)
-                yp_np = np.vstack(yp_list)
-                per_session_scores.append(valid_fn(yt_np, yp_np))
+                    all_yt.append(y[m == 1.0].cpu().numpy())
+                    all_yp.append(y_pred[m == 1.0].cpu().numpy())
 
-        score_arr = np.hstack(per_session_scores)
-        if valid_stat == "mean":
-            val_score = float(np.nanmean(score_arr))
-        elif valid_stat == "median":
-            val_score = float(np.nanmedian(score_arr))
+        if not all_yt:
+            val_score = -np.inf
         else:
-            raise ValueError(f"unknown valid_stat={valid_stat}")
+            yt_np = np.vstack(all_yt)
+            yp_np = np.vstack(all_yp)
+            score_arr = valid_fn(yt_np, yp_np)
+            if valid_stat == "mean":
+                val_score = float(np.nanmean(score_arr))
+            elif valid_stat == "median":
+                val_score = float(np.nanmedian(score_arr))
+            else:
+                raise ValueError(f"unknown valid_stat={valid_stat}")
         val_scores.append(val_score)
 
         if val_score > best_score:

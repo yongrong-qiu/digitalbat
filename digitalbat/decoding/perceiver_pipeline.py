@@ -32,7 +32,9 @@ import tqdm
 from digitalbat.models.perceiver import (
     PerceiverIOConfig, PerceiverIOTrajectoryDecoder,
 )
-from digitalbat.utility.utils import set_random_state
+from digitalbat.utility.utils import (
+    round_robin_session_batches, set_random_state,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -360,24 +362,6 @@ def _build_loaders(flights, config, samples_per_flight, rng_seed,
     return {None: loader}, {None: ds}, False
 
 
-def _round_robin_batches(loaders, rng):
-    """Yield `(session_name, batch)` over per-session loaders in random order.
-
-    Each session contributes its own per-epoch worth of batches; the order in
-    which sessions are sampled is random so optimization sees a mix of session
-    inputs across the epoch. With one-key (`{None: loader}`) loaders this
-    degenerates to plain in-order iteration of that loader.
-    """
-    iters = {sn: iter(loader) for sn, loader in loaders.items()}
-    sns = list(iters.keys())
-    while sns:
-        sn = rng.choice(sns) if len(sns) > 1 else sns[0]
-        try:
-            yield sn, next(iters[sn])
-        except StopIteration:
-            sns.remove(sn)
-
-
 def train_perceiver(config, flights_train, flights_valid, device, *,
                     trial=None, verbose=True,
                     samples_per_flight_train=10, samples_per_flight_val=10,
@@ -449,7 +433,7 @@ def train_perceiver(config, flights_train, flights_valid, device, *,
 
         model.train()
         epoch_loss, n_batches = 0.0, 0
-        for sn, (pv, pos_tgt, vmask, _, _) in _round_robin_batches(train_loaders, epoch_rng):
+        for sn, (pv, pos_tgt, vmask, _, _) in round_robin_session_batches(train_loaders, epoch_rng):
             pv, pos_tgt, vmask = pv.to(device), pos_tgt.to(device), vmask.to(device)
             pos_pred, valid_logit, _, _ = model(pv, session_name=sn)
             loss, _, _ = model.compute_loss(pos_pred, valid_logit, pos_tgt, vmask)
