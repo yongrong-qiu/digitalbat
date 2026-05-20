@@ -4,6 +4,26 @@ from torch import nn
 from .layers import TransformerEncoderRoPE, RBFBasis
 
 
+class _PerTimestepFFN(nn.Module):
+    """Per-timestep position-wise MLP block, structurally matched to
+    TransformerEncoderRoPE's FFN sub-block (LayerNorm + Linear-GELU-Linear +
+    dropout + residual). No attention, no temporal mixing. Used by
+    Bat_Transformer when use_attention=False to ablate temporal attention
+    while preserving per-timestep capacity."""
+    def __init__(self, hidden_dim, ff_dim, dropout):
+        super().__init__()
+        self.ff = nn.Sequential(
+            nn.Linear(hidden_dim, ff_dim),
+            nn.GELU(),
+            nn.Linear(ff_dim, hidden_dim),
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x, *args, **kwargs):
+        return self.norm(x + self.dropout(self.ff(x)))
+
+
 class Bat_Transformer(nn.Module):
     """
     Flexible MLP model for spatial inputs.
@@ -50,11 +70,13 @@ class Bat_Transformer(nn.Module):
         use_low_rank_readout: bool = False, # whether to use low rank matrix multiplication for readout modules or not
         low_rank_r: int = 4,
         final_activation: nn.Module = nn.Identity(),
+        use_attention: bool = True, # if False, replace transformer blocks with per-timestep FFN blocks (ablate temporal attention)
     ):
         super().__init__()
 
         self.use_place_as_input = use_place_as_input
         self.use_trajectory_as_input = use_trajectory_as_input
+        self.use_attention = use_attention
         assert (self.use_place_as_input or self.use_trajectory_as_input), 'Use at least one input (place or trajectory)!'
         
         if self.use_place_as_input:
@@ -95,11 +117,17 @@ class Bat_Transformer(nn.Module):
         if self.use_trajectory_as_input:
             self.embed_traj = nn.Linear(input_dim, latent_dim) # trajectory embedding
             self.embed_traj_dropout = nn.Dropout(0.1)
-            # transformer
-            self.layers = nn.ModuleList([
-                TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim, 
-                                       dropout=dropout_prob, use_low_rank=use_low_rank, low_rank_r=low_rank_r) for _ in range(num_layers)
-            ])
+            # transformer or per-timestep FFN ablation
+            if self.use_attention:
+                self.layers = nn.ModuleList([
+                    TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim,
+                                           dropout=dropout_prob, use_low_rank=use_low_rank, low_rank_r=low_rank_r) for _ in range(num_layers)
+                ])
+            else:
+                self.layers = nn.ModuleList([
+                    _PerTimestepFFN(hidden_dim=latent_dim, ff_dim=ff_dim, dropout=dropout_prob)
+                    for _ in range(num_layers)
+                ])
 
         # session-specific readouts
         readout_latent_dim = latent_dim_place * int(self.use_place_as_input) + latent_dim * int(self.use_trajectory_as_input)
@@ -157,17 +185,20 @@ class Bat_Transformer(nn.Module):
         if self.use_trajectory_as_input:
             # embedding
             x_traj_input = x.clone()
-            x_traj_embed = self.embed_traj_dropout(self.embed_traj(x_traj_input)) 
-            # transformer
-            if return_attn_weights:
+            x_traj_embed = self.embed_traj_dropout(self.embed_traj(x_traj_input))
+            if not self.use_attention:
+                assert not return_attn_weights, 'return_attn_weights requires use_attention=True'
+                for layer in self.layers:
+                    x_traj_embed = layer(x_traj_embed)
+            elif return_attn_weights:
                 attn_weights_list = []
                 for layer in self.layers:
                     x_traj_embed, attn_weights = layer(
-                        x_traj_embed, 
-                        x_traj_embed, 
-                        x_traj_embed, 
-                        attn_mask=attn_mask, 
-                        is_causal=is_causal, 
+                        x_traj_embed,
+                        x_traj_embed,
+                        x_traj_embed,
+                        attn_mask=attn_mask,
+                        is_causal=is_causal,
                         return_attn_weights=return_attn_weights,
                         is_bigbird=is_bigbird,
                         attention_window_size=attention_window_size,
@@ -178,11 +209,11 @@ class Bat_Transformer(nn.Module):
             else:
                 for layer in self.layers:
                     x_traj_embed = layer(
-                        x_traj_embed, 
-                        x_traj_embed, 
-                        x_traj_embed, 
-                        attn_mask=attn_mask, 
-                        is_causal=is_causal, 
+                        x_traj_embed,
+                        x_traj_embed,
+                        x_traj_embed,
+                        attn_mask=attn_mask,
+                        is_causal=is_causal,
                         return_attn_weights=return_attn_weights,
                         is_bigbird=is_bigbird,
                         attention_window_size=attention_window_size,
