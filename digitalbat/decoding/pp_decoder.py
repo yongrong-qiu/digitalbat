@@ -90,6 +90,70 @@ def make_synthetic_pp_flights(real_flights_train, dt, *,
     return syn_flights, simulators
 
 
+def make_synthetic_pp_flights_traj(real_flights_train, dt, *,
+                                   bin_size=0.3, smoothing_sigma=1.0,
+                                   poisson=False, min_cluster_size=3,
+                                   seed=0):
+    """Trajectory-specific variant of `make_synthetic_pp_flights`.
+
+    Per session, fit a separate `PlaceCellSimulator3D` for each flight
+    cluster with more than `min_cluster_size` training flights; pool the
+    rest into one 'other' simulator. Each synthetic flight's pv is then
+    drawn from the simulator matching its `flight_type` (or 'other').
+
+    Returns
+    -------
+    syn_flights : list of dicts (same shape as input, with pv replaced).
+    simulators : dict {session_name: {flight_type or 'other':
+                                       PlaceCellSimulator3D}}.
+    """
+    if poisson:
+        np.random.seed(seed)
+
+    sessions = sorted({f['session'] for f in real_flights_train})
+    simulators = {}
+    for sn in sessions:
+        sess = [f for f in real_flights_train if f['session'] == sn]
+        types = np.array([int(f['flight_type']) for f in sess])
+        unique, counts = np.unique(types, return_counts=True)
+        major = {int(c) for c, ct in zip(unique, counts) if ct > min_cluster_size}
+
+        cluster_to_sim = {}
+        for c in major:
+            inds = [i for i, t in enumerate(types) if int(t) == c]
+            beh = [sess[i]['xyz'].T for i in inds]
+            spk = [sess[i]['pv'].T for i in inds]
+            sim = PlaceCellSimulator3D(bin_size=bin_size,
+                                       smoothing_sigma=smoothing_sigma)
+            sim.fit(beh, spk, dt=dt)
+            cluster_to_sim[c] = sim
+
+        other_inds = [i for i, t in enumerate(types) if int(t) not in major]
+        if other_inds:
+            beh = [sess[i]['xyz'].T for i in other_inds]
+            spk = [sess[i]['pv'].T for i in other_inds]
+            sim = PlaceCellSimulator3D(bin_size=bin_size,
+                                       smoothing_sigma=smoothing_sigma)
+            sim.fit(beh, spk, dt=dt)
+            cluster_to_sim['other'] = sim
+
+        simulators[sn] = cluster_to_sim
+
+    syn_flights = []
+    for f in real_flights_train:
+        cluster_map = simulators[f['session']]
+        c = int(f['flight_type'])
+        sim = cluster_map.get(c) if c in cluster_map else cluster_map.get('other')
+        if sim is None:
+            continue
+        syn_pv_T = sim.simulate([f['xyz'].T], dt=dt, poisson=poisson)[0]
+        new_f = dict(f)
+        new_f['pv'] = syn_pv_T.T.astype(np.float32, copy=False)
+        syn_flights.append(new_f)
+
+    return syn_flights, simulators
+
+
 def build_pp_lookup(flights):
     """Per-flight pseudo-pop lookup keyed on (session, flight_id).
 

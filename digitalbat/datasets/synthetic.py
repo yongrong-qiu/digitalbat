@@ -97,3 +97,98 @@ def make_synthetic_train_dataloaders(
         )
 
     return syn, simulators
+
+
+def make_synthetic_train_dataloaders_traj(
+    dataloaders,
+    meta_info_dict,
+    dt,
+    bin_size=0.10,
+    smoothing_sigma=1.0,
+    poisson=True,
+    min_cluster_size=3,
+    seed=0,
+):
+    """Trajectory-specific variant of ``make_synthetic_train_dataloaders``.
+
+    Instead of fitting one 3D rate map per session on all training
+    flights, fit a separate ``PlaceCellSimulator3D`` for each flight
+    cluster with more than ``min_cluster_size`` training trajectories
+    (analogous to direction-specific place fields). All remaining
+    clusters are pooled into a single ``'other'`` simulator. At
+    simulation time each training trajectory is routed to its
+    cluster-specific simulator (or to ``'other'``).
+    Valid/test loaders are passed through by reference.
+    """
+    rng = np.random.default_rng(seed)
+    syn = {'train': {}, 'valid': dataloaders['valid'], 'test': dataloaders['test']}
+    simulators = {}
+
+    for session, train_loader in dataloaders['train'].items():
+        ds = train_loader.dataset
+
+        beh_z = ds.behavior.numpy()
+        spk = ds.spike.numpy()
+        mask = ds.mask.numpy()
+        fti = ds.flight_type_index.numpy().astype(int)
+
+        bm = np.asarray(meta_info_dict['behavior_mean'][session]).reshape(-1)
+        bs = np.asarray(meta_info_dict['behavior_std'][session]).reshape(-1)
+        pos_xyz = (beh_z * bs + bm)[..., :3]
+
+        beh_list, spk_list = [], []
+        for i in range(pos_xyz.shape[0]):
+            valid = mask[i] == 1.0
+            beh_list.append(pos_xyz[i, valid].T)
+            spk_list.append(spk[i, valid].T)
+
+        unique_clusters, counts = np.unique(fti, return_counts=True)
+        major_clusters = {
+            int(c) for c, ct in zip(unique_clusters, counts) if ct > min_cluster_size
+        }
+
+        cluster_to_sim = {}
+        for c in major_clusters:
+            inds = np.where(fti == c)[0]
+            sim = PlaceCellSimulator3D(bin_size=bin_size, smoothing_sigma=smoothing_sigma)
+            sim.fit(
+                [beh_list[i] for i in inds],
+                [spk_list[i] for i in inds],
+                dt=dt,
+            )
+            cluster_to_sim[c] = sim
+
+        other_inds = [i for i in range(len(fti)) if int(fti[i]) not in major_clusters]
+        if other_inds:
+            sim = PlaceCellSimulator3D(bin_size=bin_size, smoothing_sigma=smoothing_sigma)
+            sim.fit(
+                [beh_list[i] for i in other_inds],
+                [spk_list[i] for i in other_inds],
+                dt=dt,
+            )
+            cluster_to_sim['other'] = sim
+
+        simulators[session] = cluster_to_sim
+
+        np.random.seed(int(rng.integers(0, 2**31 - 1)))
+
+        syn_spk = spk.copy()  # preserve zero padding outside mask
+        for i in range(len(fti)):
+            c = int(fti[i])
+            sim = cluster_to_sim.get(c) if c in major_clusters else cluster_to_sim.get('other')
+            if sim is None:
+                continue
+            syn_i = sim.simulate([beh_list[i]], dt=dt, poisson=poisson)[0]
+            valid = mask[i] == 1.0
+            syn_spk[i, valid] = syn_i.T.astype(syn_spk.dtype)
+
+        syn_ds = copy.copy(ds)
+        syn_ds.spike = torch.from_numpy(syn_spk).float()
+
+        syn['train'][session] = DataLoader(
+            syn_ds,
+            sampler=train_loader.sampler,
+            batch_size=train_loader.batch_size,
+        )
+
+    return syn, simulators
