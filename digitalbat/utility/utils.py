@@ -19,6 +19,115 @@ from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
 
 
+def bat_palette(palette='tab10'):
+    """Return a `{bat_id: rgb}` dict in canonical project order.
+
+    Bats are extracted from `DEFAULT_SESSION_NAMES` (third underscore-split
+    token).  Pass into seaborn via `palette=bat_palette()` with `hue='bat'`
+    to keep colors consistent across notebooks/figures.
+    """
+    import seaborn as sns
+    from ..datasets.defaults import DEFAULT_SESSION_NAMES
+    seen = []
+    for s in DEFAULT_SESSION_NAMES:
+        b = s.split('_')[2]
+        if b not in seen:
+            seen.append(b)
+    colors = sns.color_palette(palette, n_colors=max(len(seen), 3))
+    return {b: c for b, c in zip(seen, colors)}
+
+
+def parse_bat(session_name):
+    """`Dataset_3_14543_240419` -> `'14543'`."""
+    return session_name.split('_')[2]
+
+
+def wilcoxon_safe(diff):
+    """Two-sided Wilcoxon signed-rank on `diff`; returns (statistic, pvalue).
+
+    Handles empty / all-zero / all-NaN inputs by returning (nan, nan) so
+    callers can branch on `np.isfinite(p)` without try/except.
+    """
+    from scipy.stats import wilcoxon
+    diff = np.asarray(diff)
+    diff = diff[np.isfinite(diff)]
+    if diff.size < 1 or np.all(diff == 0):
+        return np.nan, np.nan
+    res = wilcoxon(diff, zero_method='wilcox', alternative='two-sided')
+    return float(res.statistic), float(res.pvalue)
+
+
+def stars_for_p(p):
+    """Three-tier stars: '*' p<.05, '**' p<.01, '***' p<.001.  '' for n.s. or nan."""
+    if p is None or not np.isfinite(p):
+        return ''
+    if p < 1e-3: return '***'
+    if p < 1e-2: return '**'
+    if p < 5e-2: return '*'
+    return ''
+
+
+def add_significance_bracket(ax, x1, x2, p, *, y=None, height_frac=0.03,
+                              color='k', linewidth=1.0, fontsize=12):
+    """Draw a horizontal bracket from `x1` to `x2` with stars above; no-op when p >= .05.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+    x1, x2 : float
+        Bracket endpoints in data coordinates (e.g. categorical positions 0, 1).
+    p : float
+        p-value; if >= .05 or non-finite, this function does nothing.
+    y : float, optional
+        Bracket baseline (data coords).  If None, placed just above the data
+        in the bracket span via `ax.dataLim`.
+    height_frac : float
+        Stem height as a fraction of the y-range.
+    """
+    stars = stars_for_p(p)
+    if not stars:
+        return
+    ymin, ymax = ax.get_ylim()
+    span = ymax - ymin if ymax > ymin else 1.0
+    if y is None:
+        y = ymax - 0.05 * span
+    h = height_frac * span
+    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y],
+            lw=linewidth, color=color, clip_on=False)
+    ax.text((x1 + x2) / 2, y + h, stars, ha='center', va='bottom',
+            fontsize=fontsize, fontweight='bold', color=color, clip_on=False)
+    # Make sure stars are visible.
+    ax.set_ylim(top=max(ymax, y + h + 0.08 * span))
+
+
+def annotate_pvalue_corner(ax, p, n=None, *, loc='upper right',
+                            fontsize=10, color='k'):
+    """Annotate a corner of `ax` with stars (+ optional p, n) when significant.
+
+    No-op if p >= .05 or non-finite, per the project convention to hide n.s.
+    """
+    stars = stars_for_p(p)
+    if not stars:
+        return
+    bits = [stars]
+    if np.isfinite(p):
+        bits.append(f'p={p:.1e}')
+    if n is not None:
+        bits.append(f'n={n}')
+    text = '\n'.join(bits)
+    xy_map = {
+        'upper right': (0.97, 0.97, 'right', 'top'),
+        'upper left':  (0.03, 0.97, 'left',  'top'),
+        'lower right': (0.97, 0.03, 'right', 'bottom'),
+        'lower left':  (0.03, 0.03, 'left',  'bottom'),
+    }
+    x, y, ha, va = xy_map[loc]
+    ax.text(x, y, text, transform=ax.transAxes, ha=ha, va=va,
+            fontsize=fontsize, fontweight='bold', color=color,
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                      edgecolor='none', alpha=0.85))
+
+
 def bandpass_filter(signal, fs, band):
     """Bandpass filter a signal."""
     nyq = fs / 2
