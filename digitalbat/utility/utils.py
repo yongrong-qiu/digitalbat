@@ -288,6 +288,8 @@ def generate_2d_rate_map(
     loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
     num_of_bins: int = None, # number of bins for the generate rate map in each spatial dimension
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
+    smooth_sigma: float = 1.0, # sigma for Gaussian smoothing
+    rate_map_nan: bool = False, # If True, keep NaN values in rate map indicating the place never been visited
 ):
     """
     Compute the 2D rate map of a neuron by binning the 2D location space and calculating 
@@ -363,21 +365,25 @@ def generate_2d_rate_map(
     occupancy, _, _ = np.histogram2d(loc_xx, loc_yy, bins=[x_edges, y_edges])
     # Convert occupancy count to time (in seconds)
     occupancy_time = occupancy * dt
-    occupancy_time[occupancy_time == 0] = np.nan # Avoid division by zero where the subject never visited
     # Compute total spike count in each bin (weighted histogram)
     spike_map, _, _ = np.histogram2d(loc_xx, loc_yy, bins=[x_edges, y_edges], weights=unit_spike_count)
-    # Compute firing rate: spike count / occupancy time
-    # with np.errstate(divide='ignore', invalid='ignore'):
-    #     rate_map = np.divide(spike_map, occupancy_time)
-    #     rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
-    rate_map = spike_map/occupancy_time
+
+    if not rate_map_nan:
+        # Compute firing rate: spike count / occupancy time
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rate_map = np.divide(spike_map, occupancy_time)
+            rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
+    else:
+        occupancy_time[occupancy_time == 0] = np.nan # Avoid division by zero where the subject never visited
+        rate_map = spike_map/occupancy_time # rate_map with NaN values
+        occupancy_time[np.isnan(occupancy_time)] = 0
 
     # Smooth spike counts and occupancy separately, then divide.  Smoothing
     # the rate map directly leaks zero rates from unoccupied neighbor bins
     # into occupied ones and shrinks the time-averaged firing rate.
-    sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
-    spike_map_smoothed = gaussian_filter(spike_map, sigma=sigma)
-    occupancy_time_smoothed = gaussian_filter(occupancy_time, sigma=sigma)
+    # smooth_sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
+    spike_map_smoothed = gaussian_filter(spike_map, sigma=smooth_sigma)
+    occupancy_time_smoothed = gaussian_filter(occupancy_time, sigma=smooth_sigma)
     with np.errstate(divide='ignore', invalid='ignore'):
         smoothed_rate_map = np.divide(spike_map_smoothed, occupancy_time_smoothed)
         smoothed_rate_map[np.isnan(smoothed_rate_map)] = 0
