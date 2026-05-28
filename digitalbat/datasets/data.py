@@ -1524,14 +1524,18 @@ class PlaceCellSimulator3D:
                 )
                 spike_counts[n] += spike_hist
 
-        rate_map = spike_counts / (occupancy + 1e-8)
-        # -------- optional Gaussian smoothing --------
+        # Smooth spike counts and occupancy separately, THEN divide.  Smoothing
+        # the rate map directly leaks zero rates from unoccupied neighbor bins
+        # into the occupied bins and shrinks the time-averaged firing rate.
         if self.smoothing_sigma is not None:
+            occupancy_smoothed = gaussian_filter(occupancy, sigma=self.smoothing_sigma)
+            spike_counts_smoothed = np.empty_like(spike_counts)
             for n in range(N):
-                rate_map[n] = gaussian_filter(
-                    rate_map[n],
-                    sigma=self.smoothing_sigma
-                )
+                spike_counts_smoothed[n] = gaussian_filter(
+                    spike_counts[n], sigma=self.smoothing_sigma)
+            rate_map = spike_counts_smoothed / (occupancy_smoothed + 1e-8)
+        else:
+            rate_map = spike_counts / (occupancy + 1e-8)
         self.rate_map = rate_map
 
         return self.rate_map

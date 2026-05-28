@@ -263,9 +263,15 @@ def generate_2d_rate_map(
     #     rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
     rate_map = spike_map/occupancy_time
 
-    # Apply Gaussian smoothing to the rate map
+    # Smooth spike counts and occupancy separately, then divide.  Smoothing
+    # the rate map directly leaks zero rates from unoccupied neighbor bins
+    # into occupied ones and shrinks the time-averaged firing rate.
     sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
-    smoothed_rate_map = gaussian_filter(rate_map, sigma=sigma)
+    spike_map_smoothed = gaussian_filter(spike_map, sigma=sigma)
+    occupancy_time_smoothed = gaussian_filter(occupancy_time, sigma=sigma)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        smoothed_rate_map = np.divide(spike_map_smoothed, occupancy_time_smoothed)
+        smoothed_rate_map[np.isnan(smoothed_rate_map)] = 0
 
     return x_edges, y_edges, rate_map, smoothed_rate_map
 
