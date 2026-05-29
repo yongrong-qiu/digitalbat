@@ -277,7 +277,7 @@ def lowpass_filter(sig, cutoff=1.0, fs=100.0, order=4):
     b, a = butter(order, normal_cutoff, btype='low', analog=False)
     filtered = filtfilt(b, a, sig)
     return filtered
-
+    
 
 def generate_2d_rate_map(
     loc_xx: np.ndarray,  # 1D array of x-coordinates of the animal's location over time
@@ -389,6 +389,94 @@ def generate_2d_rate_map(
         smoothed_rate_map[np.isnan(smoothed_rate_map)] = 0
 
     return x_edges, y_edges, rate_map, smoothed_rate_map
+
+
+def generate_rate_map(
+    loc: np.ndarray, # the animal's location over time, shape: (T, 2) or (T, 3)
+    unit_spike_count: np.ndarray,  # 1D array of spike counts for one neuron at each time point, shape: (T,)
+    loc_lim: np.ndarray = None, # boundary (min + max) of the space, shape: (2, 3) or (2, 2)
+    loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
+    num_of_bins: int = None, # number of bins for the generate rate map in each spatial dimension
+    dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
+    smooth_sigma: float = 1.0, # sigma for Gaussian smoothing
+    rate_map_nan: bool = False, # If True, keep NaN values in rate map indicating the place never been visited
+):
+    # use either loc_bin_width or num_of_bins
+    assert (loc_bin_width is None) != (num_of_bins is None), \
+        "You must specify exactly one of 'loc_bin_width' or 'num_of_bins', not both or neither."
+    
+    if loc.shape[1] == 2: # 2D rate map
+        # Define bin edges in x and y directions
+        if loc_lim is not None:
+            if loc_bin_width:
+                x_edges = np.arange(loc_lim[0, 0], loc_lim[1, 0] + loc_bin_width, loc_bin_width)
+                y_edges = np.arange(loc_lim[0, 1], loc_lim[1, 1] + loc_bin_width, loc_bin_width)
+            elif num_of_bins:
+                x_edges = np.linspace(loc_lim[0, 0], loc_lim[1, 0], num_of_bins)
+                y_edges = np.linspace(loc_lim[0, 1], loc_lim[1, 1], num_of_bins)
+        else:
+            if loc_bin_width:
+                x_edges = np.arange(np.min(loc[:, 0]), np.max(loc[:, 0]) + loc_bin_width, loc_bin_width)
+                y_edges = np.arange(np.min(loc[:, 1]), np.max(loc[:, 1]) + loc_bin_width, loc_bin_width)
+            elif num_of_bins:
+                x_edges = np.linspace(np.min(loc[:, 0]), np.max(loc[:, 0]), num_of_bins)
+                y_edges = np.linspace(np.min(loc[:, 1]), np.max(loc[:, 1]), num_of_bins)
+        # Compute occupancy: number of time points spent in each spatial bin
+        occupancy, _, _ = np.histogram2d(loc[:, 0], loc[:, 1], bins=[x_edges, y_edges])
+        # Convert occupancy count to time (in seconds)
+        occupancy_time = occupancy * dt
+        # Compute total spike count in each bin (weighted histogram)
+        spike_map, _, _ = np.histogram2d(loc[:, 0], loc[:, 1], bins=[x_edges, y_edges], weights=unit_spike_count)
+
+    elif loc.shape[1] ==3: # 3D rate map
+        # Define bin edges in x and y directions
+        if loc_lim is not None:
+            if loc_bin_width:
+                x_edges = np.arange(loc_lim[0, 0], loc_lim[1, 0] + loc_bin_width, loc_bin_width)
+                y_edges = np.arange(loc_lim[0, 1], loc_lim[1, 1] + loc_bin_width, loc_bin_width)
+                z_edges = np.arange(loc_lim[0, 2], loc_lim[1, 2] + loc_bin_width, loc_bin_width)
+            elif num_of_bins:
+                x_edges = np.linspace(loc_lim[0, 0], loc_lim[1, 0], num_of_bins)
+                y_edges = np.linspace(loc_lim[0, 1], loc_lim[1, 1], num_of_bins)
+                z_edges = np.linspace(loc_lim[0, 2], loc_lim[1, 2], num_of_bins)
+        else:
+            if loc_bin_width:
+                x_edges = np.arange(np.min(loc[:, 0]), np.max(loc[:, 0]) + loc_bin_width, loc_bin_width)
+                y_edges = np.arange(np.min(loc[:, 1]), np.max(loc[:, 1]) + loc_bin_width, loc_bin_width)
+                z_edges = np.arange(np.min(loc[:, 2]), np.max(loc[:, 2]) + loc_bin_width, loc_bin_width)
+            elif num_of_bins:
+                x_edges = np.linspace(np.min(loc[:, 0]), np.max(loc[:, 0]), num_of_bins)
+                y_edges = np.linspace(np.min(loc[:, 1]), np.max(loc[:, 1]), num_of_bins)
+                z_edges = np.linspace(np.min(loc[:, 2]), np.max(loc[:, 2]), num_of_bins)
+        # Compute occupancy: number of time points spent in each spatial bin
+        occupancy, _, _ = np.histogramdd(loc, bins=[x_edges, y_edges, z_edges])
+        # Convert occupancy count to time (in seconds)
+        occupancy_time = occupancy * dt
+        # Compute total spike count in each bin (weighted histogram)
+        spike_map, _, _ = np.histogramdd(loc, bins=[x_edges, y_edges, z_edges], weights=unit_spike_count)
+
+    if not rate_map_nan:
+        # Compute firing rate: spike count / occupancy time
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rate_map = np.divide(spike_map, occupancy_time)
+            rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
+    else:
+        occupancy_time[occupancy_time == 0] = np.nan # Avoid division by zero where the subject never visited
+        rate_map = spike_map/occupancy_time # rate_map with NaN values
+        occupancy_time[np.isnan(occupancy_time)] = 0
+
+    # Smooth spike counts and occupancy separately, then divide.  Smoothing
+    # the rate map directly leaks zero rates from unoccupied neighbor bins
+    # into occupied ones and shrinks the time-averaged firing rate.
+    # smooth_sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
+    spike_map_smoothed = gaussian_filter(spike_map, sigma=smooth_sigma)
+    occupancy_time_smoothed = gaussian_filter(occupancy_time, sigma=smooth_sigma)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        smoothed_rate_map = np.divide(spike_map_smoothed, occupancy_time_smoothed)
+        smoothed_rate_map[np.isnan(smoothed_rate_map)] = 0
+
+    return ((x_edges, y_edges), rate_map, smoothed_rate_map) if loc.shape[1] == 2 else ((x_edges, y_edges, z_edges), rate_map, smoothed_rate_map)
+
 
 def plot_2d_rate_map(
     unit: int, # neuron index
