@@ -14,6 +14,7 @@ from matplotlib import cm
 import torch
 import pandas as pd
 from scipy.spatial.distance import pdist, squareform
+from sklearn.feature_selection import mutual_info_regression
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -1756,3 +1757,176 @@ def extract_flight_type_saliency(
             result_dict[current_ft].append(flight_response)
 
     return result_dict
+
+
+class BatSpatialInfo:
+    """
+    For a target session, compute spatial_info in the physical space and the 3D latent space, the coordinates in
+    the physical space and the 3D latent space, spikes for each neuron and each flight function type (such as reward -> reward)
+    and each flight geometry cluster in a flight function type.
+    """
+    def __init__(self, session_id, all_session, all_xyz, pca_sub, all_latents, 
+                 all_true_spike, all_cluster_session, all_rel_time, all_reward, all_perch, dt=0.1):
+        self.session_id = session_id
+        self.dt = dt
+        # Mask for the specific session
+        self.session_mask = (all_session == session_id)
+        # Extract session-specific data
+        self.xyz = all_xyz[self.session_mask]
+        self.pca_3d = pca_sub[self.session_mask]
+        self.latent_32d = all_latents[self.session_mask]
+        self.clusters = all_cluster_session[self.session_mask]
+        # Extract session-specific behavioral variables
+        session_rel_time = all_rel_time[self.session_mask]
+        session_reward = all_reward[self.session_mask]
+        session_perch = all_perch[self.session_mask]
+        # Get spikes and drop neurons that are all NaN for this session
+        session_spikes = all_true_spike[self.session_mask]
+        self.valid_neuron_mask = ~np.all(np.isnan(session_spikes), axis=0)
+        self.spikes = session_spikes[:, self.valid_neuron_mask] # Shape: (T_session, N_valid)
+        self.n_time, self.n_neurons = self.spikes.shape
+        # --- Identify Flight Functional Types per time point ---
+        self.flight_types = np.empty(self.n_time, dtype=object)
+        if self.n_time > 0:
+            # Find the indices where a new flight begins (relative time drops back to 0)
+            jumps = np.where(np.diff(session_rel_time) < 0)[0]
+            # Flight starts at index 0 and every index right after a jump
+            starts = np.concatenate(([0], jumps + 1))
+            # Flight ends at each jump index, and the final flight ends at the last index of the session
+            ends = np.concatenate((jumps, [self.n_time - 1]))
+            # Assign functional type to every timepoint within each flight segment
+            for s, e in zip(starts, ends):
+                # Guard rails to make sure indices don't overflow or create empty slices
+                if s >= self.n_time or e >= self.n_time or s > e:
+                    continue
+                s_type = 'Reward' if session_reward[s] else ('Perch' if session_perch[s] else 'Other')
+                e_type = 'Reward' if session_reward[e] else ('Perch' if session_perch[e] else 'Other')
+                if s_type != 'Other' and e_type != 'Other':
+                    ft_key = (s_type, e_type)
+                else:
+                    ft_key = ('Other',)
+                self.flight_types[s:e+1] = str(ft_key)
+
+    def _get_equal_occ_bins(self, coords, n_bins_per_dim=10):
+        """Calculates bin indices for each point based on coordinate ranges."""
+        bin_indices = np.zeros_like(coords, dtype=int)
+        for d in range(3): 
+            edges = np.linspace(np.min(coords[:, d]), np.max(coords[:, d]), n_bins_per_dim + 1)
+            bin_indices[:, d] = np.digitize(coords[:, d], edges[1:-1])
+        return bin_indices[:, 0] + \
+               n_bins_per_dim * bin_indices[:, 1] + \
+               (n_bins_per_dim**2) * bin_indices[:, 2]
+
+    def compute_skaggs_si(self, coords, spikes, n_bins_per_dim=20):
+        """Computes Skaggs Spatial Information (bits/spike)."""
+        bin_ids = self._get_equal_occ_bins(coords, n_bins_per_dim)
+        n_total_bins = n_bins_per_dim**3
+        occ_counts = np.bincount(bin_ids, minlength=n_total_bins)
+        Pi = occ_counts / len(bin_ids)
+        si_per_neuron = []
+        for n in range(spikes.shape[1]):
+            r_vec = spikes[:, n]
+            mean_rate = np.mean(r_vec)
+            if mean_rate == 0:
+                si_per_neuron.append(0.0)
+                continue
+            bin_sums = np.bincount(bin_ids, weights=r_vec, minlength=n_total_bins)
+            lambda_i = np.divide(bin_sums, occ_counts, out=np.zeros_like(bin_sums), where=occ_counts > 0)
+            ratio = lambda_i / mean_rate
+            mask = (ratio > 0) & (Pi > 0)
+            info = np.sum(Pi[mask] * ratio[mask] * np.log2(ratio[mask]))
+            si_per_neuron.append(info)
+        return np.array(si_per_neuron)
+
+    def compute_ksg_si(self, high_dim_coords, spikes):
+        """High-dimensional SI using KSG estimator (Mutual Information)."""
+        mi_scores = []
+        for n in range(spikes.shape[1]):
+            score = mutual_info_regression(high_dim_coords, spikes[:, n], 
+                                           discrete_features=False, n_neighbors=3)
+            mi_scores.append(score[0] / np.log(2))
+        return np.array(mi_scores)
+
+    def get_all_spatial_info(self):
+        spatial_info = {}
+        # 1. Session SI (3D Physical vs 3D Latent)
+        spatial_info['session_si_physical'] = self.compute_skaggs_si(self.xyz, self.spikes)
+        spatial_info['session_si_latent_3d'] = self.compute_skaggs_si(self.pca_3d, self.spikes)
+        # 2. Cluster-specific SI
+        unique_clusters = np.unique(self.clusters)
+        spatial_info['clusters'] = {}
+        for cluster in unique_clusters:
+            c_mask = (self.clusters == cluster)
+            if np.sum(c_mask) < 10: continue 
+            spatial_info['clusters'][cluster] = {
+                'si_physical': self.compute_skaggs_si(self.xyz[c_mask], self.spikes[c_mask]),
+                'si_latent_3d': self.compute_skaggs_si(self.pca_3d[c_mask], self.spikes[c_mask]),
+                'xyz': self.xyz[c_mask],
+                'pca_3d': self.pca_3d[c_mask],
+                'spikes': self.spikes[c_mask],
+            }
+            
+        # 3. Hierarchical Hierachy: Flight Function Types -> Clusters
+        spatial_info['flight_function_types'] = {}
+        # Defined targets
+        target_types = [
+            ('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)
+        ]
+        for ft in target_types:
+            ft_str = str(ft)
+            ft_mask = (self.flight_types == ft_str)
+            if np.sum(ft_mask) < 10: continue
+            spatial_info['flight_function_types'][ft] = {'clusters': {}}
+            # Sub-sample clusters within this specific flight function block
+            ft_clusters = self.clusters[ft_mask]
+            unique_ft_clusters = np.unique(ft_clusters)
+            for cluster in unique_ft_clusters:
+                # Combined mask: must belong to the functional type AND the geometry cluster
+                combined_mask = (self.flight_types == ft_str) & (self.clusters == cluster)
+                if np.sum(combined_mask) < 10: continue
+                spatial_info['flight_function_types'][ft]['clusters'][cluster] = {
+                    'si_physical': self.compute_skaggs_si(self.xyz[combined_mask], self.spikes[combined_mask]),
+                    'si_latent_3d': self.compute_skaggs_si(self.pca_3d[combined_mask], self.spikes[combined_mask]),
+                    'xyz': self.xyz[combined_mask],
+                    'pca_3d': self.pca_3d[combined_mask],
+                    'spikes': self.spikes[combined_mask],
+                }
+        # 4. High-Dimensional SI (32D Latent)
+        spatial_info['global_si_latent_32d'] = self.compute_ksg_si(self.latent_32d, self.spikes)
+        
+        return spatial_info
+    
+    def compute_shuffled_si(self, neuron_idx, cluster_id=None, n_shuffles=1000):
+        """Calculates null distribution by circularly shifting spike trains."""
+        if cluster_id:
+            c_mask = (self.clusters == cluster_id)
+            coords = self.pca_3d[c_mask] # or self.xyz, self.pca_3d
+            spikes = self.spikes[c_mask, neuron_idx]
+        else:
+            coords = self.pca_3d
+            spikes = self.spikes[:, neuron_idx]
+            
+        n_samples = len(spikes)
+        null_distribution = []
+        # Pre-calculate bin IDs for original coordinates
+        bin_ids = self._get_equal_occ_bins(coords)
+        for _ in range(n_shuffles):
+            # Circular shift: maintain temporal structure but decouple from position
+            shift = np.random.randint(int(0.1*n_samples), int(0.9*n_samples))
+            shuffled_spikes = np.roll(spikes, shift)
+            # Calculate SI for this shuffle
+            mean_rate = np.mean(shuffled_spikes)
+            if mean_rate == 0:
+                null_distribution.append(0.0)
+                continue
+                
+            occ_counts = np.bincount(bin_ids, minlength=1000)
+            bin_sums = np.bincount(bin_ids, weights=shuffled_spikes, minlength=1000)
+            lambda_i = np.divide(bin_sums, occ_counts, out=np.zeros_like(bin_sums), where=occ_counts > 0)
+            
+            Pi = occ_counts / n_samples
+            ratio = lambda_i / mean_rate
+            mask = (ratio > 0) & (Pi > 0)
+            null_distribution.append(np.sum(Pi[mask] * ratio[mask] * np.log2(ratio[mask])))
+            
+        return np.array(null_distribution)
