@@ -16,6 +16,7 @@ import pandas as pd
 from scipy.spatial.distance import pdist, squareform
 from sklearn.feature_selection import mutual_info_regression
 from scipy.stats import pearsonr, wasserstein_distance
+import ot
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -451,11 +452,11 @@ def generate_rate_map(
                 y_edges = np.linspace(np.min(loc[:, 1]), np.max(loc[:, 1]), num_of_bins)
                 z_edges = np.linspace(np.min(loc[:, 2]), np.max(loc[:, 2]), num_of_bins)
         # Compute occupancy: number of time points spent in each spatial bin
-        occupancy, _, _ = np.histogramdd(loc, bins=[x_edges, y_edges, z_edges])
+        occupancy, _ = np.histogramdd(loc, bins=[x_edges, y_edges, z_edges])
         # Convert occupancy count to time (in seconds)
         occupancy_time = occupancy * dt
         # Compute total spike count in each bin (weighted histogram)
-        spike_map, _, _ = np.histogramdd(loc, bins=[x_edges, y_edges, z_edges], weights=unit_spike_count)
+        spike_map, _ = np.histogramdd(loc, bins=[x_edges, y_edges, z_edges], weights=unit_spike_count)
 
     if not rate_map_nan:
         # Compute firing rate: spike count / occupancy time
@@ -2000,7 +2001,7 @@ class BatRateMapSim:
                 
         return np.mean(np.array(pair_scores), axis=0)
 
-    def _get_valid_cluster_maps(self, ft_str, space_type='physical'):
+    def _get_valid_cluster_maps(self, ft_str, space_type='physical', num_of_bins=20):
         """Generates smoothed 3D rate maps for clusters within a functional type.
         
         If a neuron has no spikes within a cluster, its rate map is set to all NaNs.
@@ -2016,7 +2017,7 @@ class BatRateMapSim:
             if np.sum(combined_mask) < 10:
                 continue
             # Pre-allocate array: (Bins, Bins, Bins, Neurons)
-            cluster_maps = np.zeros((20, 20, 20, self.n_neurons))
+            cluster_maps = np.zeros((num_of_bins - 1, num_of_bins - 1, num_of_bins - 1, self.n_neurons))
             for n in range(self.n_neurons):
                 # Check if the neuron actually spikes in this specific cluster segment
                 if np.sum(self.spikes[combined_mask, n]) == 0:
@@ -2028,7 +2029,7 @@ class BatRateMapSim:
                     unit_spike_count=self.spikes[combined_mask, n],
                     loc_lim=lims,
                     loc_bin_width=None,
-                    num_of_bins=20,
+                    num_of_bins=num_of_bins,
                     dt=self.dt
                 )
                 cluster_maps[..., n] = r_map
@@ -2063,18 +2064,39 @@ class BatRateMapSim:
             }
         return spatial_corr
 
-    def get_all_Wasserstein(self):
+    def get_all_Wasserstein(self, num_of_bins=20):
         """Computes Earth Mover's Distance similarity profiles."""
         spatial_wass = {'flight_function_types': {}}
         target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
         
+        # def wasserstein_metric(m1, m2):
+        #     if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+        #         return np.nan
+        #     v1, v2 = m1.flatten(), m2.flatten()
+        #     if np.sum(v1) == 0 or np.sum(v2) == 0:
+        #         return np.nan
+        #     return wasserstein_distance(v1 / np.sum(v1), v2 / np.sum(v2))
+        
+        # Pre-compute the 3D grid coordinate locations once globally 
+        # so we don't recalculate them inside the heavy nested loops
+        grid_coords = np.array(np.meshgrid(np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), indexing='ij')).reshape(3, -1).T
+        # Compute the pairwise Euclidean distance matrix between all 8000 bins (20x20x20)
+        # This represents the actual "metric distance space" for the transport cost
+        M_cost = ot.dist(grid_coords, grid_coords, metric='euclidean')
         def wasserstein_metric(m1, m2):
+            # If either map belongs to an inactive neuron for this cluster, return NaN
             if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
                 return np.nan
             v1, v2 = m1.flatten(), m2.flatten()
+            # Sum of weights must be > 0 to normalize
             if np.sum(v1) == 0 or np.sum(v2) == 0:
                 return np.nan
-            return wasserstein_distance(v1 / np.sum(v1), v2 / np.sum(v2))
+            # EMD requires the mass distributions to sum to 1 (probability distributions)
+            p1 = v1 / np.sum(v1)
+            p2 = v2 / np.sum(v2)
+            # Compute the true multi-dimensional Earth Mover's Distance
+            # ot.emd2 returns the total scalar cost: sum(mass_moved * Euclidean_distance)
+            return ot.emd2(p1, p2, M_cost)
 
         for ft in target_types:
             ft_str = str(ft)
