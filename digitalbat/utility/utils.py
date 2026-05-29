@@ -15,6 +15,7 @@ import torch
 import pandas as pd
 from scipy.spatial.distance import pdist, squareform
 from sklearn.feature_selection import mutual_info_regression
+from scipy.stats import pearsonr, wasserstein_distance
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -1764,6 +1765,9 @@ class BatSpatialInfo:
     For a target session, compute spatial_info in the physical space and the 3D latent space, the coordinates in
     the physical space and the 3D latent space, spikes for each neuron and each flight function type (such as reward -> reward)
     and each flight geometry cluster in a flight function type.
+
+    all_xyz.shape: (num_of_timepoints, 3)
+    all_true_spike.shape: (num_of_timepoints, num_of_neurons)
     """
     def __init__(self, session_id, all_session, all_xyz, pca_sub, all_latents, 
                  all_true_spike, all_cluster_session, all_rel_time, all_reward, all_perch, dt=0.1):
@@ -1930,3 +1934,181 @@ class BatSpatialInfo:
             null_distribution.append(np.sum(Pi[mask] * ratio[mask] * np.log2(ratio[mask])))
             
         return np.array(null_distribution)
+    
+
+class BatRateMapSim:
+    """
+    For a target session, compute the similarities between rate maps in the physical space and the 3D latent space, 
+    using different metrics, for each neuron and each flight function type (such as reward -> reward)
+    and each flight geometry cluster in a flight function type.
+
+    all_xyz.shape: (num_of_timepoints, 3)
+    all_true_spike.shape: (num_of_timepoints, num_of_neurons)
+    """
+    def __init__(self, session_id, all_session, all_xyz, pca_sub, all_latents, 
+                 all_true_spike, all_cluster_session, all_rel_time, all_reward, all_perch, dt=0.1):
+        self.session_id = session_id
+        self.dt = dt
+        # Mask for the specific session
+        self.session_mask = (all_session == session_id)
+        # Extract session-specific coordinate limits
+        self.xyz = all_xyz[self.session_mask]
+        self.pca_3d = pca_sub[self.session_mask]
+        self.latent_32d = all_latents[self.session_mask]
+        self.clusters = all_cluster_session[self.session_mask]
+        # Global session boundary limits shared across all internal clusters
+        self.loc_xyz_lim = np.stack((np.min(self.xyz, axis=0), np.max(self.xyz, axis=0)), axis=0) # shape: (2, 3)
+        self.loc_pca_lim = np.stack((np.min(self.pca_3d, axis=0), np.max(self.pca_3d, axis=0)), axis=0)
+        # Extract behavioral variables
+        session_rel_time = all_rel_time[self.session_mask]
+        session_reward = all_reward[self.session_mask]
+        session_perch = all_perch[self.session_mask]
+        # Spikes array matching valid neurons
+        session_spikes = all_true_spike[self.session_mask]
+        self.valid_neuron_mask = ~np.all(np.isnan(session_spikes), axis=0)
+        self.spikes = session_spikes[:, self.valid_neuron_mask]
+        self.n_time, self.n_neurons = self.spikes.shape
+        # Identify Flight Functional Types per time point
+        self.flight_types = np.empty(self.n_time, dtype=object)
+        if self.n_time > 0:
+            jumps = np.where(np.diff(session_rel_time) < 0)[0]
+            starts = np.concatenate(([0], jumps + 1))
+            ends = np.concatenate((jumps, [self.n_time - 1]))
+            for s, e in zip(starts, ends):
+                if s >= self.n_time or e >= self.n_time or s > e:
+                    continue
+                s_type = 'Reward' if session_reward[s] else ('Perch' if session_perch[s] else 'Other')
+                e_type = 'Reward' if session_reward[e] else ('Perch' if session_perch[e] else 'Other')
+                ft_key = (s_type, e_type) if s_type != 'Other' and e_type != 'Other' else ('Other',)
+                self.flight_types[s:e+1] = str(ft_key)
+
+    def _compute_pairwise_similarity(self, maps_list, metric_func):
+        """Helper to calculate mean similarity of all unique pairs of maps for each neuron."""
+        n_clusters = len(maps_list)
+        if n_clusters <= 1:
+            return np.full(self.n_neurons, np.nan)
+        # Accumulator array shape: (num_pairs, n_neurons)
+        pair_scores = []
+        for i in range(n_clusters):
+            for j in range(i + 1, n_clusters):
+                map_a = maps_list[i] # Shape: (num_bins, num_bins, num_bins, n_neurons)
+                map_b = maps_list[j]
+                scores_per_neuron = np.zeros(self.n_neurons)
+                for n in range(self.n_neurons):
+                    scores_per_neuron[n] = metric_func(map_a[..., n], map_b[..., n])
+                pair_scores.append(scores_per_neuron)
+                
+        return np.mean(np.array(pair_scores), axis=0)
+
+    def _get_valid_cluster_maps(self, ft_str, space_type='physical'):
+        """Generates smoothed 3D rate maps for clusters within a functional type."""
+        ft_mask = (self.flight_types == ft_str)
+        unique_clusters = np.unique(self.clusters[ft_mask])
+        
+        coords = self.xyz if space_type == 'physical' else self.pca_3d
+        lims = self.loc_xyz_lim if space_type == 'physical' else self.loc_pca_lim
+        
+        maps_list = []
+        for clu in unique_clusters:
+            combined_mask = (self.flight_types == ft_str) & (self.clusters == clu)
+            if np.sum(combined_mask) < 10:
+                continue
+            # Generate 3D maps for all neurons at once for this cluster block
+            # Pre-allocate array: (Bins, Bins, Bins, Neurons)
+            cluster_maps = np.zeros((20, 20, 20, self.n_neurons))
+            has_spikes = False
+            
+            for n in range(self.n_neurons):
+                # Using smoothed_rate_map (index 2) from your function output
+                _, _, r_map = generate_rate_map(
+                    loc=coords[combined_mask],
+                    unit_spike_count=self.spikes[combined_mask, n],
+                    loc_lim=lims,
+                    loc_bin_width=None,
+                    num_of_bins=20,
+                    dt=self.dt
+                )
+                cluster_maps[..., n] = r_map
+                if np.sum(self.spikes[combined_mask, n]) > 0:
+                    has_spikes = True
+                    
+            if has_spikes:
+                maps_list.append(cluster_maps)
+        return maps_list
+
+    def get_all_corr(self):
+        """Computes average spatial Pearson correlations for visited bins."""
+        spatial_corr = {'flight_function_types': {}}
+        target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
+        
+        def pearson_metric(m1, m2):
+            # Only calculate over bins visited in both conditions to avoid 0-inflation artifact
+            visited = (m1 > 0) & (m2 > 0)
+            if np.sum(visited) < 5 or np.std(m1[visited]) == 0 or np.std(m2[visited]) == 0:
+                return np.nan
+            return pearsonr(m1[visited], m2[visited])[0]
+
+        for ft in target_types:
+            ft_str = str(ft)
+            if np.sum(self.flight_types == ft_str) == 0: continue
+            
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            
+            spatial_corr['flight_function_types'][ft] = {
+                'corr_physical': self._compute_pairwise_similarity(phys_maps, pearson_metric),
+                'corr_latent': self._compute_pairwise_similarity(lat_maps, pearson_metric)
+            }
+        return spatial_corr
+
+    def get_all_Wasserstein(self):
+        """Computes Earth Mover's Distance similarity profiles."""
+        spatial_wass = {'flight_function_types': {}}
+        target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
+        
+        def wasserstein_metric(m1, m2):
+            v1, v2 = m1.flatten(), m2.flatten()
+            if np.sum(v1) == 0 or np.sum(v2) == 0:
+                return np.nan
+            # Normalize into probability densities to compute true EMD displacement
+            return wasserstein_distance(v1 / np.sum(v1), v2 / np.sum(v2))
+
+        for ft in target_types:
+            ft_str = str(ft)
+            if np.sum(self.flight_types == ft_str) == 0: continue
+            
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            
+            spatial_wass['flight_function_types'][ft] = {
+                'wass_physical': self._compute_pairwise_similarity(phys_maps, wasserstein_metric),
+                'wass_latent': self._compute_pairwise_similarity(lat_maps, wasserstein_metric)
+            }
+        return spatial_wass
+
+    def get_all_Jaccard(self):
+        """Computes Jaccard Intersection-over-Union similarity on thresholded place fields."""
+        spatial_jac = {'flight_function_types': {}}
+        target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
+        
+        def jaccard_metric(m1, m2):
+            # Threshold at 20% of peak firing field activity
+            field1 = m1 > (0.2 * np.max(m1)) if np.max(m1) > 0 else np.zeros_like(m1, dtype=bool)
+            field2 = m2 > (0.2 * np.max(m2)) if np.max(m2) > 0 else np.zeros_like(m2, dtype=bool)
+            
+            intersection = np.sum(field1 & field2)
+            union = np.sum(field1 | field2)
+            return intersection / union if union > 0 else np.nan
+
+        for ft in target_types:
+            ft_str = str(ft)
+            if np.sum(self.flight_types == ft_str) == 0: continue
+            
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            
+            spatial_jac['flight_function_types'][ft] = {
+                'jaccard_physical': self._compute_pairwise_similarity(phys_maps, jaccard_metric),
+                'jaccard_latent': self._compute_pairwise_similarity(lat_maps, jaccard_metric)
+            }
+        return spatial_jac
