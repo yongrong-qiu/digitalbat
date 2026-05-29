@@ -1551,3 +1551,121 @@ class PlaceCellSimulator3D:
             spike_test.append(spikes)
 
         return spike_test
+
+
+class EmpiricalCellSimulator3D(PlaceCellSimulator3D):
+    """Resample spikes from the empirical per-bin count distribution.
+
+    Drop-in replacement for :class:`PlaceCellSimulator3D` with the same
+    ``fit``/``simulate`` signatures and the same ``edges``/``shape``/
+    ``rate_map`` attributes (the smoothed rate map is still computed and
+    used for the deterministic ``poisson=False`` branch).
+
+    Whereas the base class models each neuron's per-bin count as
+    ``Poisson(rate * dt)``, this class draws -- per neuron independently --
+    from the *observed* counts conditioned on spatial bin.  Real
+    hippocampal counts are over-dispersed (bursting, refractoriness, slow
+    drift), so a Poisson surrogate understates the trial-to-trial
+    variability; empirical resampling preserves the true marginal
+    ``P(n | position)`` including its non-Poisson shape.  Across-neuron
+    simultaneity and within-flight temporal structure are still destroyed
+    (every timestep/neuron is an independent draw).
+
+    ``smoothing_sigma`` is reinterpreted as a Gaussian *pooling* radius (in
+    bins): a query bin's empirical pool is the union of observed counts in
+    nearby bins, each weighted ``exp(-d^2 / (2 sigma^2))``.  This mirrors
+    how the base class smoothed sparse bins and -- crucially -- gives each
+    bin enough samples that the resample genuinely decorrelates from the
+    real sequence rather than echoing the single count observed there.
+    """
+
+    def fit(self, behavior_train, spike_train, dt):
+        super().fit(behavior_train, spike_train, dt)  # sets edges, shape, rate_map
+        pos_all = np.concatenate([b.T for b in behavior_train], axis=0)  # (M, 3)
+        cnt_all = np.concatenate([s.T for s in spike_train], axis=0)     # (M, N)
+        ix = np.clip(np.digitize(pos_all[:, 0], self.edges[0]) - 1, 0, self.shape[0] - 1)
+        iy = np.clip(np.digitize(pos_all[:, 1], self.edges[1]) - 1, 0, self.shape[1] - 1)
+        iz = np.clip(np.digitize(pos_all[:, 2], self.edges[2]) - 1, 0, self.shape[2] - 1)
+        flat = np.ravel_multi_index((ix, iy, iz), self.shape)
+
+        self._counts_all = cnt_all
+        if len(flat):
+            order = np.argsort(flat, kind='stable')   # obs-row indices, sorted by bin
+            flat_sorted = flat[order]
+            boundaries = np.flatnonzero(np.diff(flat_sorted)) + 1
+            groups = np.split(order, boundaries)
+            keys = flat_sorted[np.concatenate(([0], boundaries))]
+            self._bin_to_obs = {int(k): g for k, g in zip(keys, groups)}
+        else:
+            self._bin_to_obs = {}
+        return self.rate_map
+
+    def simulate(self, behavior_test, dt, poisson=True):
+        """Generate spikes for new trajectories.
+
+        ``poisson=True`` draws stochastically from the empirical per-bin
+        distribution; ``poisson=False`` returns the deterministic per-bin
+        mean (the smoothed ``rate_map * dt``), matching the base class.
+        """
+        N = self._counts_all.shape[1]
+        sigma = self.smoothing_sigma or 0.0
+        R = int(np.ceil(3 * sigma)) if sigma > 0 else 0
+        offsets = []
+        for dx in range(-R, R + 1):
+            for dy in range(-R, R + 1):
+                for dz in range(-R, R + 1):
+                    d2 = dx * dx + dy * dy + dz * dz
+                    w = np.exp(-d2 / (2 * sigma ** 2)) if sigma > 0 else 1.0
+                    offsets.append((dx, dy, dz, w))
+        marginal_idx = np.arange(self._counts_all.shape[0])  # fallback pool
+        neuron_idx = np.arange(N)
+
+        spike_test = []
+        for beh in behavior_test:
+            pos = beh.T
+            T = pos.shape[0]
+            ix = np.digitize(pos[:, 0], self.edges[0]) - 1
+            iy = np.digitize(pos[:, 1], self.edges[1]) - 1
+            iz = np.digitize(pos[:, 2], self.edges[2]) - 1
+            valid = (
+                (ix >= 0) & (ix < self.shape[0]) &
+                (iy >= 0) & (iy < self.shape[1]) &
+                (iz >= 0) & (iz < self.shape[2])
+            )
+            spikes = np.zeros((N, T))
+            vts = np.flatnonzero(valid)
+            if len(vts):
+                vbins = np.ravel_multi_index(
+                    (ix[valid], iy[valid], iz[valid]), self.shape)
+                for b in np.unique(vbins):
+                    ts = vts[vbins == b]
+                    qx, qy, qz = np.unravel_index(int(b), self.shape)
+                    pool_parts, w_parts = [], []
+                    for dx, dy, dz, w in offsets:
+                        nx, ny, nz = qx + dx, qy + dy, qz + dz
+                        if not (0 <= nx < self.shape[0] and
+                                0 <= ny < self.shape[1] and
+                                0 <= nz < self.shape[2]):
+                            continue
+                        g = self._bin_to_obs.get(
+                            int(np.ravel_multi_index((nx, ny, nz), self.shape)))
+                        if g is None:
+                            continue
+                        pool_parts.append(g)
+                        w_parts.append(np.full(len(g), w))
+                    if pool_parts:
+                        pool_idx = np.concatenate(pool_parts)
+                        p = np.concatenate(w_parts)
+                        p = p / p.sum()
+                    else:
+                        pool_idx, p = marginal_idx, None  # bin unseen in training
+                    if poisson:
+                        draw = np.random.choice(
+                            len(pool_idx), size=(len(ts), N), p=p)
+                        cnts = self._counts_all[pool_idx[draw], neuron_idx[None, :]]
+                        spikes[:, ts] = cnts.T
+                    else:
+                        rate = self.rate_map.reshape(N, -1)[:, int(b)]
+                        spikes[:, ts] = (rate * dt)[:, None]
+            spike_test.append(spikes)
+        return spike_test
