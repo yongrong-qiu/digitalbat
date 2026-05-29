@@ -2001,10 +2001,12 @@ class BatRateMapSim:
         return np.mean(np.array(pair_scores), axis=0)
 
     def _get_valid_cluster_maps(self, ft_str, space_type='physical'):
-        """Generates smoothed 3D rate maps for clusters within a functional type."""
+        """Generates smoothed 3D rate maps for clusters within a functional type.
+        
+        If a neuron has no spikes within a cluster, its rate map is set to all NaNs.
+        """
         ft_mask = (self.flight_types == ft_str)
         unique_clusters = np.unique(self.clusters[ft_mask])
-        
         coords = self.xyz if space_type == 'physical' else self.pca_3d
         lims = self.loc_xyz_lim if space_type == 'physical' else self.loc_pca_lim
         
@@ -2013,13 +2015,14 @@ class BatRateMapSim:
             combined_mask = (self.flight_types == ft_str) & (self.clusters == clu)
             if np.sum(combined_mask) < 10:
                 continue
-            # Generate 3D maps for all neurons at once for this cluster block
             # Pre-allocate array: (Bins, Bins, Bins, Neurons)
             cluster_maps = np.zeros((20, 20, 20, self.n_neurons))
-            has_spikes = False
-            
             for n in range(self.n_neurons):
-                # Using smoothed_rate_map (index 2) from your function output
+                # Check if the neuron actually spikes in this specific cluster segment
+                if np.sum(self.spikes[combined_mask, n]) == 0:
+                    cluster_maps[..., n] = np.nan  # Mark this neuron as inactive for this cluster
+                    continue
+                # Generate 3D maps using smoothed_rate_map (index 2)
                 _, _, r_map = generate_rate_map(
                     loc=coords[combined_mask],
                     unit_spike_count=self.spikes[combined_mask, n],
@@ -2029,11 +2032,8 @@ class BatRateMapSim:
                     dt=self.dt
                 )
                 cluster_maps[..., n] = r_map
-                if np.sum(self.spikes[combined_mask, n]) > 0:
-                    has_spikes = True
-                    
-            if has_spikes:
-                maps_list.append(cluster_maps)
+                
+            maps_list.append(cluster_maps)
         return maps_list
 
     def get_all_corr(self):
@@ -2042,7 +2042,9 @@ class BatRateMapSim:
         target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
         
         def pearson_metric(m1, m2):
-            # Only calculate over bins visited in both conditions to avoid 0-inflation artifact
+            # If either map belongs to an inactive neuron for this cluster, return NaN
+            if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+                return np.nan
             visited = (m1 > 0) & (m2 > 0)
             if np.sum(visited) < 5 or np.std(m1[visited]) == 0 or np.std(m2[visited]) == 0:
                 return np.nan
@@ -2067,10 +2069,11 @@ class BatRateMapSim:
         target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
         
         def wasserstein_metric(m1, m2):
+            if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+                return np.nan
             v1, v2 = m1.flatten(), m2.flatten()
             if np.sum(v1) == 0 or np.sum(v2) == 0:
                 return np.nan
-            # Normalize into probability densities to compute true EMD displacement
             return wasserstein_distance(v1 / np.sum(v1), v2 / np.sum(v2))
 
         for ft in target_types:
@@ -2092,7 +2095,8 @@ class BatRateMapSim:
         target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
         
         def jaccard_metric(m1, m2):
-            # Threshold at 20% of peak firing field activity
+            if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+                return np.nan
             field1 = m1 > (0.2 * np.max(m1)) if np.max(m1) > 0 else np.zeros_like(m1, dtype=bool)
             field2 = m2 > (0.2 * np.max(m2)) if np.max(m2) > 0 else np.zeros_like(m2, dtype=bool)
             
