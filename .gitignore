@@ -2,6 +2,11 @@ tmp/
 notebooks/out/
 out/
 
+# Backup files
+*.bak
+*.bak[0-9]
+*.bak_*
+
 # PyTorch
 *.pth
 
