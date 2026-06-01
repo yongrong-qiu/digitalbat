@@ -346,6 +346,35 @@ def make_log_raised_cosine_basis(n_basis, n_lags, bin_width, c=None,
     return torch.tensor(B, dtype=torch.float32), lags, centers
 
 
+def make_symmetric_raised_cosine_basis(n_basis, n_lags, bin_width, c=None):
+    """Acausal (forward + backward) log-raised-cosine temporal basis, lag 0 EXCLUDED.
+
+    Builds the one-sided log-spaced raised-cosine basis over magnitudes
+    ``1..n_lags`` bins (identical to :func:`make_log_raised_cosine_basis`), then
+    mirrors it symmetrically about lag 0 into a block-structured matrix that spans
+    both past and future lags while always skipping the current bin (lag 0). The
+    two blocks (past, future) carry *separate* basis columns, so a filter built on
+    this basis can weight the past and the future independently even though the
+    bump shapes mirror each other.
+
+    Masking lag 0 keeps the self-prediction problem non-trivial: a neuron's
+    current bin is never used to predict itself.
+
+    Returns ``(B [2*n_lags, 2*n_basis] float32 tensor, lag_seconds [2*n_lags],
+    log_centers [n_basis])``. Rows are ordered ``[-n_lags..-1, +1..+n_lags]`` bins;
+    columns ``0..n_basis-1`` are the past block, ``n_basis..2*n_basis-1`` the future.
+    """
+    one_sided, mags, centers = make_log_raised_cosine_basis(
+        n_basis, n_lags, bin_width, c=c, include_zero_lag=False)  # (n_lags, n_basis)
+    B1 = one_sided.numpy()
+    N = n_lags
+    B = np.zeros((2 * N, 2 * n_basis), dtype=np.float32)
+    B[:N, :n_basis] = B1[::-1]    # past rows (lags -N..-1): magnitude N..1
+    B[N:, n_basis:] = B1          # future rows (lags +1..+N): magnitude 1..N
+    lag_seconds = np.concatenate([-mags[::-1], mags])
+    return torch.tensor(B, dtype=torch.float32), lag_seconds, centers
+
+
 def coupling_group_penalty(W):
     """Group-lasso over off-diagonal coupling filters: ``mean_{i!=j} ||l_{j,i,:}||_2``.
 
@@ -368,6 +397,7 @@ class GLM_Coupled(nn.Module):
         eta_j(t) = [W_spatial . phi(x_t) + mu_j]
                    + sum_b h_{j,b}  * (B_h * y_j)(t)             # spike history (own past)
                    + sum_{i!=j},b l_{j,i,b} * (B_l * y_i)(t)     # coupling (other neurons' past)
+                   + sum_b a_{j,b}  * (B_a * y_j)(t)             # acausal self (own past+future)
         rate_j(t) = activation( eta_j(t) )
 
     Spike-history uses STRICTLY PAST bins (lags ``1..n_lags``) — a neuron's
@@ -375,6 +405,12 @@ class GLM_Coupled(nn.Module):
     simultaneous bin) when ``coup_basis`` has ``n_lags + 1`` rows: using *other*
     neurons' current-bin spikes is legitimate because the diagonal (``i == j``)
     is masked out, so there is no self-leakage.
+
+    The acausal self-filter (``acausal_basis``) is like the spike-history filter
+    but looks BOTH backward and forward in time (lags ``-n_lags..-1`` and
+    ``+1..+n_lags``), with lag 0 always excluded so the neuron's current bin is
+    never used to predict itself. Past and future bumps carry independent weights
+    (see :func:`make_symmetric_raised_cosine_basis`).
 
     Joint (position, trajectory) conditioning
     -----------------------------------------
@@ -390,6 +426,9 @@ class GLM_Coupled(nn.Module):
         ``{session_name: n_neurons}``.
     hist_basis, coup_basis : torch.Tensor or None
         ``(n_lags, n_basis)`` temporal bases (see ``make_log_raised_cosine_basis``).
+    acausal_basis : torch.Tensor or None
+        ``(2*n_lags, n_basis_total)`` symmetric past+future self-filter basis with
+        lag 0 excluded (see ``make_symmetric_raised_cosine_basis``).
     n_lags : int
         Causal window length in bins (must match the basis row count).
     cluster_keys : dict or None
@@ -398,7 +437,8 @@ class GLM_Coupled(nn.Module):
     """
     def __init__(self, output_dim_dict, n_bases_per_dim=16, pos_range=(-3.0, 3.0),
                  width_to_spacing_ratio=4, activation='exp', bin_width=0.1,
-                 hist_basis=None, coup_basis=None, n_lags=None, cluster_keys=None):
+                 hist_basis=None, coup_basis=None, acausal_basis=None,
+                 n_lags=None, cluster_keys=None):
         super().__init__()
         centers = torch.linspace(pos_range[0], pos_range[1], n_bases_per_dim)
         spacing = (pos_range[1] - pos_range[0]) / (n_bases_per_dim - 1)
@@ -451,6 +491,12 @@ class GLM_Coupled(nn.Module):
             self.coup_weights = nn.ParameterDict({
                 s: nn.Parameter(torch.zeros(u, u, coup_basis.shape[1]))
                 for s, u in output_dim_dict.items()})
+        self.use_acausal = acausal_basis is not None
+        if self.use_acausal:
+            self.register_buffer('acausal_basis', acausal_basis)
+            self.acausal_weights = nn.ParameterDict({
+                s: nn.Parameter(torch.zeros(u, acausal_basis.shape[1]))
+                for s, u in output_dim_dict.items()})
 
     def _spatial_basis(self, xyz):
         centers = self.centers.to(xyz.device)
@@ -480,6 +526,23 @@ class GLM_Coupled(nn.Module):
             out[:, l:, :, l] = spike[:, :T - l, :]
         return out
 
+    def _acausal_stack(self, spike):
+        # spike (N,T,U) -> A (N,T,U,2*n_lags), rows ordered [-n_lags..-1, +1..+n_lags].
+        # Past block: A[...,k] = spike[t-(n_lags-k)]; future block: A[...,n_lags+k] =
+        # spike[t+(k+1)]. Lag 0 is never included. Out-of-range bins stay zero.
+        N, T, U = spike.shape
+        L = self.n_lags
+        A = spike.new_zeros(N, T, U, 2 * L)
+        for k in range(L):
+            m = L - k                       # past shift in {L..1}
+            if m < T:
+                A[:, m:, :, k] = spike[:, :T - m, :]
+        for k in range(L):
+            m = k + 1                       # future shift in {1..L}
+            if m < T:
+                A[:, :T - m, :, L + k] = spike[:, m:, :]
+        return A
+
     def _spatial_drive(self, session_name, design, cluster_idx):
         if not self.joint:
             return self.readouts[session_name](design)
@@ -503,23 +566,29 @@ class GLM_Coupled(nn.Module):
                 cluster_idx=None, **kwargs):
         design = self._make_design(x, mask)
         eta = self._spatial_drive(session_name, design, cluster_idx)
-        if self.use_hist or self.use_coup:
-            assert spike is not None, 'history/coupling GLM requires the spike train'
+        if self.use_hist or self.use_coup or self.use_acausal:
+            assert spike is not None, 'history/coupling/acausal GLM requires the spike train'
             sp = spike.float()
             if mask is not None:
                 sp = sp * mask.unsqueeze(-1)  # no leakage from padded bins
-            L_h = self.hist_basis.shape[0] if self.use_hist else 0
-            L_c = self.coup_basis.shape[0] if self.use_coup else 0
-            S = self._lagged_stack(sp, max(L_h + 1, L_c))  # (N,T,U,*); S[...,0]=current
-            if self.use_hist:
-                # strictly past: lags 1..L_h
-                hf = torch.einsum('ntul,lb->ntub', S[..., 1:1 + L_h], self.hist_basis)
-                eta = eta + (hf * self.hist_weights[session_name]).sum(-1)
-            if self.use_coup:
-                # lags 0..L_c-1 (includes the simultaneous bin; diagonal masked below)
-                cf = torch.einsum('ntul,lb->ntub', S[..., :L_c], self.coup_basis)
-                N, T, U, nc = cf.shape
-                W = self.coup_weights[session_name]
-                W = W * (1.0 - torch.eye(U, device=W.device)).unsqueeze(-1)  # drop i==j
-                eta = eta + cf.reshape(N, T, U * nc) @ W.reshape(U, U * nc).t()
+            if self.use_hist or self.use_coup:
+                L_h = self.hist_basis.shape[0] if self.use_hist else 0
+                L_c = self.coup_basis.shape[0] if self.use_coup else 0
+                S = self._lagged_stack(sp, max(L_h + 1, L_c))  # (N,T,U,*); S[...,0]=current
+                if self.use_hist:
+                    # strictly past: lags 1..L_h
+                    hf = torch.einsum('ntul,lb->ntub', S[..., 1:1 + L_h], self.hist_basis)
+                    eta = eta + (hf * self.hist_weights[session_name]).sum(-1)
+                if self.use_coup:
+                    # lags 0..L_c-1 (includes the simultaneous bin; diagonal masked below)
+                    cf = torch.einsum('ntul,lb->ntub', S[..., :L_c], self.coup_basis)
+                    N, T, U, nc = cf.shape
+                    W = self.coup_weights[session_name]
+                    W = W * (1.0 - torch.eye(U, device=W.device)).unsqueeze(-1)  # drop i==j
+                    eta = eta + cf.reshape(N, T, U * nc) @ W.reshape(U, U * nc).t()
+            if self.use_acausal:
+                # own past+future, lag 0 excluded by construction of the basis/stack
+                A = self._acausal_stack(sp)  # (N,T,U,2*n_lags)
+                af = torch.einsum('ntul,lb->ntub', A, self.acausal_basis)
+                eta = eta + (af * self.acausal_weights[session_name]).sum(-1)
         return self.final_activation(eta)
