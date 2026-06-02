@@ -2215,3 +2215,85 @@ class BatRateMapSim:
                 
         return shuffled_results
     
+    def get_shuffled_wass_baseline(self, ft_str, n_shuffles=20, num_of_bins=20):
+        """
+        Computes a shuffled baseline for Wasserstein distances by circularly shifting 
+        the spike trains before rate map generation. This preserves the exact
+        behavioral occupancy distributions,
+        but destroys the spatial relationship to neural tuning.
+        """
+        ft_mask = (self.flight_types == ft_str)
+        unique_clusters = np.unique(self.clusters[ft_mask])
+        
+        # Target types to evaluate side-by-side
+        spaces = ['physical', 'latent']
+        shuffled_results = {'physical': [], 'latent': []}
+        
+        for space in spaces:
+            coords = self.xyz if space == 'physical' else self.pca_3d
+            lims = self.loc_xyz_lim if space == 'physical' else self.loc_pca_lim
+            
+            # We will collect pairwise similarities across multiple random shuffles
+            shuffle_pairs = []
+            
+            for shuffle_idx in range(n_shuffles):
+                print(f'shuffle_idx: {shuffle_idx}')
+                maps_list = []
+                
+                for clu in unique_clusters:
+                    combined_mask = (self.flight_types == ft_str) & (self.clusters == clu)
+                    if np.sum(combined_mask) < 10:
+                        continue
+                    
+                    cluster_maps = np.zeros((num_of_bins - 1, num_of_bins - 1, num_of_bins - 1, self.n_neurons))
+                    
+                    for n in range(self.n_neurons):
+                        if np.sum(self.spikes[combined_mask, n]) == 0:
+                            cluster_maps[..., n] = np.nan
+                            continue
+                        
+                        # --- THE SHUFFLE ---
+                        # Circularly shift spikes by a random offset to break spatial correlation 
+                        # while keeping the temporal structure of the spikes and the exact occupancy intact.
+                        raw_spikes = self.spikes[combined_mask, n]
+                        shift_offset = np.random.randint(int(len(raw_spikes) * 0.2), int(len(raw_spikes) * 0.8))
+                        shuffled_spikes = np.roll(raw_spikes, shift_offset)
+                        
+                        # Generate rate map with intact occupancy but shuffled spikes
+                        _, _, r_map = generate_rate_map(
+                            loc=coords[combined_mask],
+                            unit_spike_count=shuffled_spikes,
+                            loc_lim=lims,
+                            loc_bin_width=None,
+                            num_of_bins=num_of_bins,
+                            dt=self.dt
+                        )
+                        cluster_maps[..., n] = r_map
+                        
+                    maps_list.append(cluster_maps)
+                
+                # Compute pairwise similarities for this shuffle iteration
+                if len(maps_list) > 1:
+                    # Re-using your exact Wasserstein distane logic
+                    grid_coords = np.array(np.meshgrid(np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), indexing='ij')).reshape(3, -1).T
+                    M_cost = ot.dist(grid_coords, grid_coords, metric='euclidean')
+                    def wasserstein_metric(m1, m2):
+                        if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+                            return np.nan
+                        v1, v2 = m1.flatten(), m2.flatten()
+                        if np.sum(v1) == 0 or np.sum(v2) == 0:
+                            return np.nan
+                        p1 = v1 / np.sum(v1)
+                        p2 = v2 / np.sum(v2)
+                        return ot.emd2(p1, p2, M_cost)
+                    
+                    # Compute average across pairs for this shuffle
+                    mean_scores = self._compute_pairwise_similarity(maps_list, wasserstein_metric)
+                    shuffle_pairs.append(mean_scores)
+                    
+            if len(shuffle_pairs) > 0:
+                # Average across shuffles to get a stable baseline per neuron
+                shuffled_results[space] = np.nanmean(np.array(shuffle_pairs), axis=0)
+                
+        return shuffled_results
+    
