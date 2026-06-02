@@ -183,6 +183,7 @@ def bat_decoder_trainer(
     early_stopping_patience: int | None = None,
     save_model: bool = False,
     model_name: str = "best_decoder_weights.pth",
+    trial=None,
 ):
     """Train `Bat_Transformer_Decoder` to predict z-scored position from spikes.
 
@@ -193,6 +194,10 @@ def bat_decoder_trainer(
 
     `valid_fn` should return a per-sample-or-per-dim score where LARGER is
     better (so MSE callers should negate). Defaults to negative-MSE per dim.
+
+    `trial`, when given, is an Optuna trial: the per-epoch `val_score` is
+    reported for pruning and `optuna.TrialPruned` is raised if the pruner
+    flags the trial (no extra dependency unless `trial` is passed).
     """
     model = model.to(device)
     if loss_fn is None:
@@ -266,6 +271,12 @@ def bat_decoder_trainer(
             else:
                 raise ValueError(f"unknown valid_stat={valid_stat}")
         val_scores.append(val_score)
+
+        if trial is not None:
+            import optuna
+            trial.report(val_score, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
 
         if val_score > best_score:
             best_score = val_score
@@ -670,3 +681,652 @@ class NaiveBayes_Continuity_Decoder(NaiveBayes_Decoder):
 
         inv_order = np.argsort(order)
         return decoded_s[inv_order], keep
+
+
+# ---------------------------------------------------------------------------
+# Correlation-aware decoder: MAP inversion of a fitted GLM_Coupled encoder
+# ---------------------------------------------------------------------------
+#
+# The Naive-Bayes decoders above treat neurons as conditionally independent
+# given position. `GLM_MAP_Decoder` instead inverts a *fixed, pre-trained*
+# `GLM_Coupled` (the "GLM + hist + coup" encoder from model_comparison.ipynb),
+# whose spike-history and cross-neuron coupling filters model the population's
+# noise correlations explicitly. Given a whole flight's spikes, it finds the
+# trajectory X = [x(1..T)] that maximizes the GLM's Poisson log-likelihood plus
+# a trajectory-smoothness prior (a MAP / Laplace estimate), by gradient descent
+# on the 3T-dimensional trajectory. Because each neuron's predicted rate at t
+# depends on *other* neurons' spikes (the coupling term, including the lag-0
+# simultaneous bin), the decoder uses co-firing structure that NB ignores.
+#
+# The GLM_Coupled encoder is treated as a black box accessed through its public
+# pieces: `_spatial_basis`, `_lagged_stack`, `readouts[session]`, the temporal
+# bases (`hist_basis`/`coup_basis`) and their weights. It returns exp(eta) =
+# expected spike COUNT per bin (trained with PoissonNLLLoss(log_input=False)),
+# so the Poisson likelihood uses Delta = 1 (the bin width is already folded into
+# the readout bias). Positions are decoded in the GLM's z-scored coordinates and
+# converted back to meters at the end.
+
+
+def glm_history_term(glm, session_name, spike):
+    """Spike-history + coupling contribution to eta (the X-independent part).
+
+    Mirrors the temporal-filter branch of ``GLM_Coupled.forward`` but excludes
+    the spatial drive and the readout bias (the bias is the per-neuron baseline
+    ``b_i`` and is supplied by :func:`glm_place_field_fn` instead, so it is not
+    double-counted).
+
+    Parameters
+    ----------
+    glm : GLM_Coupled
+        A fitted encoder with ``use_hist`` and/or ``use_coup`` enabled.
+    session_name : str
+        Session key into the per-session filter weights.
+    spike : torch.Tensor
+        ``(B, T, N)`` observed spike counts (``B`` flights, zero-padded). A
+        single flight is passed as ``(1, T, N)``.
+
+    Returns
+    -------
+    torch.Tensor
+        ``(B, T, N)`` constant-in-X contribution to the linear predictor.
+    """
+    sp = spike.float()
+    L_h = glm.hist_basis.shape[0] if glm.use_hist else 0
+    L_c = glm.coup_basis.shape[0] if glm.use_coup else 0
+    S = glm._lagged_stack(sp, max(L_h + 1, L_c))  # (B,T,N,*); S[...,0]=current
+    B, T, U = sp.shape
+    term = sp.new_zeros(B, T, U)
+    if glm.use_hist:
+        # strictly past: lags 1..L_h
+        hf = torch.einsum('ntul,lb->ntub', S[..., 1:1 + L_h], glm.hist_basis)
+        term = term + (hf * glm.hist_weights[session_name]).sum(-1)
+    if glm.use_coup:
+        # lags 0..L_c-1 (includes the simultaneous bin; diagonal masked below)
+        cf = torch.einsum('ntul,lb->ntub', S[..., :L_c], glm.coup_basis)
+        _, _, _, nc = cf.shape
+        W = glm.coup_weights[session_name]
+        W = W * (1.0 - torch.eye(U, device=W.device)).unsqueeze(-1)  # drop i==j
+        term = term + cf.reshape(B, T, U * nc) @ W.reshape(U, U * nc).t()
+    return term  # (B, T, N)
+
+
+def glm_place_field_fn(glm, session_name):
+    """Return a differentiable, shape-generic callable ``X_z -> f``.
+
+    ``f`` is the spatial drive ``readouts[session](phi(x))`` *including* the
+    readout bias (the per-neuron baseline ``b_i``). ``X_z`` must be in the GLM's
+    z-scored position coordinates (``pos_range``). The callable preserves leading
+    dims, so it works for one flight ``(T,3) -> (T,N)``, a padded batch
+    ``(B,T,3) -> (B,T,N)``, and per-element under ``torch.func.vmap``.
+    """
+    readout = glm.readouts[session_name]
+
+    def place_field(X_z):
+        return readout(glm._spatial_basis(X_z))
+
+    return place_field
+
+
+def _make_neg_log_posterior(y, history_term, place_field_fn, sigma_a):
+    """Build the negated log-posterior closure for one flight.
+
+    Objective (negated for minimization)::
+
+        eta(t)    = history_term(t) + f(x(t))            # (T, N)
+        log_lik   = sum_t,i [ y_i(t) eta_i(t) - exp(eta_i(t)) ]   # Delta = 1
+        d2(t)     = x(t+1) - 2 x(t) + x(t-1)             # acceleration
+        log_prior = -||d2||^2 / (2 sigma_a^2)
+    """
+    history_term = history_term.detach()  # constant in X; no graph to encoder params
+    T = y.shape[0]
+
+    def neg_log_posterior(X):
+        eta = history_term + place_field_fn(X)
+        log_lik = (y * eta - torch.exp(eta)).sum()
+        if T >= 3:
+            d2 = X[2:] - 2.0 * X[1:-1] + X[:-2]
+            log_prior = -(d2 ** 2).sum() / (2.0 * sigma_a ** 2)
+        else:
+            log_prior = X.new_zeros(())
+        return -(log_lik + log_prior)
+
+    return neg_log_posterior
+
+
+def _lbfgs_basin(neg_log_posterior, X_init, lbfgs_iters=25):
+    """Cheap L-BFGS descent to a local basin. Returns ``(X (T,3), nlp)``.
+
+    ``lbfgs_iters`` is the total L-BFGS iteration budget (a single ``step`` with
+    ``max_iter``). From a warm start this is plenty; the Newton polish finishes.
+    """
+    X = X_init.clone().detach().requires_grad_(True)
+    opt = torch.optim.LBFGS([X], lr=0.1, max_iter=lbfgs_iters,
+                            line_search_fn='strong_wolfe',
+                            tolerance_grad=1e-6, tolerance_change=1e-9)
+
+    def closure():
+        opt.zero_grad()
+        loss = neg_log_posterior(X)
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    with torch.no_grad():
+        nlp = float(neg_log_posterior(X).item())
+    return X.detach(), nlp
+
+
+def _newton_polish(neg_log_posterior, X_init, newton_iters=3, damping=1e-6):
+    """Newton polish on the full ``3T x 3T`` Hessian + Laplace covariances.
+
+    Returns ``(X_hat (T,3), marginal_cov (T,3,3), nlp)``. The marginal
+    covariances are the diagonal ``3x3`` blocks of the inverted Hessian.
+    """
+    T = X_init.shape[0]
+    X = X_init.clone().detach().requires_grad_(True)
+    eye = torch.eye(T * 3, device=X.device, dtype=X.dtype)
+    with torch.no_grad():
+        nlp_cur = float(neg_log_posterior(X).item())
+    for _ in range(newton_iters):
+        loss = neg_log_posterior(X)
+        g = torch.autograd.grad(loss, X, create_graph=False)[0].reshape(-1)
+        H = torch.autograd.functional.hessian(
+            neg_log_posterior, X, vectorize=True).reshape(T * 3, T * 3)
+        H = H + damping * eye
+        try:
+            delta = torch.linalg.solve(H, g).reshape(T, 3)
+        except RuntimeError:
+            break
+        # Backtracking line search: monotone decrease guards against overshoot.
+        alpha = 1.0
+        accepted = False
+        for _bt in range(8):
+            with torch.no_grad():
+                Xn = X - alpha * delta
+                nlpn = float(neg_log_posterior(Xn).item())
+            if nlpn < nlp_cur:
+                with torch.no_grad():
+                    X.copy_(Xn)
+                nlp_cur = nlpn
+                accepted = True
+                break
+            alpha *= 0.5
+        if not accepted:
+            break
+
+    with torch.no_grad():
+        nlp = float(neg_log_posterior(X).item())
+    H = torch.autograd.functional.hessian(
+        neg_log_posterior, X, vectorize=True).reshape(T * 3, T * 3) + damping * eye
+    try:
+        Sigma = torch.linalg.inv(H).reshape(T, 3, T, 3)
+        marginal_cov = torch.stack([Sigma[t, :, t, :] for t in range(T)])
+    except RuntimeError:
+        marginal_cov = torch.full((T, 3, 3), float('nan'),
+                                  device=X.device, dtype=X.dtype)
+    return X.detach(), marginal_cov, nlp
+
+
+def decode_flight(y, history_term, place_field_fn, sigma_a, X_init,
+                  lbfgs_iters=20, newton_iters=3, damping=1e-6):
+    """MAP-decode one flight from a single warm start (L-BFGS then Newton).
+
+    Returns ``(X_hat (T,3), marginal_cov (T,3,3), neg_log_post)``. For ``T < 3``
+    the acceleration prior is undefined, so the warm start is returned with NaN
+    covariance.
+    """
+    T = y.shape[0]
+    nlp_fn = _make_neg_log_posterior(y, history_term, place_field_fn, sigma_a)
+    if T < 3:
+        X_hat = X_init.detach().clone()
+        cov = torch.full((T, 3, 3), float('nan'),
+                         device=X_init.device, dtype=X_init.dtype)
+        return X_hat, cov, float(nlp_fn(X_hat).item())
+    X_basin, _ = _lbfgs_basin(nlp_fn, X_init, lbfgs_iters=lbfgs_iters)
+    return _newton_polish(nlp_fn, X_basin, newton_iters=newton_iters,
+                          damping=damping)
+
+
+def decode_with_restarts(y, history_term, place_field_fn, sigma_a, X_inits,
+                         lbfgs_iters=20, newton_iters=3):
+    """Multi-restart MAP decode: cheap L-BFGS on all inits, polish the winner.
+
+    Each warm start in ``X_inits`` is taken to its basin with L-BFGS only; the
+    init with the lowest negative log posterior is then Newton-polished once
+    (the expensive full-Hessian step). This keeps the Hessian count independent
+    of the number of restarts. Returns
+    ``(X_hat, marginal_cov, neg_log_post, spread)`` where ``spread`` is the mean
+    per-timestep L2 disagreement (z-scored units) between the restart basins — a
+    cheap ambiguity diagnostic.
+    """
+    T = y.shape[0]
+    nlp_fn = _make_neg_log_posterior(y, history_term, place_field_fn, sigma_a)
+
+    if T < 3:
+        X_hat = X_inits[0].detach().clone()
+        cov = torch.full((T, 3, 3), float('nan'),
+                         device=X_hat.device, dtype=X_hat.dtype)
+        return X_hat, cov, float(nlp_fn(X_hat).item()), 0.0
+
+    basins = [_lbfgs_basin(nlp_fn, Xi, lbfgs_iters=lbfgs_iters)
+              for Xi in X_inits]
+    best_idx = min(range(len(basins)), key=lambda i: basins[i][1])
+    X_hat, marginal_cov, nlp = _newton_polish(
+        nlp_fn, basins[best_idx][0], newton_iters=newton_iters)
+
+    if len(basins) > 1:
+        stacked = torch.stack([b[0] for b in basins])            # (R, T, 3)
+        spread = float((stacked - X_hat.unsqueeze(0))
+                       .norm(dim=-1).mean().item())
+    else:
+        spread = 0.0
+    return X_hat, marginal_cov, nlp, spread
+
+
+def _second_difference_matrix(T, device, dtype):
+    """``(T-2, T)`` discrete 2nd-difference operator ``D2`` (stencil [1,-2,1])."""
+    D2 = torch.zeros(max(T - 2, 0), T, device=device, dtype=dtype)
+    for r in range(T - 2):
+        D2[r, r] = 1.0
+        D2[r, r + 1] = -2.0
+        D2[r, r + 2] = 1.0
+    return D2
+
+
+def _prior_hessian(mask, sigma_a):
+    """Constant acceleration-prior Hessian, ``(B, 3T, 3T)``.
+
+    The prior ``(1/2 sigma_a^2) * sum ||D2 x||^2`` is quadratic, so its Hessian
+    is ``(1/sigma_a^2) (D2^T diag(pm) D2) ⊗ I_3`` — independent of X. ``pm`` keeps
+    only interior windows whose three timesteps are all valid.
+    """
+    B, T = mask.shape
+    dev, dtype = mask.device, mask.dtype
+    D2 = _second_difference_matrix(T, dev, dtype)               # (T-2, T)
+    pm = mask[:, 2:] * mask[:, 1:-1] * mask[:, :-2]             # (B, T-2)
+    # Hs[b] = (1/sigma_a^2) D2^T diag(pm[b]) D2  -> (B, T, T)
+    Hs = torch.einsum('rt,br,rs->bts', D2, pm, D2) / (sigma_a ** 2)
+    Hp = torch.zeros(B, 3 * T, 3 * T, device=dev, dtype=dtype)
+    idx = torch.arange(T, device=dev)
+    for d in range(3):
+        ii = idx * 3 + d
+        Hp[:, ii.unsqueeze(1), ii.unsqueeze(0)] = Hs
+    return Hp
+
+
+def _analytic_hessian_and_grad(glm, session_name, X, history_term, y, mask,
+                               Hp, eye, pad_diag, damping):
+    """Analytic negative-log-posterior gradient + Hessian at ``X``.
+
+    Exploits the GLM's structure so no dense reverse-mode Hessian is built:
+
+    * The likelihood Hessian is **block-diagonal in time** — one ``3x3`` block per
+      timestep — because ``x(t)`` only enters that bin's rates.
+    * The place field's position derivatives ``grad_x f`` (``3``) and
+      ``grad^2_x f`` (``3x3``) come from **forward-mode** ``jacfwd`` of the 3->K^3
+      spatial basis (cheap: input is 3-D), not reverse-mode through K^3 outputs.
+    * The prior Hessian ``Hp`` is constant (quadratic prior), passed in.
+
+    Returns ``(g (B,3T), H (B,3T,3T))`` for the *negative* log posterior.
+    """
+    B, T, _ = X.shape
+    readout = glm.readouts[session_name]
+    W = readout.weight                                          # (N, K^3)
+
+    basis_pt = lambda x3: glm._spatial_basis(x3)               # (3,) -> (K^3,)
+    jac_fn = torch.func.jacfwd(basis_pt)                       # (K^3, 3)
+    hes_fn = torch.func.jacfwd(torch.func.jacfwd(basis_pt))    # (K^3, 3, 3)
+    Xf = X.reshape(B * T, 3)
+    J = torch.func.vmap(jac_fn)(Xf).reshape(B, T, -1, 3)       # (B,T,K^3,3)
+    Hbz = torch.func.vmap(hes_fn)(Xf).reshape(B, T, -1, 3, 3)  # (B,T,K^3,3,3)
+
+    eta = history_term + readout(glm._spatial_basis(X))        # (B,T,N)
+    lam = torch.exp(eta)
+    gf = torch.einsum('nk,btkd->btnd', W, J)                   # (B,T,N,3)
+    Hf = torch.einsum('nk,btkde->btnde', W, Hbz)              # (B,T,N,3,3)
+
+    m = mask.unsqueeze(-1)                                     # (B,T,1)
+    resid = (lam - y) * m                                      # (B,T,N), masked
+    # Per-timestep likelihood Hessian block (of the negative log-lik):
+    #   (lam_i - y_i) Hf_i  +  lam_i gf_i gf_i^T
+    Hblk = (torch.einsum('btn,btnde->btde', resid, Hf)
+            + torch.einsum('btn,btnd,btne->btde', lam * mask.unsqueeze(-1),
+                           gf, gf))                            # (B,T,3,3)
+    # Likelihood gradient (negative log-lik): sum_i (lam_i - y_i) gf_i
+    g_lik = torch.einsum('btn,btnd->btd', resid, gf).reshape(B, 3 * T)
+
+    # Assemble block-diagonal likelihood Hessian into (B,3T,3T).
+    H = Hp.clone()
+    for t in range(T):
+        H[:, 3 * t:3 * t + 3, 3 * t:3 * t + 3] += Hblk[:, t]
+    H = H + damping * eye + torch.diag_embed(pad_diag)
+    # Prior gradient = Hp @ X (quadratic, zero linear term).
+    g = g_lik + torch.bmm(Hp, X.reshape(B, 3 * T, 1)).squeeze(-1)
+    return g, H
+
+
+def decode_session_batch(glm, session_name, y, history_term, mask, sigma_a,
+                         X_inits, lbfgs_iters=20, newton_iters=3, damping=1e-6):
+    """Batched MAP decode of all flights in a session (shared neuron set).
+
+    All tensors are zero-padded to a common ``Tmax`` with a validity ``mask``.
+    Phase 1 runs ONE L-BFGS over the whole ``(restart x flight)`` batch on the
+    masked summed objective — flights are independent in the objective; only the
+    L-BFGS line-search step is shared, which the warm starts and the Newton polish
+    absorb. Phase 2 Newton-polishes the per-flight winners using the **analytic
+    block-diagonal likelihood Hessian** (see :func:`_analytic_hessian_and_grad`)
+    plus a single batched solve, so the Hessian never materializes the dense
+    reverse-mode autograd graph through the K^3 design — the only step that does
+    not batch cheaply otherwise.
+
+    Parameters
+    ----------
+    glm : GLM_Coupled
+        The fixed encoder (provides the readout weight + spatial basis).
+    session_name : str
+        Session key for the readout.
+    y, history_term : torch.Tensor
+        ``(B, Tmax, N)`` spike counts and precomputed history+coupling drive.
+    mask : torch.Tensor
+        ``(B, Tmax)`` 1.0 on valid timesteps, 0.0 on padding.
+    sigma_a : float
+        Acceleration-noise scale (z-scored units).
+    X_inits : list of torch.Tensor
+        Each ``(B, Tmax, 3)`` z-scored warm start (one per restart).
+
+    Returns
+    -------
+    X_hat : (B, Tmax, 3) ; marginal_cov : (B, Tmax, 3, 3) ; nlp : (B,) ;
+    spread : (B,)  — all on ``y.device``. Padded entries are inert (X stays 0).
+    """
+    history_term = history_term.detach()
+    B, Tmax, N = y.shape
+    R = len(X_inits)
+    dev, dtype = y.device, y.dtype
+    place_field_fn = glm_place_field_fn(glm, session_name)
+
+    def batched_nlp(X, yy, hh, mm):
+        """Per-flight negative log posterior (masked). X: (M,Tmax,3) -> (M,)."""
+        eta = hh + place_field_fn(X)
+        ll = ((yy * eta - torch.exp(eta)).sum(-1) * mm).sum(-1)
+        d2 = X[:, 2:] - 2.0 * X[:, 1:-1] + X[:, :-2]
+        pm = mm[:, 2:] * mm[:, 1:-1] * mm[:, :-2]
+        lp = -((d2 ** 2).sum(-1) * pm).sum(-1) / (2.0 * sigma_a ** 2)
+        return -(ll + lp)
+
+    # ---- Phase 1: batched L-BFGS over R*B flights from the restart inits.
+    y_b = y.repeat(R, 1, 1)
+    hist_b = history_term.repeat(R, 1, 1)
+    mask_b = mask.repeat(R, 1)
+    Xbig = torch.cat(list(X_inits), dim=0).clone().detach()      # (R*B,Tmax,3)
+    Xbig = Xbig * mask_b.unsqueeze(-1)   # zero padded positions (kept finite)
+    Xbig.requires_grad_(True)
+
+    opt = torch.optim.LBFGS([Xbig], lr=0.1, max_iter=lbfgs_iters,
+                            line_search_fn='strong_wolfe',
+                            tolerance_grad=1e-6, tolerance_change=1e-9)
+
+    def closure():
+        opt.zero_grad()
+        loss = batched_nlp(Xbig, y_b, hist_b, mask_b).sum()
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+
+    with torch.no_grad():
+        nlp_all = batched_nlp(Xbig, y_b, hist_b, mask_b).reshape(R, B)
+        Xbasins = Xbig.detach().reshape(R, B, Tmax, 3)
+    best_r = nlp_all.argmin(dim=0)                               # (B,)
+    bidx = torch.arange(B, device=dev)
+    X = Xbasins[best_r, bidx].clone()                           # (B,Tmax,3)
+
+    if R > 1:
+        diff = (Xbasins - X.unsqueeze(0)).norm(dim=-1)          # (R,B,Tmax)
+        spread = ((diff * mask.unsqueeze(0)).sum(-1)
+                  / mask.sum(-1).clamp(min=1)).mean(0)          # (B,)
+    else:
+        spread = torch.zeros(B, device=dev, dtype=dtype)
+
+    # ---- Phase 2: Newton polish with the analytic block-diagonal Hessian.
+    eye = torch.eye(Tmax * 3, device=dev, dtype=dtype)
+    # Pin padded timestep blocks (mask=0) to a unit diagonal so the batched solve
+    # stays well-conditioned and padded updates are exactly zero.
+    pad_diag = (1.0 - mask).repeat_interleave(3, dim=1)         # (B, 3Tmax)
+    Hp = _prior_hessian(mask, sigma_a)                          # constant (B,3T,3T)
+
+    @torch.no_grad()
+    def grad_hess(Xc):
+        return _analytic_hessian_and_grad(
+            glm, session_name, Xc, history_term, y, mask, Hp, eye, pad_diag,
+            damping)
+
+    # Newton with a per-flight backtracking line search: guarantees a monotone
+    # decrease of each flight's objective, so an overshooting full step (e.g.
+    # near a sharp place-field ridge) can never blow the trajectory up.
+    with torch.no_grad():
+        nlp_cur = batched_nlp(X, y, history_term, mask)         # (B,)
+    for _ in range(newton_iters):
+        g, H = grad_hess(X)
+        try:
+            delta = torch.linalg.solve(H, g.unsqueeze(-1)).squeeze(-1)
+        except RuntimeError:
+            break
+        delta = delta.reshape(B, Tmax, 3)
+        alpha = torch.ones(B, device=dev, dtype=dtype)
+        X_best, nlp_best = X.clone(), nlp_cur.clone()
+        for _bt in range(8):
+            with torch.no_grad():
+                Xn = X - alpha[:, None, None] * delta
+                nlpn = batched_nlp(Xn, y, history_term, mask)
+            better = nlpn < nlp_best
+            X_best = torch.where(better[:, None, None], Xn, X_best)
+            nlp_best = torch.where(better, nlpn, nlp_best)
+            if (nlp_best < nlp_cur).all():
+                break
+            alpha = torch.where(nlpn < nlp_cur, alpha, alpha * 0.5)
+        X, nlp_cur = X_best, nlp_best
+
+    # ---- Laplace marginal covariances + final per-flight nlp.
+    with torch.no_grad():
+        nlp = batched_nlp(X, y, history_term, mask)             # (B,)
+        _, H = grad_hess(X)
+    try:
+        Sigma = torch.linalg.inv(H).reshape(B, Tmax, 3, Tmax, 3)
+        marginal_cov = torch.stack(
+            [Sigma[:, t, :, t, :] for t in range(Tmax)], dim=1)  # (B,Tmax,3,3)
+    except RuntimeError:
+        marginal_cov = torch.full((B, Tmax, 3, 3), float('nan'),
+                                  device=dev, dtype=dtype)
+    return X.detach(), marginal_cov, nlp, spread
+
+
+class GLM_MAP_Decoder:
+    """Correlation-aware position decoder: MAP inversion of a ``GLM_Coupled``.
+
+    The encoder is fixed (loaded from a checkpoint); ``fit`` only estimates the
+    acceleration-prior scale ``sigma_a`` from training trajectories. ``predict``
+    MAP-decodes each flight from a warm start (typically the NB+continuity
+    decoder's output) with a few restarts and returns positions in meters.
+
+    Parameters
+    ----------
+    glm : GLM_Coupled
+        Fitted encoder, already on ``device`` and in eval mode. Must include the
+        ``session_name`` readout and the temporal filters.
+    session_name : str
+        Session key for the per-session readout / filter weights.
+    behavior_mean, behavior_std : array-like
+        Behavior z-score stats; the first three entries are the x/y/z position
+        mean/std used to map between meters and the GLM's z-scored coordinates.
+    n_restarts : int
+        Number of warm starts per flight (the first is the bare warm start; the
+        rest are jittered).
+    restart_jitter : float
+        SD of Gaussian jitter added to the warm start (z-scored units).
+    """
+
+    def __init__(self, glm, session_name, behavior_mean, behavior_std,
+                 n_restarts=4, restart_jitter=0.05, device='cpu',
+                 lbfgs_iters=25, newton_iters=3):
+        self.glm = glm
+        self.session_name = session_name
+        self.device = device
+        self.n_restarts = n_restarts
+        self.restart_jitter = restart_jitter
+        self.lbfgs_iters = lbfgs_iters
+        self.newton_iters = newton_iters
+        # The encoder is fixed: freeze its parameters so the MAP optimizer only
+        # differentiates w.r.t. the trajectory X (and so the precomputed
+        # history term carries no stale graph back to encoder params).
+        for p in glm.parameters():
+            p.requires_grad_(False)
+        bm = np.asarray(behavior_mean).squeeze()
+        bs = np.asarray(behavior_std).squeeze()
+        self.pos_mean = torch.as_tensor(
+            bm[:3], dtype=torch.float32, device=device)
+        self.pos_std = torch.as_tensor(
+            bs[:3], dtype=torch.float32, device=device)
+        self.place_field_fn = glm_place_field_fn(glm, session_name)
+        self.sigma_a = None
+
+    def _to_z(self, pos_m):
+        """meters (..., 3) -> z-scored (torch, on device)."""
+        p = torch.as_tensor(pos_m, dtype=torch.float32, device=self.device)
+        return (p - self.pos_mean) / self.pos_std
+
+    def _to_meters(self, X_z):
+        return (X_z * self.pos_std + self.pos_mean)
+
+    def fit(self, spikes, positions, flight_id, t_idx, dt=None):
+        """Estimate ``sigma_a`` from training-flight 2nd-differences (z-scored).
+
+        ``dt`` is accepted for interface symmetry with the NB decoders but is
+        unused — the discrete acceleration scale absorbs the bin width.
+        """
+        fid = np.asarray(flight_id).astype(int)
+        tid = np.asarray(t_idx).astype(int)
+        pos_z = ((np.asarray(positions, dtype=np.float64)
+                  - self.pos_mean.cpu().numpy())
+                 / self.pos_std.cpu().numpy())
+        sq_sum = 0.0
+        n_interior = 0
+        for f in np.unique(fid):
+            sel = np.where(fid == f)[0]
+            sel = sel[np.argsort(tid[sel])]
+            if sel.size < 3:
+                continue
+            p = pos_z[sel]
+            d2 = p[2:] - 2.0 * p[1:-1] + p[:-2]          # (T-2, 3)
+            sq_sum += float((d2 ** 2).sum())
+            n_interior += d2.shape[0]
+        if n_interior == 0:
+            raise ValueError("No flight with >= 3 timesteps to fit sigma_a.")
+        # sigma_a^2 = (1 / (3 * n_interior)) * sum ||d2||^2  (3 spatial dims)
+        self.sigma_a = float(np.sqrt(sq_sum / (3.0 * n_interior)))
+        return self
+
+    def predict(self, spikes, flight_id, t_idx, warm_start,
+                batch_by_session=True, batch_size=32):
+        """MAP-decode every flight; return positions in meters (row-aligned).
+
+        Parameters
+        ----------
+        spikes : np.ndarray
+            ``(Nrows, N)`` spike counts.
+        flight_id, t_idx : np.ndarray
+            ``(Nrows,)`` flight id and within-flight bin index (row-aligned).
+        warm_start : np.ndarray
+            ``(Nrows, 3)`` warm-start positions in meters (e.g. NB+continuity).
+        batch_by_session : bool
+            If True (default), decode flights in padded batches of ``batch_size``
+            (one L-BFGS + one vmap-Hessian Newton pass per chunk) instead of one
+            flight at a time — much faster on GPU, where the per-flight loop
+            leaves the device underutilized. The two paths give the same
+            objective; the batched L-BFGS shares a line-search step across the
+            chunk (see :func:`decode_session_batch`).
+        batch_size : int
+            Flights per padded chunk. Lower it if the vmap-Hessian intermediate
+            (~``chunk x 3Tmax x T x N``) runs out of memory on a big session.
+
+        Returns
+        -------
+        positions_m : np.ndarray
+            ``(Nrows, 3)`` decoded positions in meters.
+        info : dict
+            ``marginal_cov`` (dict flight_id -> (T,3,3) np.ndarray, z-scored),
+            ``spread`` (dict flight_id -> float), ``sigma_a``.
+        """
+        if self.sigma_a is None:
+            raise RuntimeError("Call fit() before predict().")
+        fid = np.asarray(flight_id).astype(int)
+        tid = np.asarray(t_idx).astype(int)
+        decoded_m = np.zeros((spikes.shape[0], 3), dtype=np.float64)
+        info = {'marginal_cov': {}, 'spread': {}, 'sigma_a': self.sigma_a}
+        # Per-flight row order (sorted by t_idx), reused by both paths.
+        order = {int(f): np.where(fid == f)[0][np.argsort(tid[fid == f])]
+                 for f in np.unique(fid)}
+
+        if not batch_by_session:
+            for f, rows in order.items():
+                y = torch.as_tensor(spikes[rows], dtype=torch.float32,
+                                    device=self.device)          # (T, N)
+                history_term = glm_history_term(
+                    self.glm, self.session_name, y.unsqueeze(0))[0]  # (T, N)
+                X0 = self._to_z(warm_start[rows])                # (T, 3) z-scored
+                X_inits = [X0] + [
+                    X0 + self.restart_jitter * torch.randn_like(X0)
+                    for _ in range(self.n_restarts - 1)]
+                X_hat, cov, _, spread = decode_with_restarts(
+                    y, history_term, self.place_field_fn, self.sigma_a, X_inits,
+                    lbfgs_iters=self.lbfgs_iters, newton_iters=self.newton_iters)
+                decoded_m[rows] = self._to_meters(X_hat).cpu().numpy()
+                info['marginal_cov'][int(f)] = cov.cpu().numpy()
+                info['spread'][int(f)] = spread
+            return decoded_m, info
+
+        # ---- Batched-by-session path: pad flights into chunks.
+        flights = list(order.keys())
+        for c0 in range(0, len(flights), batch_size):
+            chunk = flights[c0:c0 + batch_size]
+            self._decode_chunk(chunk, order, spikes, warm_start,
+                               decoded_m, info)
+        return decoded_m, info
+
+    def _decode_chunk(self, chunk, order, spikes, warm_start, decoded_m, info):
+        """Decode one padded batch of flights and scatter into ``decoded_m``."""
+        lengths = [len(order[f]) for f in chunk]
+        Tmax = max(lengths)
+        B, N = len(chunk), spikes.shape[1]
+        dev = self.device
+        y = torch.zeros(B, Tmax, N, device=dev)
+        mask = torch.zeros(B, Tmax, device=dev)
+        X0 = torch.zeros(B, Tmax, 3, device=dev)
+        for bi, f in enumerate(chunk):
+            rows, T = order[f], lengths[bi]
+            y[bi, :T] = torch.as_tensor(spikes[rows], dtype=torch.float32,
+                                        device=dev)
+            mask[bi, :T] = 1.0
+            X0[bi, :T] = self._to_z(warm_start[rows])
+        history_term = glm_history_term(
+            self.glm, self.session_name, y)                 # (B, Tmax, N)
+        X_inits = [X0] + [
+            X0 + self.restart_jitter * torch.randn_like(X0) * mask.unsqueeze(-1)
+            for _ in range(self.n_restarts - 1)]
+
+        X_hat, cov, _, spread = decode_session_batch(
+            self.glm, self.session_name, y, history_term, mask, self.sigma_a,
+            X_inits, lbfgs_iters=self.lbfgs_iters, newton_iters=self.newton_iters)
+        X_hat_m = self._to_meters(X_hat).cpu().numpy()
+        cov_np, spread_np = cov.cpu().numpy(), spread.cpu().numpy()
+        for bi, f in enumerate(chunk):
+            rows, T = order[f], lengths[bi]
+            if T < 3:
+                # No acceleration prior; mirror the per-flight fallback by
+                # keeping the warm start with undefined covariance.
+                decoded_m[rows] = warm_start[rows]
+                info['marginal_cov'][f] = np.full((T, 3, 3), np.nan)
+            else:
+                decoded_m[rows] = X_hat_m[bi, :T]
+                info['marginal_cov'][f] = cov_np[bi, :T]
+            info['spread'][f] = float(spread_np[bi])

@@ -9,7 +9,7 @@ sessions (e.g., ``investigate_similar_trajectories``) still pass an explicit
 DEFAULT_PARENT_FOLDER = '/mnt/s5/Adam/Angelo/NP_datasets/'
 
 DEFAULT_SESSION_NAMES = [
-    'Dataset_3_14543_240419',
+    # 'Dataset_3_14543_240419',  # excluded — canonical split matches decode-position-comparison
     'Dataset_3_14543_240420',
     'Dataset_3_14543_240421',
     'Dataset_3_29959_240402',
@@ -31,7 +31,7 @@ DEFAULT_SESSION_NAMES = [
 
 
 def make_data_config(session_names=None, parent_folder=DEFAULT_PARENT_FOLDER,
-                     max_acceleration=40):
+                     max_acceleration=50):
     """Return the standard ``data_config`` dict for ``bat_data_loader``."""
     if session_names is None:
         session_names = list(DEFAULT_SESSION_NAMES)
