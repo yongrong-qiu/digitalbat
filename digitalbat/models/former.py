@@ -71,12 +71,23 @@ class Bat_Transformer(nn.Module):
         low_rank_r: int = 4,
         final_activation: nn.Module = nn.Identity(),
         use_attention: bool = True, # if False, replace transformer blocks with per-timestep FFN blocks (ablate temporal attention)
+        # environment-keyed trajectory projection: maps each session_name -> a
+        # "room"/environment label.  Sessions sharing a room share one embed_traj
+        # Linear, so the same (per-session normalised) position is projected
+        # differently per environment (remapping handled in the trajectory
+        # encoder).  None (default) keeps a single shared embed_traj — fully
+        # backward compatible with existing checkpoints.
+        session_to_room: dict = None,
     ):
         super().__init__()
 
         self.use_place_as_input = use_place_as_input
         self.use_trajectory_as_input = use_trajectory_as_input
         self.use_attention = use_attention
+        self.session_to_room = session_to_room
+        if session_to_room is not None:
+            missing = set(output_dim_dict) - set(session_to_room)
+            assert not missing, f'session_to_room missing entries for sessions: {sorted(missing)}'
         assert (self.use_place_as_input or self.use_trajectory_as_input), 'Use at least one input (place or trajectory)!'
         
         if self.use_place_as_input:
@@ -115,7 +126,14 @@ class Bat_Transformer(nn.Module):
                 )
 
         if self.use_trajectory_as_input:
-            self.embed_traj = nn.Linear(input_dim, latent_dim) # trajectory embedding
+            if session_to_room is not None:
+                # one trajectory projection per unique room/environment
+                rooms = sorted(set(session_to_room.values()))
+                self.embed_traj = nn.ModuleDict({
+                    room: nn.Linear(input_dim, latent_dim) for room in rooms
+                })
+            else:
+                self.embed_traj = nn.Linear(input_dim, latent_dim) # trajectory embedding
             self.embed_traj_dropout = nn.Dropout(0.1)
             # transformer or per-timestep FFN ablation
             if self.use_attention:
@@ -183,9 +201,11 @@ class Bat_Transformer(nn.Module):
 
         # trajectory
         if self.use_trajectory_as_input:
-            # embedding
+            # embedding (environment-keyed projection when session_to_room is set)
             x_traj_input = x.clone()
-            x_traj_embed = self.embed_traj_dropout(self.embed_traj(x_traj_input))
+            embed_traj = (self.embed_traj[self.session_to_room[session_name]]
+                          if self.session_to_room is not None else self.embed_traj)
+            x_traj_embed = self.embed_traj_dropout(embed_traj(x_traj_input))
             if not self.use_attention:
                 assert not return_attn_weights, 'return_attn_weights requires use_attention=True'
                 for layer in self.layers:

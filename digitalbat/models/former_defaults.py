@@ -17,8 +17,13 @@ DEFAULT_LR = 0.01
 DEFAULT_WEIGHT_DECAY = 0.01
 
 
-def make_model_config(behavior_dim, unit_num_dict, meta_info_dict):
-    """Return the standard ``model_config`` dict for ``Bat_Transformer``."""
+def make_model_config(behavior_dim, unit_num_dict, meta_info_dict, session_to_room=None):
+    """Return the standard ``model_config`` dict for ``Bat_Transformer``.
+
+    Pass ``session_to_room`` (``{session_name: room_label}``) to give each
+    environment its own trajectory projection (``embed_traj``); ``None`` (default)
+    keeps the single shared projection.
+    """
     return dict(
         input_dim=behavior_dim,
         output_dim_dict=unit_num_dict,
@@ -32,6 +37,7 @@ def make_model_config(behavior_dim, unit_num_dict, meta_info_dict):
         num_layers=1,
         dropout_prob=0.3,
         final_activation=ELU1(),
+        session_to_room=session_to_room,
     )
 
 
