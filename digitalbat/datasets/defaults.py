@@ -9,7 +9,7 @@ sessions (e.g., ``investigate_similar_trajectories``) still pass an explicit
 DEFAULT_PARENT_FOLDER = '/mnt/s5/Adam/Angelo/NP_datasets/'
 
 DEFAULT_SESSION_NAMES = [
-    # 'Dataset_3_14543_240419',  # excluded — canonical split matches decode-position-comparison
+    'Dataset_3_14543_240419',
     'Dataset_3_14543_240420',
     'Dataset_3_14543_240421',
     'Dataset_3_29959_240402',
@@ -28,6 +28,31 @@ DEFAULT_SESSION_NAMES = [
     'Dataset_3_00000_240405',
     'Dataset_3_29959_240405',
 ]
+
+# Krishna bat-11719 sessions with ciholas behaviour.  Three days carry usable
+# recordings; we keep:
+#   250812 -> solo_morning -> fs -> social_evening -> solo_evening  (4 envs, shared sort)
+#   250813 -> solo_morning                                          (1 env; > 10 min recording)
+#   250814 -> solo_morning, fs_s2                                   (2 envs, shared sort)
+# Within each multi-env day the units share one concat sort (identical
+# cluster_ids), so cross-environment comparisons stay strictly within a day.
+# 250813 contributes a single (solo) environment, so it adds a readout head /
+# per-session row but no within-day cross-environment pair.
+KRISHNA_SESSION_NAMES = [
+    'Dataset_Krishna_11719_250812_solo_morning',
+    'Dataset_Krishna_11719_250812_fs',
+    'Dataset_Krishna_11719_250812_social_evening',
+    'Dataset_Krishna_11719_250812_solo_evening',
+    'Dataset_Krishna_11719_250813_solo_morning',
+    'Dataset_Krishna_11719_250814_solo_morning',
+    'Dataset_Krishna_11719_250814_fs_s2',
+]
+
+# Full joint-fit session list: the 18 canonical Dataset 1-3 sessions plus the
+# 7 Krishna bat-11719 sessions.  The analysis notebooks (preprocess-data-v0j,
+# model_comparison, decode-position-comparison) pass this explicitly so they
+# share one split; other notebooks default to DEFAULT_SESSION_NAMES.
+ALL_SESSION_NAMES = list(DEFAULT_SESSION_NAMES) + list(KRISHNA_SESSION_NAMES)
 
 
 def make_data_config(session_names=None, parent_folder=DEFAULT_PARENT_FOLDER,

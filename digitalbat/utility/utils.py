@@ -61,14 +61,16 @@ def round_robin_session_batches(loaders, rng=None):
 def bat_palette(palette='tab10'):
     """Return a `{bat_id: rgb}` dict in canonical project order.
 
-    Bats are extracted from `DEFAULT_SESSION_NAMES` (third underscore-split
-    token).  Pass into seaborn via `palette=bat_palette()` with `hue='bat'`
-    to keep colors consistent across notebooks/figures.
+    Bats are extracted from `ALL_SESSION_NAMES` (third underscore-split token),
+    so the Krishna bat (11719) is covered alongside the Dataset 1-3 bats.  The
+    canonical Dataset 1-3 bats come first and keep their colors regardless of the
+    Krishna sessions.  Pass into seaborn via `palette=bat_palette()` with
+    `hue='bat'` to keep colors consistent across notebooks/figures.
     """
     import seaborn as sns
-    from ..datasets.defaults import DEFAULT_SESSION_NAMES
+    from ..datasets.defaults import ALL_SESSION_NAMES
     seen = []
-    for s in DEFAULT_SESSION_NAMES:
+    for s in ALL_SESSION_NAMES:
         b = s.split('_')[2]
         if b not in seen:
             seen.append(b)

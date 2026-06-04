@@ -78,6 +78,20 @@ class Bat_Transformer(nn.Module):
         # encoder).  None (default) keeps a single shared embed_traj — fully
         # backward compatible with existing checkpoints.
         session_to_room: dict = None,
+        # alternative environment conditioning for the trajectory branch, keyed
+        # off the SAME session_to_room mapping but with a SHARED embed_traj
+        # Linear.  A learnable per-room embedding (nn.Embedding over the unique
+        # rooms) is injected into the trajectory sequence:
+        #   'segment' : added to every timestep after embed_traj (BERT segment-
+        #               embedding style), broadcast over T.
+        #   'token'   : prepended as an extra token at position 0 (BERT [CLS]
+        #               style); attention conditions all timesteps on it and the
+        #               token output is dropped before the readout.
+        #   None      : no room embedding (default; backward compatible).
+        # Requires session_to_room.  When set, embed_traj is shared (the per-room
+        # projection above is disabled) so the room embedding is the sole carrier
+        # of environment identity.
+        room_embed_mode: str = None,
     ):
         super().__init__()
 
@@ -85,9 +99,15 @@ class Bat_Transformer(nn.Module):
         self.use_trajectory_as_input = use_trajectory_as_input
         self.use_attention = use_attention
         self.session_to_room = session_to_room
+        self.room_embed_mode = room_embed_mode
         if session_to_room is not None:
             missing = set(output_dim_dict) - set(session_to_room)
             assert not missing, f'session_to_room missing entries for sessions: {sorted(missing)}'
+        if room_embed_mode is not None:
+            assert room_embed_mode in ('segment', 'token'), \
+                f"room_embed_mode must be 'segment', 'token', or None (got {room_embed_mode!r})"
+            assert session_to_room is not None, 'room_embed_mode requires session_to_room'
+            assert use_trajectory_as_input, 'room_embed_mode requires use_trajectory_as_input'
         assert (self.use_place_as_input or self.use_trajectory_as_input), 'Use at least one input (place or trajectory)!'
         
         if self.use_place_as_input:
@@ -126,15 +146,22 @@ class Bat_Transformer(nn.Module):
                 )
 
         if self.use_trajectory_as_input:
-            if session_to_room is not None:
+            if session_to_room is not None and room_embed_mode is None:
                 # one trajectory projection per unique room/environment
                 rooms = sorted(set(session_to_room.values()))
                 self.embed_traj = nn.ModuleDict({
                     room: nn.Linear(input_dim, latent_dim) for room in rooms
                 })
             else:
-                self.embed_traj = nn.Linear(input_dim, latent_dim) # trajectory embedding
+                # shared trajectory embedding (also used by room_embed_mode, where
+                # environment identity is carried by self.room_embedding instead)
+                self.embed_traj = nn.Linear(input_dim, latent_dim)
             self.embed_traj_dropout = nn.Dropout(0.1)
+            if room_embed_mode is not None:
+                # learnable per-room embedding injected into the trajectory branch
+                rooms = sorted(set(session_to_room.values()))
+                self.room_to_idx = {room: i for i, room in enumerate(rooms)}
+                self.room_embedding = nn.Embedding(len(rooms), latent_dim)
             # transformer or per-timestep FFN ablation
             if self.use_attention:
                 self.layers = nn.ModuleList([
@@ -201,11 +228,33 @@ class Bat_Transformer(nn.Module):
 
         # trajectory
         if self.use_trajectory_as_input:
-            # embedding (environment-keyed projection when session_to_room is set)
+            # embedding: environment-keyed per-room projection only when
+            # session_to_room is set AND room_embed_mode is None; otherwise shared.
             x_traj_input = x.clone()
+            use_per_room_proj = (self.session_to_room is not None
+                                 and self.room_embed_mode is None)
             embed_traj = (self.embed_traj[self.session_to_room[session_name]]
-                          if self.session_to_room is not None else self.embed_traj)
+                          if use_per_room_proj else self.embed_traj)
             x_traj_embed = self.embed_traj_dropout(embed_traj(x_traj_input))
+
+            # room embedding injection (segment / token), keyed off session_to_room
+            attn_mask_traj = attn_mask
+            if self.room_embed_mode is not None:
+                room_idx = torch.tensor(self.room_to_idx[self.session_to_room[session_name]],
+                                        device=x.device)
+                room_vec = self.room_embedding(room_idx)  # (latent_dim,)
+                if self.room_embed_mode == 'segment':
+                    # add to every timestep, broadcast over (B, T, latent_dim)
+                    x_traj_embed = x_traj_embed + room_vec
+                elif self.room_embed_mode == 'token':
+                    # prepend as an extra token at position 0 (BERT [CLS] style)
+                    B, T, D = x_traj_embed.shape
+                    room_tok = room_vec.expand(B, 1, D)
+                    x_traj_embed = torch.cat([room_tok, x_traj_embed], dim=1)  # (B, T+1, D)
+                    # extend the attention mask: the room token is always valid
+                    mask_tok = torch.cat([torch.ones(B, 1, device=mask.device), mask.float()], dim=1)
+                    attn_mask_traj = torch.einsum("bi,bj->bij", mask_tok, mask_tok).bool()[:, None]
+
             if not self.use_attention:
                 assert not return_attn_weights, 'return_attn_weights requires use_attention=True'
                 for layer in self.layers:
@@ -217,7 +266,7 @@ class Bat_Transformer(nn.Module):
                         x_traj_embed,
                         x_traj_embed,
                         x_traj_embed,
-                        attn_mask=attn_mask,
+                        attn_mask=attn_mask_traj,
                         is_causal=is_causal,
                         return_attn_weights=return_attn_weights,
                         is_bigbird=is_bigbird,
@@ -232,7 +281,7 @@ class Bat_Transformer(nn.Module):
                         x_traj_embed,
                         x_traj_embed,
                         x_traj_embed,
-                        attn_mask=attn_mask,
+                        attn_mask=attn_mask_traj,
                         is_causal=is_causal,
                         return_attn_weights=return_attn_weights,
                         is_bigbird=is_bigbird,
@@ -240,6 +289,11 @@ class Bat_Transformer(nn.Module):
                         num_global=num_global,
                         num_random=num_random,
                     )
+
+            # drop the prepended room token so the trajectory output is back to
+            # (B, T, D) and aligns with the per-timestep place branch / readout
+            if self.room_embed_mode == 'token':
+                x_traj_embed = x_traj_embed[:, 1:, :]
 
         if self.use_place_as_input and (not self.use_trajectory_as_input):
             x_embed = x_place_embed.clone()
