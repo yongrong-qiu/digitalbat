@@ -291,11 +291,36 @@ _FLIGHT_ROOM = dict(
 DATASET_TARGETS = {
     'Dataset_1': _FLIGHT_ROOM,
     'Dataset_2': dict(
+        # Raw ciholas frame (x no longer negated in the loader).
         rew_locs=np.array([[-3.00, 0.70, 1.90]]),
-        perch_locs=np.array([[-3.20, 1.80, 2.20]]),
+        perch_locs=np.array([
+            [-3.20, 1.80, 2.20],
+            [4.81, -2.25, 2.27],
+        ]),
     ),
     'Dataset_3': _FLIGHT_ROOM,
 }
+
+# Krishna bat-11719 has two rooms with distinct layouts (measured from the flight
+# paths), so its targets are resolved per room rather than per dataset prefix:
+# the field station (_fs sessions) and the indoor lab (solo / social sessions).
+KRISHNA_FS_TARGETS = dict(
+    rew_locs=np.array([[4.46, -0.22, 2.09]]),
+    perch_locs=np.array([[-3.64, -1.67, 2.80]]),
+)
+KRISHNA_LAB_TARGETS = dict(
+    rew_locs=np.array([
+        [2.78, -0.94, 1.61],
+        [2.75,  0.90, 1.66],
+    ]),
+    perch_locs=np.array([
+        [-2.66, -1.15, 2.15],
+        [-2.45,  2.28, 2.21],
+        [-2.78,  1.88, 1.90],
+        [ 2.10,  2.34, 2.21],
+        [ 2.65,  2.05, 2.10],
+    ]),
+)
 
 DIST_THRESH = 0.6  # meters
 
@@ -305,8 +330,15 @@ PERCH_LOCS = DATASET_TARGETS['Dataset_1']['perch_locs']
 
 
 def get_target_locs(session_name):
-    """Return (rew_locs, perch_locs) for the dataset the session belongs to."""
+    """Return (rew_locs, perch_locs) for the dataset the session belongs to.
+
+    Krishna sessions are resolved by room (field station for ``_fs`` sessions,
+    indoor lab otherwise) since the two rooms have different reward/perch layouts.
+    """
     prefix = '_'.join(session_name.split('_')[:2])
+    if prefix == 'Dataset_Krishna':
+        t = KRISHNA_FS_TARGETS if '_fs' in session_name else KRISHNA_LAB_TARGETS
+        return t['rew_locs'], t['perch_locs']
     if prefix not in DATASET_TARGETS:
         raise KeyError(f'No target locations for dataset prefix {prefix!r}')
     t = DATASET_TARGETS[prefix]
