@@ -87,11 +87,27 @@ class Bat_Transformer(nn.Module):
         #   'token'   : prepended as an extra token at position 0 (BERT [CLS]
         #               style); attention conditions all timesteps on it and the
         #               token output is dropped before the readout.
+        #   'film'    : FiLM conditioning -- the per-room embedding generates a
+        #               feature-wise (gamma, beta) for EACH transformer block, and
+        #               the block output is modulated `h <- gamma * h + beta`.
+        #               Unlike 'segment' (additive bias only) this is multiplicative
+        #               and interleaved with the encoder nonlinearities, so a config
+        #               can learn a nonlinear/region-dependent deformation of the
+        #               position->latent map.  Initialised to identity (gamma=1,
+        #               beta=0) so an untrained film model matches the shared model.
         #   None      : no room embedding (default; backward compatible).
         # Requires session_to_room.  When set, embed_traj is shared (the per-room
         # projection above is disabled) so the room embedding is the sole carrier
         # of environment identity.
         room_embed_mode: str = None,
+        # optional readout sharing: maps each session_name -> a readout key.
+        # Sessions mapped to the same key share ONE readout head (they must have
+        # the same unit count, and row i must be the same neuron across them).
+        # Use this to tie matched neurons recorded across configurations to a
+        # single readout, so the only per-config degree of freedom is the
+        # trajectory-branch warp -- forcing a config-invariant latent.  None
+        # (default) gives every session its own readout (backward compatible).
+        session_to_readout: dict = None,
     ):
         super().__init__()
 
@@ -104,8 +120,8 @@ class Bat_Transformer(nn.Module):
             missing = set(output_dim_dict) - set(session_to_room)
             assert not missing, f'session_to_room missing entries for sessions: {sorted(missing)}'
         if room_embed_mode is not None:
-            assert room_embed_mode in ('segment', 'token'), \
-                f"room_embed_mode must be 'segment', 'token', or None (got {room_embed_mode!r})"
+            assert room_embed_mode in ('segment', 'token', 'film'), \
+                f"room_embed_mode must be 'segment', 'token', 'film', or None (got {room_embed_mode!r})"
             assert session_to_room is not None, 'room_embed_mode requires session_to_room'
             assert use_trajectory_as_input, 'room_embed_mode requires use_trajectory_as_input'
         assert (self.use_place_as_input or self.use_trajectory_as_input), 'Use at least one input (place or trajectory)!'
@@ -173,18 +189,44 @@ class Bat_Transformer(nn.Module):
                     _PerTimestepFFN(hidden_dim=latent_dim, ff_dim=ff_dim, dropout=dropout_prob)
                     for _ in range(num_layers)
                 ])
+            if room_embed_mode == 'film':
+                # one FiLM head per transformer block: room embedding -> (gamma, beta).
+                # Initialised to identity (weight=0, bias gamma=1/beta=0) so the model
+                # starts equal to the shared-embed_traj baseline and learns warps from there.
+                self.film_heads = nn.ModuleList([
+                    nn.Linear(latent_dim, 2 * latent_dim) for _ in range(num_layers)
+                ])
+                for head in self.film_heads:
+                    nn.init.zeros_(head.weight)
+                    with torch.no_grad():
+                        head.bias[:latent_dim].fill_(1.0)  # gamma = 1
+                        head.bias[latent_dim:].zero_()     # beta = 0
 
-        # session-specific readouts
+        # session-specific readouts.  `session_to_readout` lets multiple sessions
+        # share a head (matched neurons across configurations); default is identity.
+        self.session_to_readout = session_to_readout or {s: s for s in output_dim_dict}
+        missing_ro = set(output_dim_dict) - set(self.session_to_readout)
+        assert not missing_ro, f'session_to_readout missing entries for sessions: {sorted(missing_ro)}'
+        # resolve per-readout-key unit counts, asserting sessions that share a key agree
+        readout_unit_num = {}
+        for session_name, unit_num in output_dim_dict.items():
+            key = self.session_to_readout[session_name]
+            if key in readout_unit_num:
+                assert readout_unit_num[key] == unit_num, (
+                    f'sessions sharing readout {key!r} have mismatched unit counts '
+                    f'({readout_unit_num[key]} vs {unit_num})')
+            else:
+                readout_unit_num[key] = unit_num
         readout_latent_dim = latent_dim_place * int(self.use_place_as_input) + latent_dim * int(self.use_trajectory_as_input)
         if use_low_rank_readout:
             self.readouts = nn.ModuleDict({
-                session_name: nn.Sequential(nn.Linear(readout_latent_dim, low_rank_r), nn.Linear(low_rank_r, unit_num))
-                for session_name, unit_num in output_dim_dict.items()
+                key: nn.Sequential(nn.Linear(readout_latent_dim, low_rank_r), nn.Linear(low_rank_r, unit_num))
+                for key, unit_num in readout_unit_num.items()
             })
         else:
             self.readouts = nn.ModuleDict({
-                session_name: nn.Sequential(nn.Linear(readout_latent_dim, unit_num), nn.Dropout(0.1))
-                for session_name, unit_num in output_dim_dict.items()
+                key: nn.Sequential(nn.Linear(readout_latent_dim, unit_num), nn.Dropout(0.1))
+                for key, unit_num in readout_unit_num.items()
             })
         self.final_activation = final_activation
 
@@ -237,8 +279,9 @@ class Bat_Transformer(nn.Module):
                           if use_per_room_proj else self.embed_traj)
             x_traj_embed = self.embed_traj_dropout(embed_traj(x_traj_input))
 
-            # room embedding injection (segment / token), keyed off session_to_room
+            # room embedding injection (segment / token / film), keyed off session_to_room
             attn_mask_traj = attn_mask
+            film_params = None  # set below for room_embed_mode == 'film'
             if self.room_embed_mode is not None:
                 room_idx = torch.tensor(self.room_to_idx[self.session_to_room[session_name]],
                                         device=x.device)
@@ -246,6 +289,10 @@ class Bat_Transformer(nn.Module):
                 if self.room_embed_mode == 'segment':
                     # add to every timestep, broadcast over (B, T, latent_dim)
                     x_traj_embed = x_traj_embed + room_vec
+                elif self.room_embed_mode == 'film':
+                    # per-block (gamma, beta) from the room embedding; applied after
+                    # each transformer block in the loops below.
+                    film_params = [head(room_vec).chunk(2, dim=-1) for head in self.film_heads]
                 elif self.room_embed_mode == 'token':
                     # prepend as an extra token at position 0 (BERT [CLS] style)
                     B, T, D = x_traj_embed.shape
@@ -257,11 +304,14 @@ class Bat_Transformer(nn.Module):
 
             if not self.use_attention:
                 assert not return_attn_weights, 'return_attn_weights requires use_attention=True'
-                for layer in self.layers:
+                for li, layer in enumerate(self.layers):
                     x_traj_embed = layer(x_traj_embed)
+                    if film_params is not None:
+                        gamma, beta = film_params[li]
+                        x_traj_embed = gamma * x_traj_embed + beta
             elif return_attn_weights:
                 attn_weights_list = []
-                for layer in self.layers:
+                for li, layer in enumerate(self.layers):
                     x_traj_embed, attn_weights = layer(
                         x_traj_embed,
                         x_traj_embed,
@@ -274,9 +324,12 @@ class Bat_Transformer(nn.Module):
                         num_global=num_global,
                         num_random=num_random,
                     )
+                    if film_params is not None:
+                        gamma, beta = film_params[li]
+                        x_traj_embed = gamma * x_traj_embed + beta
                     attn_weights_list.append(attn_weights)
             else:
-                for layer in self.layers:
+                for li, layer in enumerate(self.layers):
                     x_traj_embed = layer(
                         x_traj_embed,
                         x_traj_embed,
@@ -289,6 +342,9 @@ class Bat_Transformer(nn.Module):
                         num_global=num_global,
                         num_random=num_random,
                     )
+                    if film_params is not None:
+                        gamma, beta = film_params[li]
+                        x_traj_embed = gamma * x_traj_embed + beta
 
             # drop the prepended room token so the trajectory output is back to
             # (B, T, D) and aligns with the per-timestep place branch / readout
@@ -302,8 +358,8 @@ class Bat_Transformer(nn.Module):
         elif self.use_place_as_input and self.use_trajectory_as_input:
             x_embed = torch.cat((x_place_embed, x_traj_embed), dim=-1)
 
-        # readout
-        x_embed = self.readouts[session_name](x_embed)
+        # readout (shared across sessions that map to the same readout key)
+        x_embed = self.readouts[self.session_to_readout[session_name]](x_embed)
         x_out = self.final_activation(x_embed)
 
         if return_attn_weights:

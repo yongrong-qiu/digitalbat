@@ -18,17 +18,22 @@ DEFAULT_WEIGHT_DECAY = 0.01
 
 
 def make_model_config(behavior_dim, unit_num_dict, meta_info_dict, session_to_room=None,
-                      room_embed_mode=None):
+                      room_embed_mode=None, session_to_readout=None):
     """Return the standard ``model_config`` dict for ``Bat_Transformer``.
 
     Pass ``session_to_room`` (``{session_name: room_label}``) to give each
     environment its own trajectory projection (``embed_traj``); ``None`` (default)
     keeps the single shared projection.
 
-    ``room_embed_mode`` ('segment' | 'token' | None) instead injects a learnable
-    per-room embedding into a *shared* ``embed_traj`` (requires ``session_to_room``):
-    'segment' adds it to every timestep, 'token' prepends it as an extra
-    transformer token. ``None`` (default) uses no room embedding.
+    ``room_embed_mode`` ('segment' | 'token' | 'film' | None) instead injects a
+    learnable per-room embedding into a *shared* ``embed_traj`` (requires
+    ``session_to_room``): 'segment' adds it to every timestep, 'token' prepends it
+    as an extra transformer token, 'film' uses it to generate per-block
+    feature-wise (gamma, beta) modulation. ``None`` (default) uses no room embedding.
+
+    ``session_to_readout`` (``{session_name: readout_key}``) ties sessions that
+    share a key to one readout head (matched neurons across configurations);
+    ``None`` (default) gives every session its own readout.
     """
     return dict(
         input_dim=behavior_dim,
@@ -45,6 +50,7 @@ def make_model_config(behavior_dim, unit_num_dict, meta_info_dict, session_to_ro
         final_activation=ELU1(),
         session_to_room=session_to_room,
         room_embed_mode=room_embed_mode,
+        session_to_readout=session_to_readout,
     )
 
 
