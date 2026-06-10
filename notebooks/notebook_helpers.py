@@ -25,6 +25,23 @@ from scipy.cluster.hierarchy import linkage, dendrogram
 # ===========================================================================
 # Mantel / partial-Mantel tests (Spearman rho on matrix upper triangles)
 # ===========================================================================
+def _perm_pvalue(r_obs, perm_rs):
+    """One-sided upper-tail permutation p, robust to non-finite values.
+
+    A degenerate (constant / over-NaN) target or control makes the observed
+    Spearman / partial-Spearman undefined; without a guard ``perm_rs >= nan``
+    is all-False and yields the spuriously small floor p = 1/(n_perms+1). We
+    return NaN when ``r_obs`` is undefined so such sessions don't masquerade as
+    significant, and drop any non-finite null draws from the tail count."""
+    if not np.isfinite(r_obs):
+        return np.nan
+    finite = np.isfinite(perm_rs)
+    n = int(finite.sum())
+    if n == 0:
+        return np.nan
+    return (np.sum(perm_rs[finite] >= r_obs) + 1) / (n + 1)
+
+
 def spearman(x, y):
     """Spearman rho = Pearson on ranks, dropping pairs where either value is NaN
     (constant rate-map / FR rows yield NaN correlations)."""
@@ -57,7 +74,7 @@ def mantel(a_sym, b_vec, rng, n_perms):
     for pi in range(n_perms):
         perm = rng.permutation(N)
         perm_rs[pi] = spearman(a_sym[np.ix_(perm, perm)][iu, ju], b_vec)
-    p = (np.sum(perm_rs >= r_obs) + 1) / (n_perms + 1)
+    p = _perm_pvalue(r_obs, perm_rs)
     return r_obs, p, perm_rs
 
 
@@ -71,7 +88,7 @@ def partial_mantel(a_sym, b_vec, c_vec, rng, n_perms):
     for pi in range(n_perms):
         perm = rng.permutation(N)
         perm_rs[pi] = partial_r(a_sym[np.ix_(perm, perm)][iu, ju], b_vec, c_vec)
-    p = (np.sum(perm_rs >= r_obs) + 1) / (n_perms + 1)
+    p = _perm_pvalue(r_obs, perm_rs)
     return r_obs, p, perm_rs
 
 
@@ -97,7 +114,7 @@ def mantel_directed_pred(target_sym, K_dir, rng, n_perms):
     for pi in range(n_perms):
         perm = rng.permutation(N)
         perm_rs[pi] = spearman(tvec(target_sym[np.ix_(perm, perm)]), pred)
-    p = (np.sum(perm_rs >= r_obs) + 1) / (n_perms + 1)
+    p = _perm_pvalue(r_obs, perm_rs)
     return r_obs, p, perm_rs
 
 
@@ -112,7 +129,7 @@ def partial_mantel_directed(K_dir, b_sym_vec, c_sym_vec, rng, n_perms):
     for pi in range(n_perms):
         perm = rng.permutation(N)
         perm_rs[pi] = partial_r(dir_both(K_dir[np.ix_(perm, perm)]), b2, c2)
-    p = (np.sum(perm_rs >= r_obs) + 1) / (n_perms + 1)
+    p = _perm_pvalue(r_obs, perm_rs)
     return r_obs, p, perm_rs
 
 
@@ -132,7 +149,7 @@ def partial_mantel_dir_control(pred_sym, b_sym_vec, K_dir_control, rng, n_perms)
     for pi in range(n_perms):
         perm = rng.permutation(N)
         perm_rs[pi] = partial_r(pvec(pred_sym[np.ix_(perm, perm)]), b2, c)
-    p = (np.sum(perm_rs >= r_obs) + 1) / (n_perms + 1)
+    p = _perm_pvalue(r_obs, perm_rs)
     return r_obs, p, perm_rs
 
 
