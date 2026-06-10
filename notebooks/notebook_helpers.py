@@ -296,12 +296,16 @@ N_BINS_PF = 50
 # both targets on the -x side; Datasets 1 and 3 share the original layout.
 _FLIGHT_ROOM = dict(
     rew_locs=np.array([
-        [2.80, -0.86, 1.57],
-        [2.75,  0.96, 1.57],
+        [2.70, -0.86, 1.57],
+        [2.50,  0.92, 1.57],
     ]),
     perch_locs=np.array([
         [-2.55, 1.57, 1.82],
         [-1.98, 2.08, 1.74],
+        [2.46, 1.61, 1.91],
+        [1.89, -2.03, 1.94],
+        [1.26, -1.92, 1.89],
+        [2.37, -1.82, 2.02]
     ]),
 )
 
@@ -313,6 +317,7 @@ DATASET_TARGETS = {
         perch_locs=np.array([
             [-3.20, 1.80, 2.20],
             [4.81, -2.25, 2.27],
+            [5.42, -2.15, 1.63]
         ]),
     ),
     'Dataset_3': _FLIGHT_ROOM,
@@ -322,8 +327,10 @@ DATASET_TARGETS = {
 # paths), so its targets are resolved per room rather than per dataset prefix:
 # the field station (_fs sessions) and the indoor lab (solo / social sessions).
 KRISHNA_FS_TARGETS = dict(
-    rew_locs=np.array([[4.46, -0.22, 2.09]]),
-    perch_locs=np.array([[-3.64, -1.67, 2.80]]),
+    rew_locs=np.array([[4.33, -0.12, 2.00]]),
+    perch_locs=np.array([
+        [-3.64, -1.67, 2.80],
+        [-3.31, 0.75, 1.71]]),
 )
 KRISHNA_LAB_TARGETS = dict(
     rew_locs=np.array([
@@ -336,6 +343,7 @@ KRISHNA_LAB_TARGETS = dict(
         [-2.78,  1.88, 1.90],
         [ 2.10,  2.34, 2.21],
         [ 2.65,  2.05, 2.10],
+        [-2.74, 1.24, 2.01]
     ]),
 )
 
