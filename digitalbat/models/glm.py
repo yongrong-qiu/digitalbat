@@ -92,6 +92,31 @@ def create_circular_cosine_bumps_torch(theta, centers, width):
     return (torch.cos(2 * np.pi * diff / width) * 0.5 + 0.5) * (diff.abs() < width / 2).float()
 
 
+def cosine_basis_params(n_bases_per_dim=8, pos_range=(-3.0, 3.0), width_to_spacing_ratio=4):
+    """Return ``(centers (K,), width)`` for the 3D tensor-product cosine basis used by
+    :class:`GLM_3DCosineBasis`.  Exposed so the identical basis can be built outside the
+    model (e.g. as a fixed place representation) without instantiating the GLM/readout."""
+    centers = torch.linspace(pos_range[0], pos_range[1], n_bases_per_dim)
+    spacing = (pos_range[1] - pos_range[0]) / (n_bases_per_dim - 1)
+    return centers, width_to_spacing_ratio * spacing
+
+
+def spatial_cosine_basis(xyz, centers, width):
+    """3D tensor-product raised-cosine basis from ``(..., >=3)`` z-scored positions ->
+    ``(..., len(centers) ** 3)``.  Shared by :meth:`GLM_3DCosineBasis._spatial_basis` and
+    usable standalone (pair with :func:`cosine_basis_params`)."""
+    centers = centers.to(xyz.device)
+    b_x = create_cosine_bumps_torch(xyz[..., 0], centers, width)
+    b_y = create_cosine_bumps_torch(xyz[..., 1], centers, width)
+    b_z = create_cosine_bumps_torch(xyz[..., 2], centers, width)
+    bases = (
+        b_x.unsqueeze(-1).unsqueeze(-1)
+        * b_y.unsqueeze(-2).unsqueeze(-1)
+        * b_z.unsqueeze(-2).unsqueeze(-2)
+    )
+    return bases.flatten(-3)
+
+
 class GLM_3DCosineBasis(nn.Module):
     """3D tensor-product cosine basis expansion + session-wise linear GLM.
 
@@ -143,16 +168,7 @@ class GLM_3DCosineBasis(nn.Module):
 
     def _spatial_basis(self, xyz):
         """Compute 3D tensor-product cosine basis from (N, T, >=3) positions."""
-        centers = self.centers.to(xyz.device)
-        b_x = create_cosine_bumps_torch(xyz[..., 0], centers, self.width)
-        b_y = create_cosine_bumps_torch(xyz[..., 1], centers, self.width)
-        b_z = create_cosine_bumps_torch(xyz[..., 2], centers, self.width)
-        bases = (
-            b_x.unsqueeze(-1).unsqueeze(-1)
-            * b_y.unsqueeze(-2).unsqueeze(-1)
-            * b_z.unsqueeze(-2).unsqueeze(-2)
-        )
-        return bases.flatten(-3)  # (N, T, K^3)
+        return spatial_cosine_basis(xyz, self.centers, self.width)
 
     def _make_design(self, x, mask=None):
         # x: (N, T, behavior_dim) — first 3 dims = x, y, z (z-scored by dataloader)
