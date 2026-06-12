@@ -50,7 +50,7 @@ KRISHNA_SESSION_NAMES = [
     'Dataset_Krishna_14753_260122_fs',
     'Dataset_Krishna_14753_260122_lab2',
     'Dataset_Krishna_14753_260123_lab',
-    'Dataset_Krishna_14753_260122_fs'
+    'Dataset_Krishna_14753_260123_fs'
 ]
 
 # Full joint-fit session list: the 18 canonical Dataset 1-3 sessions plus the
