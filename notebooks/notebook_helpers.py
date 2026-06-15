@@ -347,6 +347,26 @@ KRISHNA_LAB_TARGETS = dict(
     ]),
 )
 
+# Bat 14753 has its own layout, measured from its flights: the reward feeder is
+# relocated in each room, and the outdoor field station gains a third perch.
+# Perches otherwise match the 11719 rooms (the indoor-lab perches are identical;
+# the field station reuses 11719's two and adds one).
+KRISHNA_14753_FS_TARGETS = dict(
+    rew_locs=np.array([
+        [5.00,  0.64, 1.30],
+        [4.43, -1.38, 1.10],
+    ]),
+    perch_locs=np.vstack([KRISHNA_FS_TARGETS['perch_locs'],
+                          [-3.25, -0.93, 2.81]]),
+)
+KRISHNA_14753_LAB_TARGETS = dict(
+    rew_locs=np.array([
+        [2.20,  0.00, 1.30],
+        [2.48, -0.21, 2.14],
+    ]),
+    perch_locs=KRISHNA_LAB_TARGETS['perch_locs'],
+)
+
 DIST_THRESH = 0.6  # meters
 
 # Flat D1/3 reference constants for plots that still use the original markers.
@@ -358,11 +378,17 @@ def get_target_locs(session_name):
     """Return (rew_locs, perch_locs) for the dataset the session belongs to.
 
     Krishna sessions are resolved by room (field station for ``_fs`` sessions,
-    indoor lab otherwise) since the two rooms have different reward/perch layouts.
+    indoor lab otherwise) since the two rooms have different reward/perch layouts,
+    and by bat (14753 has its own per-room layout; other bats use the 11719 rooms).
     """
     prefix = '_'.join(session_name.split('_')[:2])
     if prefix == 'Dataset_Krishna':
-        t = KRISHNA_FS_TARGETS if '_fs' in session_name else KRISHNA_LAB_TARGETS
+        bat = session_name.split('_')[2]
+        is_fs = '_fs' in session_name
+        if bat == '14753':
+            t = KRISHNA_14753_FS_TARGETS if is_fs else KRISHNA_14753_LAB_TARGETS
+        else:
+            t = KRISHNA_FS_TARGETS if is_fs else KRISHNA_LAB_TARGETS
         return t['rew_locs'], t['perch_locs']
     if prefix not in DATASET_TARGETS:
         raise KeyError(f'No target locations for dataset prefix {prefix!r}')
