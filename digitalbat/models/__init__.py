@@ -10,3 +10,11 @@ from .former_defaults import (
     make_trainer_config,
 )
 from .perceiver import PerceiverIOTrajectoryDecoder, PerceiverIOConfig
+from .joint import (
+    JointMaskedTransformer,
+    JointBlock,
+    build_rotary_emb_from_timestamps,
+    SCHEMES,
+    sample_mask,
+    joint_loss,
+)
