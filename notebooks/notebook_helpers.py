@@ -423,6 +423,143 @@ def compute_target_proximity(positions, session_name=None,
     )
 
 
+def plot_spatial_field(df, value_col='err_3d', value_label='3-D error (m)',
+                       pos_cols=('x_true', 'y_true', 'z_true'), agg='median',
+                       cmap='magma', grid_lim=3.0, grid_bin=0.3, min_count=5,
+                       n_dist_bins=12, shared_room_prefixes=('Dataset_1', 'Dataset_3'),
+                       indoor_filter=None, suptitle=None):
+    """Three-panel spatial summary of a per-timepoint quantity (decoding error,
+    Jacobian magnification, ...) over test timepoints:
+
+      (1) x-y heat map (`agg` per spatial bin) over the **shared indoor flight room**
+          (Datasets 1 & 3 — the only sessions sharing a common ``[-grid_lim, grid_lim]``
+          frame and reward/perch layout); reward (*) and perch (^) markers overlaid.
+      (2) value vs distance-to-nearest-reward — equal-count binned median + IQR.
+      (3) value vs distance-to-nearest-perch  — equal-count binned median + IQR.
+
+    ``indoor_filter(session) -> bool`` selects the sessions for ALL panels and defaults to
+    the **shared flight room (Datasets 1 & 3)** — the same sessions as the x-y heat map — so
+    the distance curves are directly comparable across notebooks. (The outdoor field station
+    is ``Dataset_2`` and the Krishna ``_fs`` sessions, per the ``session_room`` mapping:
+    ``_fs`` -> krishna_fs, ``Dataset_2`` -> dataset_2, else lab. Pass a custom
+    ``indoor_filter`` — e.g. the full ``lab`` room — to pool a broader set.)
+
+    ``df`` needs columns: ``session``, the three ``pos_cols``, and ``value_col``.
+    Returns ``(fig, df_indoor_with_distances)``.
+    """
+    from scipy.stats import binned_statistic_2d
+    px, py, _pz = pos_cols
+    if indoor_filter is None:
+        indoor_filter = lambda s: s.startswith(tuple(shared_room_prefixes))
+
+    df = df[df['session'].map(indoor_filter)].copy()
+    df['dist_rew'] = np.nan
+    df['dist_perch'] = np.nan
+    for sess, idx in df.groupby('session').groups.items():
+        prox = compute_target_proximity(df.loc[idx, list(pos_cols)].to_numpy(),
+                                        session_name=sess)
+        df.loc[idx, 'dist_rew'] = prox['dist_rew']
+        df.loc[idx, 'dist_perch'] = prox['dist_perch']
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.6))
+
+    # (1) x-y heat map over the shared flight room (Datasets 1 & 3)
+    room = df[df['session'].str.startswith(shared_room_prefixes)]
+    edges = np.arange(-grid_lim, grid_lim + grid_bin, grid_bin)
+    if len(room):
+        stat, _, _, _ = binned_statistic_2d(room[px], room[py], room[value_col],
+                                            statistic=agg, bins=[edges, edges])
+        cnt, _, _, _ = binned_statistic_2d(room[px], room[py], room[value_col],
+                                           statistic='count', bins=[edges, edges])
+        stat[cnt < min_count] = np.nan
+        pcm = axes[0].pcolormesh(edges, edges, stat.T, cmap=cmap)
+        plt.colorbar(pcm, ax=axes[0], label=f'{agg} {value_label}')
+        axes[0].scatter(REW_LOCS[:, 0], REW_LOCS[:, 1], marker='*', s=170, c='cyan',
+                        edgecolor='k', linewidth=0.6, label='reward', zorder=5)
+        axes[0].scatter(PERCH_LOCS[:, 0], PERCH_LOCS[:, 1], marker='^', s=70, c='lime',
+                        edgecolor='k', linewidth=0.6, label='perch', zorder=5)
+        axes[0].legend(fontsize=7, loc='upper right')
+    axes[0].set(xlabel='x (m)', ylabel='y (m)', xlim=(-grid_lim, grid_lim),
+                ylim=(-grid_lim, grid_lim), title='x-y map (Datasets 1 & 3)')
+    axes[0].set_aspect('equal', 'box')
+
+    # (2, 3) value vs distance, equal-count binned median + IQR (indoor sessions)
+    for ax, dcol, dlbl in [(axes[1], 'dist_rew', 'nearest reward'),
+                           (axes[2], 'dist_perch', 'nearest perch')]:
+        d = df[[dcol, value_col]].dropna()
+        x, y = d[dcol].to_numpy(), d[value_col].to_numpy()
+        q = np.unique(np.quantile(x, np.linspace(0, 1, n_dist_bins + 1)))
+        bi = np.clip(np.digitize(x, q) - 1, 0, len(q) - 2)
+        cen, med, lo, hi = [], [], [], []
+        for k in range(len(q) - 1):
+            sel = bi == k
+            if sel.sum() < min_count:
+                continue
+            cen.append(np.median(x[sel])); med.append(np.median(y[sel]))
+            lo.append(np.percentile(y[sel], 25)); hi.append(np.percentile(y[sel], 75))
+        ax.fill_between(cen, lo, hi, color='tab:blue', alpha=0.2, label='IQR')
+        ax.plot(cen, med, 'o-', color='tab:blue', label='binned median')
+        ax.set(xlabel=f'distance to {dlbl} (m)', ylabel=value_label,
+               title=f'{value_label} vs distance to {dlbl}')
+        ax.legend(fontsize=7)
+
+    if suptitle:
+        fig.suptitle(suptitle)
+    fig.tight_layout()
+    return fig, df
+
+
+def plot_value_vs_occupancy(panels, occ_source, occ_pos_cols=('x_true', 'y_true'),
+                            grid_lim=3.0, grid_bin=0.3, min_count=5, agg='median',
+                            shared_room_prefixes=('Dataset_1', 'Dataset_3'), suptitle=None):
+    """Per spatial bin (shared indoor room, `[-grid_lim, grid_lim]` x-y grid), relate a
+    quantity (decoding error, Jacobian magnification, ...) to OCCUPANCY = test-sample
+    count per bin. Mirrors the occupancy section of preprocess-data-v0j-share.ipynb.
+
+    panels: list of ``(df, value_col, value_label, pos_cols)``. Each df is binned into
+    the grid, `agg`-aggregated per bin, and scattered against the per-bin occupancy
+    (computed once from `occ_source`'s `occ_pos_cols`), with a binned trend (mean ± s.e.m.)
+    and Pearson r over bins with >= `min_count` samples. Returns the figure.
+    """
+    from scipy.stats import binned_statistic_2d
+    edges = np.arange(-grid_lim, grid_lim + grid_bin, grid_bin)
+
+    op = occ_source[occ_source['session'].str.startswith(shared_room_prefixes)]
+    occ, _, _ = np.histogram2d(op[occ_pos_cols[0]], op[occ_pos_cols[1]], bins=[edges, edges])
+
+    n = len(panels)
+    fig, axes = plt.subplots(1, n, figsize=(6.5 * n, 4.8), squeeze=False)
+    for ax, (df, vcol, vlabel, pcols) in zip(axes[0], panels):
+        sub = df[df['session'].str.startswith(shared_room_prefixes)]
+        vstat, _, _, _ = binned_statistic_2d(sub[pcols[0]], sub[pcols[1]], sub[vcol],
+                                             statistic=agg, bins=[edges, edges])
+        vcnt, _, _, _ = binned_statistic_2d(sub[pcols[0]], sub[pcols[1]], sub[vcol],
+                                            statistic='count', bins=[edges, edges])
+        valid = (occ >= min_count) & (vcnt >= min_count) & np.isfinite(vstat)
+        x, y = occ[valid], vstat[valid]
+        ax.scatter(x, y, s=14, alpha=0.4, color='0.5', rasterized=True)
+        if len(x) > 2:
+            be = np.linspace(x.min(), x.max(), 11)
+            bi = np.clip(np.digitize(x, be) - 1, 0, len(be) - 2)
+            tx, ty, te = [], [], []
+            for k in range(len(be) - 1):
+                sel = bi == k
+                if sel.sum() < min_count:
+                    continue
+                tx.append(np.median(x[sel])); ty.append(y[sel].mean())
+                te.append(y[sel].std() / np.sqrt(sel.sum()))
+            ax.errorbar(tx, ty, yerr=te, fmt='o-', color='firebrick', capsize=3, zorder=5)
+            r = np.corrcoef(x, y)[0, 1]
+            ax.annotate(f'r = {r:.3f}  (n={len(x)} bins)', xy=(0.04, 0.96),
+                        xycoords='axes fraction', va='top', fontsize=9)
+        ax.set(xlabel='occupancy (test samples / bin)', ylabel=f'{agg} {vlabel}',
+               title=f'{vlabel} vs occupancy')
+    if suptitle:
+        fig.suptitle(suptitle)
+    fig.tight_layout()
+    return fig
+
+
 # ===========================================================================
 # Similarity-matrix plotting: color maps, Mantel boxplots, clustered heatmaps
 # ===========================================================================
