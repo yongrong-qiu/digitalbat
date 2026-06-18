@@ -472,7 +472,8 @@ def plot_spatial_field(df, value_col='err_3d', value_label='3-D error (m)',
         cnt, _, _, _ = binned_statistic_2d(room[px], room[py], room[value_col],
                                            statistic='count', bins=[edges, edges])
         stat[cnt < min_count] = np.nan
-        pcm = axes[0].pcolormesh(edges, edges, stat.T, cmap=cmap)
+        vmin, vmax = np.nanpercentile(stat, [2.5, 97.5])
+        pcm = axes[0].pcolormesh(edges, edges, stat.T, cmap=cmap, vmin=vmin, vmax=vmax)
         plt.colorbar(pcm, ax=axes[0], label=f'{agg} {value_label}')
         axes[0].scatter(REW_LOCS[:, 0], REW_LOCS[:, 1], marker='*', s=170, c='cyan',
                         edgecolor='k', linewidth=0.6, label='reward', zorder=5)
@@ -558,6 +559,77 @@ def plot_value_vs_occupancy(panels, occ_source, occ_pos_cols=('x_true', 'y_true'
         fig.suptitle(suptitle)
     fig.tight_layout()
     return fig
+
+
+def _add_flight_speed(df, pos_cols, dt, group_cols=('session', 'flight_id'),
+                      time_col='t_idx'):
+    """Return a copy of `df` with a 'speed' column (m/s) = |d(position)/dt| per flight.
+
+    Speed is computed via ``np.gradient`` over the timesteps of each flight, ordered by
+    `time_col`. Valid flight bins are contiguous, so `time_col` increments uniformly and
+    `dt` is the spacing between consecutive rows of one flight (pass ``bin_width * stride``
+    when the rows were subsampled). Flights with < 2 timesteps get NaN speed.
+    """
+    out = df.sort_values([*group_cols, time_col]).copy()
+    pos = out[list(pos_cols)].to_numpy(float)
+    spd = np.full(len(out), np.nan)
+    for rows in out.groupby(list(group_cols), sort=False).indices.values():
+        rows = np.sort(rows)
+        if len(rows) < 2:
+            continue
+        spd[rows] = np.linalg.norm(np.gradient(pos[rows], dt, axis=0), axis=1)
+    out['speed'] = spd
+    return out
+
+
+def plot_value_vs_speed(panels, shared_room_prefixes=('Dataset_1', 'Dataset_3'),
+                        min_count=5, n_bins=16, suptitle=None):
+    """Relate a quantity (decode error, Jacobian magnification, ...) to flight SPEED.
+
+    Mirrors the 'magnification vs speed' panel of preprocess-data-v0j-share.ipynb: per
+    flight, speed = |d(position)/dt| (`_add_flight_speed`); per panel a per-sample scatter
+    on a log speed axis plus a geometric-binned trend (mean +/- s.e.m.), annotated with
+    the Pearson r on log(speed) (matches the log x-axis) and the scale-free Spearman rho.
+
+    panels: list of ``(df, value_col, value_label, pos_cols, time_col, dt)``. Restricted
+    to `shared_room_prefixes` so curves are comparable across notebooks. Returns
+    ``(fig, {value_col: speed-augmented DataFrame})``.
+    """
+    from scipy.stats import spearmanr
+    n = len(panels)
+    fig, axes = plt.subplots(1, n, figsize=(6.5 * n, 4.8), squeeze=False)
+    augmented = {}
+    for ax, (df, vcol, vlabel, pcols, tcol, dt) in zip(axes[0], panels):
+        sub = df[df['session'].str.startswith(shared_room_prefixes)]
+        sub = _add_flight_speed(sub, pcols, dt, time_col=tcol).dropna(subset=['speed', vcol])
+        augmented[vcol] = sub
+        x, y = sub['speed'].to_numpy(float), sub[vcol].to_numpy(float)
+        ax.scatter(x, y, s=3, alpha=0.2, color='0.5', rasterized=True)
+
+        lo = max(np.quantile(x, 0.01), 1e-3)
+        hi = np.quantile(x, 0.99)
+        edges = np.geomspace(lo, hi, n_bins)
+        dig = np.clip(np.digitize(x, edges) - 1, 0, len(edges) - 2)
+        tx, ty, te = [], [], []
+        for k in range(len(edges) - 1):
+            sel = dig == k
+            if sel.sum() < min_count:
+                continue
+            tx.append(np.sqrt(edges[k] * edges[k + 1]))
+            ty.append(y[sel].mean())
+            te.append(y[sel].std() / np.sqrt(sel.sum()))
+        ax.errorbar(tx, ty, yerr=te, fmt='o-', color='firebrick', capsize=3, zorder=5)
+
+        r_log = np.corrcoef(np.log(np.maximum(x, 1e-6)), y)[0, 1]
+        rho, _ = spearmanr(x, y)
+        ax.annotate(f'r(log) = {r_log:.3f}\n$\\rho$ = {rho:.3f}  (n={len(x)})',
+                    xy=(0.04, 0.96), xycoords='axes fraction', va='top', fontsize=9)
+        ax.set_xscale('log')
+        ax.set(xlabel='speed (m/s)', ylabel=vlabel, title=f'{vlabel} vs speed')
+    if suptitle:
+        fig.suptitle(suptitle)
+    fig.tight_layout()
+    return fig, augmented
 
 
 # ===========================================================================
