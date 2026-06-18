@@ -1,6 +1,7 @@
 tmp/
 notebooks/out/
 out/
+data/
 
 # Claude Code agent-local config and worktrees
 .claude/
