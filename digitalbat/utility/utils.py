@@ -17,6 +17,10 @@ from scipy.spatial.distance import pdist, squareform
 from sklearn.feature_selection import mutual_info_regression
 from scipy.stats import pearsonr, wasserstein_distance
 import ot
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import KFold
+from sklearn.metrics import r2_score
+from sklearn.preprocessing import StandardScaler
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -2296,4 +2300,115 @@ class BatRateMapSim:
                 shuffled_results[space] = np.nanmean(np.array(shuffle_pairs), axis=0)
                 
         return shuffled_results
+    
+
+
+def decode_spikes_to_latent(all_true_spike, all_latents, all_session, alphas=[0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]):
+    """
+    Projects raw session-wise spikes into the latent space using a cross-validated 
+    Ridge regression encoder with a 4-1-1 (train-val-test) split across 6 folds.
+    
+    Parameters:
+    -----------
+    all_true_spike : np.ndarray
+        Shape (8332, 266), neural spike matrix containing NaN paddings.
+    all_latents : np.ndarray
+        Shape (8332, 32), true latent representations.
+    all_session : np.ndarray
+        Shape (8332,), 1D array of session names matching each time point.
+    alphas : list
+        List of L2 regularization hyperparameters to tune.
+        
+    Returns:
+    --------
+    all_spike_in_latent : np.ndarray
+        Shape (8332, 32), out-of-sample reconstructed latents aligned with original order.
+    """
+    # Initialize the final output array matching the shape of all_latents
+    all_spike_in_latent = np.full_like(all_latents, np.nan)
+    unique_sessions = np.unique(all_session)
+    print(f"Starting latent reconstruction across {len(unique_sessions)} sessions...\n")
+    for sess in unique_sessions:
+        # Step 1: Extract session data and keep position masks
+        sess_mask = (all_session == sess)
+        X_sess_raw = all_true_spike[sess_mask] # Spikes for this session
+        Y_sess = all_latents[sess_mask]        # Target latents for this session
+        # Remove columns (neurons) that are entirely NaN values in this session
+        valid_neurons_mask = ~np.isnan(X_sess_raw).all(axis=0)
+        X_sess = X_sess_raw[:, valid_neurons_mask]
+        
+        n_samples = X_sess.shape[0]
+        # Guard rail: ensure we have enough data points to do a 6-fold split
+        if n_samples < 6:
+            print(f"Skipping session {sess}: too few samples ({n_samples}).")
+            continue
+        
+        # PREPROCESSING BLOCK (SESSION-SPECIFIC)
+        # A. Transform Spikes: Log(x+1) or Sqrt(x) to stabilize Poisson variance
+        # We'll use Log1p here as it is robust to high-count bursting transients
+        # X_sess = np.log1p(X_sess)
+        # B. Z-Score Spikes (Scale features symmetrically for Ridge L2 penalty)
+        scaler_X = StandardScaler()
+        X_sess = scaler_X.fit_transform(X_sess)
+        # C. Z-Score Latents (Ensures multi-output R2 treats all 32 dims equally)
+        scaler_Y = StandardScaler()
+        Y_sess = scaler_Y.fit_transform(Y_sess)
+
+        # Initialize an array to hold out-of-sample predictions for this specific session
+        sess_predictions = np.full_like(Y_sess, np.nan)
+        # Steps 2 & 3: 6-Fold Cross Validation with Native Shuffling
+        # Setting random_state ensures reproducibility while shuffling
+        kf = KFold(n_splits=6, shuffle=True, random_state=42)
+        folds = list(kf.split(X_sess))
+        # Track R2 per fold to log encoding performance
+        fold_r2_scores = []
+        for test_fold_idx in range(6):
+            # Extract test indices
+            _, test_idx = folds[test_fold_idx]
+            # Select the next fold in line as the validation fold (wrap around using modulo)
+            val_fold_idx = (test_fold_idx + 1) % 6
+            _, val_idx = folds[val_fold_idx]
+            # The remaining 4 folds are designated for training
+            train_indices_list = [folds[i][1] for i in range(6) if i != test_fold_idx and i != val_fold_idx]
+            train_idx = np.concatenate(train_indices_list)
+            # Split data for this fold configuration
+            X_train, Y_train = X_sess[train_idx], Y_sess[train_idx]
+            X_val, Y_val = X_sess[val_idx], Y_sess[val_idx]
+            X_test, _ = X_sess[test_idx], Y_sess[test_idx]
+            # --- Hyperparameter Tuning (L2 Alpha) on Validation Fold ---
+            best_alpha = alphas[0]
+            best_val_r2 = -np.inf
+            for alpha in alphas:
+                # Fit model on 4 folds
+                model = Ridge(alpha=alpha)
+                model.fit(X_train, Y_train)
+                # Evaluate on 1 validation fold
+                val_pred = model.predict(X_val)
+                val_r2 = r2_score(Y_val, val_pred, multioutput='variance_weighted')
+                if val_r2 > best_val_r2:
+                    best_val_r2 = val_r2
+                    best_alpha = alpha
+            
+            # --- Final Evaluation on Test Fold ---
+            # Retrain model using the optimized alpha on training data
+            final_model = Ridge(alpha=best_alpha)
+            final_model.fit(X_train, Y_train)
+            # Predict the out-of-sample test fold
+            test_pred = final_model.predict(X_test)
+            # Step 4: Write directly back to original session position indices
+            # Because kf.split gives indices relative to X_sess, this maps directly back 
+            # to the native temporal structure without manual un-shuffling.
+            sess_predictions[test_idx] = test_pred
+            
+            # Calculate testing R2 score for tracking
+            test_r2 = r2_score(Y_sess[test_idx], test_pred, multioutput='variance_weighted')
+            fold_r2_scores.append(test_r2)
+            
+        # Step 5: Assign session predictions back to global array using the position mask
+        all_spike_in_latent[sess_mask] = sess_predictions
+        
+        print(f"Session {sess} | Neurons: {X_sess.shape[1]} | Mean Test $R^2$: {np.mean(fold_r2_scores):.3f}")
+        
+    print("\nEncoding Complete! Output array matches original temporal layout.")
+    return all_spike_in_latent
     
