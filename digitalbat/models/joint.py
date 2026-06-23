@@ -16,8 +16,9 @@ Tokenization (per 0.1 s bin, NEDS-style per-timestep):
     the per-room map handles geometry / remapping.
 
 Each token gets a learned modality embedding (neural vs behaviour) and, if it is a
-prediction *target* for the current mask, its content is swapped for a learned
-per-modality mask token (kept in the sequence, MAE/NEDS-style). The two streams are
+prediction *target* for the current mask, its content is swapped for a single learned
+mask token shared across modalities (kept in the sequence, MAE/NEDS-style); the
+modality embedding added afterward is what distinguishes the two masked streams. The two streams are
 concatenated into a length-``2T`` sequence and processed by ``num_layers`` pre-norm
 transformer blocks with full attention and **timestamp-aware RoPE**
 (``build_rotary_emb_from_timestamps``) so a neural and a behaviour token at the same
@@ -61,8 +62,8 @@ def build_rotary_emb_from_timestamps(timestamps, dim_head, device):
 
 
 class JointBlock(nn.Module):
-    """Timestamp-RoPE multi-head attention + FFN, pre-norm residual (mirrors
-    ``TransformerEncoderRoPE`` but takes externally-built sin/cos)."""
+    """Timestamp-RoPE multi-head attention + FFN with **pre-norm** residuals
+    (LayerNorm inside each residual branch; takes externally-built sin/cos)."""
     def __init__(self, hidden_dim, num_heads, ff_dim, dropout, nonlin=nn.GELU()):
         super().__init__()
         self.attn = MultiheadAttentionRoPE(hidden_dim, num_heads)
@@ -73,13 +74,14 @@ class JointBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, sin, cos, attn_mask, return_attn_weights=False):
+        h = self.norm1(x)
         if return_attn_weights:
-            a, aw = self.attn(x, x, x, sin=sin, cos=cos, attn_mask=attn_mask,
+            a, aw = self.attn(h, h, h, sin=sin, cos=cos, attn_mask=attn_mask,
                               return_attn_weights=True)
         else:
-            a, aw = self.attn(x, x, x, sin=sin, cos=cos, attn_mask=attn_mask), None
-        x = self.norm1(x + self.dropout(a))
-        x = self.norm2(x + self.dropout(self.ff(x)))
+            a, aw = self.attn(h, h, h, sin=sin, cos=cos, attn_mask=attn_mask), None
+        x = x + self.dropout(a)
+        x = x + self.dropout(self.ff(self.norm2(x)))
         return (x, aw) if return_attn_weights else x
 
 
@@ -88,7 +90,8 @@ class JointMaskedTransformer(nn.Module):
 
     Per-session spike read-in/read-out (read-in weight columns are per-neuron
     embeddings); per-room (env-keyed) or shared behaviour read-in/read-out. Masked
-    tokens -> learned per-modality mask token, kept in the sequence (MAE/NEDS).
+    tokens -> a single shared learned mask token, kept in the sequence (MAE/NEDS);
+    the per-modality modality embedding added afterward distinguishes the streams.
 
     Parameters
     ----------
@@ -139,8 +142,11 @@ class JointMaskedTransformer(nn.Module):
             self.beh_readin = nn.ModuleDict({r: nn.Linear(behavior_dim, latent_dim) for r in rooms})
             self.beh_readout = nn.ModuleDict({r: nn.Linear(latent_dim, behavior_dim) for r in rooms})
         self.modality_embed = nn.Embedding(2, latent_dim)         # 0 neural, 1 behaviour
-        self.mask_token = nn.Parameter(torch.zeros(2, latent_dim))
-        nn.init.normal_(self.mask_token, std=0.02)
+        # Single shared mask token: the per-modality modality_embed added afterward is
+        # what distinguishes masked neural from masked behaviour tokens, so a per-modality
+        # mask token would be redundant. Initialised at zero -> a masked token starts as
+        # exactly its modality embedding.
+        self.mask_token = nn.Parameter(torch.zeros(latent_dim))
         self.readin_dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList([JointBlock(latent_dim, num_heads, ff_dim, dropout)
                                      for _ in range(num_layers)])
@@ -159,8 +165,8 @@ class JointMaskedTransformer(nn.Module):
                        else self.beh_readout[self.session_to_room[session_name]])
         z_n = self.readin_dropout(self.spike_readin[session_name](sp))
         z_b = self.readin_dropout(beh_readin(behavior))
-        z_n = torch.where(neural_target.bool().unsqueeze(-1), self.mask_token[0], z_n)
-        z_b = torch.where(beh_target.bool().unsqueeze(-1), self.mask_token[1], z_b)
+        z_n = torch.where(neural_target.bool().unsqueeze(-1), self.mask_token, z_n)
+        z_b = torch.where(beh_target.bool().unsqueeze(-1), self.mask_token, z_b)
         z_n = z_n + self.modality_embed(torch.zeros(1, dtype=torch.long, device=dev))
         z_b = z_b + self.modality_embed(torch.ones(1, dtype=torch.long, device=dev))
         x = torch.cat([z_n, z_b], dim=1)                          # (B, 2T, D)
