@@ -6,8 +6,8 @@ from .layers import TransformerEncoderRoPE, RBFBasis
 
 class _PerTimestepFFN(nn.Module):
     """Per-timestep position-wise MLP block, structurally matched to
-    TransformerEncoderRoPE's FFN sub-block (LayerNorm + Linear-GELU-Linear +
-    dropout + residual). No attention, no temporal mixing. Used by
+    TransformerEncoderRoPE's pre-LN FFN sub-block (LayerNorm -> Linear-GELU-Linear ->
+    dropout, wrapped in a residual). No attention, no temporal mixing. Used by
     Bat_Transformer when use_attention=False to ablate temporal attention
     while preserving per-timestep capacity."""
     def __init__(self, hidden_dim, ff_dim, dropout):
@@ -21,7 +21,7 @@ class _PerTimestepFFN(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, x, *args, **kwargs):
-        return self.norm(x + self.dropout(self.ff(x)))
+        return x + self.dropout(self.ff(self.norm(x)))
 
 
 class Bat_Transformer(nn.Module):
@@ -31,8 +31,9 @@ class Bat_Transformer(nn.Module):
       1. Place branch (``use_place_as_input``): 3D position -> RBF spatial basis
          (per-session Gaussian place fields) -> MLP embedding.
       2. Trajectory branch (``use_trajectory_as_input``): full behaviour sequence ->
-         Linear embedding -> transformer encoder with RoPE (or per-timestep FFN blocks
-         when ``use_attention=False``, ablating temporal attention).
+         Linear embedding -> pre-LN transformer encoder with RoPE (or pre-LN
+         per-timestep FFN blocks when ``use_attention=False``, ablating temporal
+         attention).
     At least one branch must be enabled.
 
     Parameters
@@ -196,7 +197,8 @@ class Bat_Transformer(nn.Module):
             if self.use_attention:
                 self.layers = nn.ModuleList([
                     TransformerEncoderRoPE(hidden_dim=latent_dim, num_head=num_heads, ff_dim=ff_dim,
-                                           dropout=dropout_prob, use_low_rank=use_low_rank, low_rank_r=low_rank_r) for _ in range(num_layers)
+                                           dropout=dropout_prob, use_low_rank=use_low_rank, low_rank_r=low_rank_r,
+                                           norm_first=True) for _ in range(num_layers)
                 ])
             else:
                 self.layers = nn.ModuleList([

@@ -335,7 +335,13 @@ class MultiheadAttentionRoPE(nn.Module):
 
 class TransformerEncoderRoPE(nn.Module):
     """
-    Transformer encoder layer using RoPE
+    Transformer encoder layer using RoPE.
+
+    ``norm_first=False`` (default) is post-LN (LayerNorm after each residual add);
+    ``norm_first=True`` is pre-LN (LayerNorm inside each residual branch, clean skip
+    path). The default preserves the original post-LN behaviour for backward
+    compatibility with existing checkpoints.
+
     Example:
         B, T, C, H, ff = 2, 16, 64, 8, 128
         x = torch.randn(B, T, C)
@@ -355,11 +361,13 @@ class TransformerEncoderRoPE(nn.Module):
         dropout = 0.1,
         use_low_rank = False, # whether to use low rank matrix multiplication or not
         low_rank_r = 4,
+        norm_first = False, # False: post-LN (default, backward compatible); True: pre-LN
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_head = num_head
         self.head_dim = hidden_dim // num_head
+        self.norm_first = norm_first
 
         self.attention = MultiheadAttentionRoPE(hidden_dim, num_head, use_low_rank=use_low_rank, low_rank_r=low_rank_r)
 
@@ -399,16 +407,23 @@ class TransformerEncoderRoPE(nn.Module):
         batch_size, seq_len, D = query.shape
         sin, cos = build_rotary_emb(seq_len=seq_len, dim_head=self.head_dim, device=query.device)
 
+        # pre-LN: normalize the attention inputs before the sublayer (and keep the
+        # raw query for the residual); post-LN: feed the raw inputs and normalize
+        # after the residual add.
+        q_in = self.norm1(query) if self.norm_first else query
+        k_in = self.norm1(key) if self.norm_first else key
+        v_in = self.norm1(value) if self.norm_first else value
+
         # Forward with RoPE
         if return_attn_weights:
             out, attn_weights= self.attention(
-                query, 
-                key, 
-                value, 
-                sin=sin, 
-                cos=cos, 
-                attn_mask=attn_mask, 
-                is_causal=is_causal, 
+                q_in,
+                k_in,
+                v_in,
+                sin=sin,
+                cos=cos,
+                attn_mask=attn_mask,
+                is_causal=is_causal,
                 return_attn_weights=return_attn_weights,
                 is_bigbird=is_bigbird,
                 attention_window_size=attention_window_size,
@@ -417,28 +432,31 @@ class TransformerEncoderRoPE(nn.Module):
             )
         else:
             out = self.attention(
-                query, 
-                key, 
-                value, 
-                sin=sin, 
-                cos=cos, 
-                attn_mask=attn_mask, 
-                is_causal=is_causal, 
+                q_in,
+                k_in,
+                v_in,
+                sin=sin,
+                cos=cos,
+                attn_mask=attn_mask,
+                is_causal=is_causal,
                 return_attn_weights=return_attn_weights,
                 is_bigbird=is_bigbird,
                 attention_window_size=attention_window_size,
                 num_global=num_global,
                 num_random=num_random,
             )
-        
-        out = query + self.dropout(out)
-        out = self.norm1(out)
 
-        out = out + self.dropout(self.ff(out))
-        out = self.norm2(out)
+        if self.norm_first:
+            out = query + self.dropout(out)
+            out = out + self.dropout(self.ff(self.norm2(out)))
+        else:
+            out = query + self.dropout(out)
+            out = self.norm1(out)
+            out = out + self.dropout(self.ff(out))
+            out = self.norm2(out)
 
         if return_attn_weights:
-            return out, attn_weights 
+            return out, attn_weights
         else:
             return out
         
