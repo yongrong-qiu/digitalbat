@@ -428,7 +428,7 @@ class TransformerEncoderRoPE(nn.Module):
                 num_random=num_random,
             )
         
-        out = out + self.dropout(out)
+        out = query + self.dropout(out)
         out = self.norm1(out)
 
         out = out + self.dropout(self.ff(out))
