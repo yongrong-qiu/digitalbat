@@ -217,6 +217,9 @@ class Bat_Transformer(nn.Module):
                     with torch.no_grad():
                         head.bias[:latent_dim].fill_(1.0)  # gamma = 1
                         head.bias[latent_dim:].zero_()     # beta = 0
+            # Pre-LN final norm on the trajectory branch: the residual stream is
+            # otherwise un-normalised going into the readout.
+            self.traj_norm = nn.LayerNorm(latent_dim)
 
         # session-specific readouts.  `session_to_readout` lets multiple sessions
         # share a head (matched neurons across configurations); default is identity.
@@ -366,6 +369,9 @@ class Bat_Transformer(nn.Module):
             # (B, T, D) and aligns with the per-timestep place branch / readout
             if self.room_embed_mode == 'token':
                 x_traj_embed = x_traj_embed[:, 1:, :]
+
+            # pre-LN final norm before the readout
+            x_traj_embed = self.traj_norm(x_traj_embed)
 
         if self.use_place_as_input and (not self.use_trajectory_as_input):
             x_embed = x_place_embed.clone()

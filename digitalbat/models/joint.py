@@ -22,9 +22,9 @@ modality embedding added afterward is what distinguishes the two masked streams.
 concatenated into a length-``2T`` sequence and processed by ``num_layers`` pre-norm
 transformer blocks with full attention and **timestamp-aware RoPE**
 (``build_rotary_emb_from_timestamps``) so a neural and a behaviour token at the same
-time bin share rotary phase. Per-session ``Linear`` + ``ELU1`` reads the neural latent
-back to a non-negative Poisson rate; a (per-room) ``Linear`` reads the behaviour latent
-back to position.
+time bin share rotary phase. After a final ``LayerNorm`` (pre-norm convention),
+per-session ``Linear`` + ``ELU1`` reads the neural latent back to a non-negative Poisson
+rate; a (per-room) ``Linear`` reads the behaviour latent back to position.
 
 Tasks are selected by masking (see :data:`SCHEMES` / :func:`sample_mask`) and trained
 with :func:`joint_loss` (Poisson NLL on masked neural targets + ``lam`` * MSE on masked
@@ -150,6 +150,9 @@ class JointMaskedTransformer(nn.Module):
         self.readin_dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList([JointBlock(latent_dim, num_heads, ff_dim, dropout)
                                      for _ in range(num_layers)])
+        # Pre-LN final norm: the residual stream is otherwise un-normalised going
+        # into the read-outs. Applied to the full (B, 2T, D) latent before splitting.
+        self.final_norm = nn.LayerNorm(latent_dim)
         self.spike_act = ELU1()
 
     def forward(self, session_name, spike, behavior, valid_mask,
@@ -183,6 +186,7 @@ class JointMaskedTransformer(nn.Module):
                 attn_all.append(aw)
             else:
                 x = blk(x, sin, cos, attn_mask)
+        x = self.final_norm(x)
         h_n, h_b = x[:, :T], x[:, T:]
         rate = self.spike_act(self.spike_readout[session_name](h_n))
         beh = beh_readout(h_b)
