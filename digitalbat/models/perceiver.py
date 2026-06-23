@@ -283,9 +283,10 @@ class PerceiverIOTrajectoryDecoder(nn.Module):
             window = 2 * config.T_max
         else:
             window = config.T_max
-        # T_max = 0 → single-query (Δt=0) ablation. window is otherwise unused
-        # (Fourier features at t=0 collapse to a constant regardless of freq),
-        # but we still need a finite min_freq to avoid 1/0.
+        # T_max = 0 → single-query (Δt=0) ablation. In that case window's *value*
+        # doesn't affect the output (Fourier features at t=0 collapse to a constant
+        # regardless of freq), but it still feeds min_freq below, so clamp it to a
+        # finite floor to avoid 1/0.
         window = max(window, config.dt)
         min_freq = 1.0 / window
         max_freq = 1.0 / (2 * config.dt)

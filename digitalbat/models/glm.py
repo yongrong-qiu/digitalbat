@@ -211,6 +211,11 @@ class GLM_3DCosineBasis_Kinematics(nn.Module):
 
     Velocity direction is converted to three rotation angles (one per axis)
     using atan2, then expanded with periodic cosine bumps.
+
+    Precondition: the behaviour tensor must use the fixed column layout
+    ``[pos(0:3), speed(3), vel_unit(4:7), IMU(7:13)]`` (behaviour_dim >= 13). This
+    requires the dataloader to be built with ``use_speed_head_dir=True`` and
+    ``use_IMU_flag=True`` (both default False); ``_make_design`` asserts on it.
     """
     def __init__(
         self,
@@ -300,7 +305,16 @@ class GLM_3DCosineBasis_Kinematics(nn.Module):
         return bumps
 
     def _make_design(self, x, mask=None, session_name=None):
-        N, T, _ = x.shape
+        N, T, D = x.shape
+        # Fixed behaviour-column layout: 0:3 position, 3 speed, 4:7 velocity unit
+        # vector, 7:13 IMU (3 accel + 3 gyro). This holds only when the loader is
+        # built with use_speed_head_dir=True and use_IMU_flag=True (both default to
+        # False in bat_data_loader, and no_3d_location shifts every column). Guard
+        # against silent column misalignment.
+        assert D >= 13, (
+            f'GLM_3DCosineBasis_Kinematics expects behaviour_dim >= 13 with layout '
+            f'[pos(0:3), speed(3), vel_unit(4:7), IMU(7:13)]; got behaviour_dim={D}. '
+            f'Build the dataloader with use_speed_head_dir=True and use_IMU_flag=True.')
         spatial = self._spatial_basis(x)                  # (N, T, K^3)
         vel_bumps = self._velocity_bumps(x, session_name) # (N, T, n_vel_bumps*3)
         speed = x[..., 3:4]                               # (N, T, 1)

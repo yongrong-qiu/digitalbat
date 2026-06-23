@@ -25,27 +25,41 @@ class _PerTimestepFFN(nn.Module):
 
 
 class Bat_Transformer(nn.Module):
-    """
-    Flexible MLP model for spatial inputs.
-    Compared to MLP(), this model uses session-wise readout layers without Fourier features.
+    """Dual-branch transformer encoder: behaviour -> per-session neural spiking.
+
+    Two parallel encoding branches are concatenated before per-session readout heads:
+      1. Place branch (``use_place_as_input``): 3D position -> RBF spatial basis
+         (per-session Gaussian place fields) -> MLP embedding.
+      2. Trajectory branch (``use_trajectory_as_input``): full behaviour sequence ->
+         Linear embedding -> transformer encoder with RoPE (or per-timestep FFN blocks
+         when ``use_attention=False``, ablating temporal attention).
+    At least one branch must be enabled.
 
     Parameters
     ----------
     input_dim : int
-        Original dimensionality of the input (e.g., 10).
-
-    output_dim : int
-        Dimensionality of the output.
-
-    latent_dims_list : List[int]
-        List of hidden layer sizes. If empty, the model becomes a single linear layer.
-
-    latent_activation : nn.Module
-        Activation function applied after each hidden layer (e.g., nn.ReLU()).
-
+        Behaviour-channel dimensionality fed to the trajectory branch (e.g. 10).
+    output_dim_dict : dict[str, int]
+        ``{session_name: n_neurons}``; configures one readout head (and one RBF
+        ``spatial_basis``) per recording session.
+    use_place_as_input, use_trajectory_as_input : bool
+        Enable/disable each encoding branch.
+    basis_type : str
+        Spatial basis for the place branch (currently ``'RBF'``).
+    spatial_centers_sigma_dict : dict[str, tuple]
+        ``{session_name: (centers, sigma)}`` for the per-session place fields.
+    latent_dim_place, latent_dim, num_heads, ff_dim, num_layers, dropout_prob :
+        Place-embedding width, and transformer hyperparameters for the trajectory branch.
+    use_low_rank, use_low_rank_readout, low_rank_r :
+        Optional low-rank factorisation of the place embedding / readout layers.
     final_activation : nn.Module
-        Activation function applied after the output layer (e.g., nn.Identity()).
-
+        Activation applied to the readout output (e.g. ``nn.Identity()``).
+    use_attention : bool
+        If False, replace transformer blocks with per-timestep FFN blocks.
+    session_to_room, room_embed_mode, session_to_readout :
+        Optional environment-keyed trajectory projection / room conditioning
+        ('segment' | 'token' | 'film') / readout-head sharing. See the ``__init__``
+        argument comments for details.
     """
     def __init__(
         self,

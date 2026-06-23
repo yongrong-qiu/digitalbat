@@ -280,9 +280,12 @@ class MultiheadAttentionRoPE(nn.Module):
             # fig, ax = plt.subplots(figsize=(3,3))
             # ax.imshow(mask.cpu().numpy())
             #
-            # random attention
+            # random attention. NB: do NOT reseed the global RNG here -- a
+            # torch.manual_seed() inside forward() corrupts process-wide RNG
+            # state (dropout, shuffling) on every call and freezes these
+            # "random" connections to a fixed pattern. Let the global seed set
+            # at training start govern reproducibility instead.
             if num_random > 0:
-                torch.manual_seed(1) 
                 rand = torch.randint(0, L_k, (L_q, num_random), device=Q.device)
                 bigbird_mask.scatter_(1, rand, True)
             # fig, ax = plt.subplots(figsize=(3,3))
