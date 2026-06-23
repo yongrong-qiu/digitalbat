@@ -47,6 +47,10 @@ class Bat_Transformer_Decoder(nn.Module):
     shared latent. The readin's weight matrix has shape (latent_dim, K_session),
     so column j is the learned embedding of neuron j in that session.
 
+    The transformer blocks are pre-LN (``norm_first=True``), with a final
+    ``LayerNorm`` before the position head (matching ``Bat_Transformer`` /
+    ``JointMaskedTransformer``).
+
     Parameters
     ----------
     input_dim_dict : dict
@@ -102,10 +106,14 @@ class Bat_Transformer_Decoder(nn.Module):
                 dropout=dropout_prob,
                 use_low_rank=use_low_rank,
                 low_rank_r=low_rank_r,
+                norm_first=True,  # pre-LN
             )
             for _ in range(num_layers)
         ])
 
+        # Pre-LN final norm: the residual stream is otherwise un-normalised going
+        # into the position head.
+        self.final_norm = nn.LayerNorm(latent_dim)
         self.head = nn.Linear(latent_dim, output_dim)
         self.final_activation = final_activation
 
@@ -158,7 +166,7 @@ class Bat_Transformer_Decoder(nn.Module):
                     num_random=num_random,
                 )
 
-        out = self.final_activation(self.head(x))
+        out = self.final_activation(self.head(self.final_norm(x)))
         if return_attn_weights:
             return out, attn_weights_list
         return out
