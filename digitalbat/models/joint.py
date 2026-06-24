@@ -235,8 +235,21 @@ def sample_mask(valid_mask, scheme, frac=0.5):
 
 
 def joint_loss(rate, beh, spike, behavior, valid_mask, neural_target, beh_target,
-               lam, pois_fn):
-    """Poisson NLL on masked+valid neural targets + ``lam`` * MSE on behaviour targets.
+               lam, pois_fn, pos_weight=1.0, pos_dim=3):
+    """Poisson NLL on masked+valid neural targets + ``lam`` * weighted behaviour MSE.
+
+    The behaviour MSE is split into a **position** term (first ``pos_dim`` channels) and
+    an **auxiliary** term (any remaining kinematic channels — speed / heading sin-cos /
+    gyro / accel)::
+
+        behaviour_loss = pos_weight * MSE_pos + (1 - pos_weight) * MSE_aux
+
+    so ``pos_weight`` (in ``[0, 1]``) trades position reconstruction against the auxiliary
+    variables without the auxiliary channels diluting position by sheer count. With no
+    auxiliary channels (``behavior_dim == pos_dim``) it reduces to ``MSE_pos`` — i.e.
+    ``pos_weight`` is a no-op and the position-only case is unchanged (default
+    ``pos_weight=1.0`` is fully backward compatible). The whole behaviour term is scaled
+    by ``lam`` against the neural NLL.
 
     ``pois_fn`` is a ``nn.PoissonNLLLoss(log_input=False, reduction='none')`` instance.
     Only masked *and* valid timesteps contribute to each term.
@@ -247,5 +260,9 @@ def joint_loss(rate, beh, spike, behavior, valid_mask, neural_target, beh_target
     if nsel.any():
         loss = loss + pois_fn(rate[nsel], spike.float()[nsel]).mean()
     if bsel.any():
-        loss = loss + lam * ((beh[bsel] - behavior[bsel]) ** 2).mean()
+        diff2 = (beh[bsel] - behavior[bsel]) ** 2           # (n_masked, behavior_dim)
+        beh_loss = diff2[:, :pos_dim].mean()                # position
+        if diff2.shape[1] > pos_dim:                        # auxiliary kinematic channels present
+            beh_loss = pos_weight * beh_loss + (1.0 - pos_weight) * diff2[:, pos_dim:].mean()
+        loss = loss + lam * beh_loss
     return loss
