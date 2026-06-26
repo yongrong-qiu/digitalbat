@@ -21,6 +21,7 @@ from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
+import seaborn as sns
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -2412,3 +2413,388 @@ def decode_spikes_to_latent(all_true_spike, all_latents, all_session, alphas=[0.
     print("\nEncoding Complete! Output array matches original temporal layout.")
     return all_spike_in_latent
     
+
+class FlightRQAAnalyzer:
+    def __init__(self, min_len=20, max_len=100, threshold=0.05, l_min=2, v_min=2, dist_metric='euclidean'):
+        """
+        Args:
+            min_len: Minimum number of time points for a valid flight.
+            max_len: Maximum number of time points for a valid flight.
+            threshold: Threshold (e.g., 0.05 = 5% density) to dynamically set epsilon.
+            l_min: Minimum diagonal line length for Determinism (DET).
+            v_min: Minimum vertical line length for Laminarity (LAM).
+        """
+        self.min_len = min_len
+        self.max_len = max_len
+        self.threshold = threshold
+        self.l_min = l_min
+        self.v_min = v_min
+        self.dist_metric = dist_metric
+
+    def _compute_single_flight_rqa(self, latents, theiler_window=2):
+        """
+        Computes the recurrence matrix and comprehensive RQA metrics for an isolated flight,
+        properly adjusting for a specified Theiler window to remove short-term autocorrelation.
+        
+        Args:
+            latents: array of shape (T, 32)
+            theiler_window: int, number of diagonal steps to mask out (w=1 masks just the LOI)
+        """
+        T = latents.shape[0]
+        
+        # 1. Compute Pairwise Distance Matrix
+        dist_matrix = squareform(pdist(latents, metric=self.dist_metric))
+        
+        # 2. Extract upper triangle distances strictly outside the Theiler window 
+        # to ensure epsilon is dynamically fit only on non-trivial state pairs
+        nontrivial_mask = np.triu(np.ones((T, T), dtype=bool), k=theiler_window)
+        nontrivial_distances = dist_matrix[nontrivial_mask]
+        
+        if len(nontrivial_distances) == 0:
+            return None
+            
+        # Target threshold is stored in self.threshold (e.g., 0.05)
+        eps = np.percentile(nontrivial_distances, self.threshold * 100)
+        
+        # 3. Generate Binary Recurrence Plot (RP)
+        RP_raw = (dist_matrix <= eps).astype(int)
+        
+        # Apply the Theiler Window mask to create the operational RP
+        # This completely zeroes out the main diagonal and adjacent sub-diagonals
+        full_theiler_mask = np.triu(np.ones((T, T)), k=theiler_window) + np.tril(np.ones((T, T)), k=-theiler_window)
+        RP = RP_raw * full_theiler_mask
+        
+        # Total possible non-trivial points in the matrix after Theiler masking
+        possible_points = np.sum(full_theiler_mask)
+        total_recurrences = np.sum(RP)
+        
+        # Measure 1: Recurrence Rate (RR)
+        rr = total_recurrences / possible_points if possible_points > 0 else 0.0
+        
+        if total_recurrences == 0:
+            return {
+                "RP": RP, "RR": rr, "DET": 0.0, "LAM": 0.0, 
+                "L_avg": 0.0, "TT": 0.0, "DIV": 0.0, "ENTR": 0.0, "TREND": 0.0
+            }
+
+        # 4. Calculate Diagonal Lines Metrics (DET, L_avg, DIV, ENTR)
+        diag_lengths = []
+        for k in range(-T + 1, T):
+            # Enforce Theiler window restriction across sub-diagonals
+            if abs(k) < theiler_window: 
+                continue
+            diag = np.diag(RP, k=k)
+            padded = np.convolve(diag, [1, -1])
+            starts = np.where(padded == 1)[0]
+            ends = np.where(padded == -1)[0]
+            diag_lengths.extend(ends - starts)
+            
+        diag_lengths = np.array(diag_lengths)
+        det_lines = diag_lengths[diag_lengths >= self.l_min]
+        
+        # Measure 2 & 4: DET and Averaged Diagonal Line Length (L_avg)
+        det = np.sum(det_lines) / total_recurrences if len(det_lines) > 0 else 0.0
+        l_avg = np.mean(det_lines) if len(det_lines) > 0 else 0.0
+        
+        # Measure 6: Divergence (DIV)
+        l_max = np.max(diag_lengths) if len(diag_lengths) > 0 else 0
+        div = 1.0 / l_max if l_max >= self.l_min else 0.0
+        
+        # Measure 7: Shannon Entropy of Diagonal Line Lengths (ENTR)
+        if len(det_lines) > 0:
+            # Count the frequency of unique line lengths
+            _, counts = np.unique(det_lines, return_counts=True)
+            probabilities = counts / len(det_lines)
+            entr = -np.sum(probabilities * np.log(probabilities))
+        else:
+            entr = 0.0
+
+        # 5. Calculate Vertical Lines Metrics (LAM, TT)
+        vert_lengths = []
+        for col in range(T):
+            vertical = RP[:, col]
+            padded = np.convolve(vertical, [1, -1])
+            starts = np.where(padded == 1)[0]
+            ends = np.where(padded == -1)[0]
+            vert_lengths.extend(ends - starts)
+            
+        vert_lengths = np.array(vert_lengths)
+        lam_lines = vert_lengths[vert_lengths >= self.v_min]
+        
+        # Measure 3 & 5: LAM and Trapping Time (TT)
+        lam = np.sum(lam_lines) / total_recurrences if len(lam_lines) > 0 else 0.0
+        tt = np.mean(lam_lines) if len(lam_lines) > 0 else 0.0
+
+        # 6. Calculate TREND (Linear regression of local recurrence density vs. distance from LOI)
+        # Trend measures nonstationarity / structural degradation over time distances
+        # To prove that R_to_R has a fundamentally different dynamic independent of flight duration, 
+        # you must normalize the time-separation axis ($\Delta t$) to relative behavior time 
+        # (0% to 100% of flight length) before running the linear regression.
+        distances = []
+        local_densities = []
+        
+        # Iterate through sub-diagonals going outward from the Theiler limit
+        for k in range(theiler_window, T - 1):
+            # Sum upper and lower sub-diagonals at distance k
+            diag_upper = np.diag(RP, k=k)
+            diag_lower = np.diag(RP, k=-k)
+            
+            combined_recurrences = np.sum(diag_upper) + np.sum(diag_lower)
+            combined_possible = len(diag_upper) + len(diag_lower)
+            
+            if combined_possible > 0:
+                # Normalize the time distance by the absolute trajectory length T
+                distances.append(k/T)
+                local_densities.append(combined_recurrences / combined_possible)
+                
+        if len(distances) > 1:
+            # Standard linear regression slope calculation
+            slope, _ = np.polyfit(distances, local_densities, 1)
+            # trend = slope * 1000  # Multiplied by 1000 per standard RQA scientific convention
+            trend = slope  # No longer need to multiply by 1000 since scale is 0 to 1
+        else:
+            trend = 0.0
+
+        return {
+            "RP": RP,
+            "RR": rr,
+            "DET": det,
+            "LAM": lam,
+            "L_avg": l_avg,
+            "TT": tt,
+            "DIV": div,
+            "ENTR": entr,
+            "TREND": trend
+        }
+
+    def analyze(self, all_latents, all_rel_time, all_reward, all_perch, all_session):
+        """
+        Slices concatenated data and runs RQA across nested conditions:
+        Environment (indoor vs outdoor) -> Task Type (R->R, R->P, P->R).
+        """
+        # Identify individual flight boundaries
+        start_indices = np.where(all_rel_time == 0.0)[0]
+        flight_boundaries = np.append(start_indices, len(all_rel_time))
+        
+        # Map conditions to human-readable strings
+        task_mapping = {0: "R_to_R", 1: "R_to_P", 2: "P_to_R"}
+        
+        # Initialize structured nested dictionary output
+        results = {
+            "indoor": {name: [] for name in task_mapping.values()},
+            "outdoor": {name: [] for name in task_mapping.values()}
+        }
+        
+        for i in range(len(flight_boundaries) - 1):
+            idx_start = flight_boundaries[i]
+            idx_end = flight_boundaries[i+1]
+            length = idx_end - idx_start
+            
+            # Filter by trajectory duration criteria
+            if not (self.min_len <= length <= self.max_len):
+                continue
+                
+            # Parse Environment Type
+            session_name = all_session[idx_start]
+            if "Dataset_1" in session_name or "Dataset_3" in session_name:
+                env = "indoor"
+            elif "Dataset_2" in session_name:
+                env = "outdoor"
+            else:
+                continue # Unknown dataset group
+                
+            # Parse Flight Task Conditions
+            is_start_reward = all_reward[idx_start]
+            is_start_perch = all_perch[idx_start]
+            is_end_reward = all_reward[idx_end - 1]
+            is_end_perch = all_perch[idx_end - 1]
+            
+            if is_start_reward and is_end_reward:
+                cond_id = 0
+            elif is_start_reward and is_end_perch:
+                cond_id = 1
+            elif is_start_perch and is_end_reward:
+                cond_id = 2
+            else:
+                continue # Exclude non-target trajectories (e.g., perch->perch)
+                
+            task_str = task_mapping[cond_id]
+            flight_latents = all_latents[idx_start:idx_end, :]
+            # If use all_true_spike (shape: 8332 by 266): 
+            # Select all rows, but only columns (neurons) that are NOT completely NaN
+            flight_latents = flight_latents[:, ~np.isnan(flight_latents).all(axis=0)]
+            
+            # Run RQA
+            rqa_output = self._compute_single_flight_rqa(flight_latents)
+            
+            if rqa_output is not None:
+                # Store the results metadata along with metrics
+                results[env][task_str].append({
+                    "flight_idx": i,
+                    "global_indices": (idx_start, idx_end),
+                    "trajectory_len": length,
+                    "RP": rqa_output["RP"],
+                    "DET": rqa_output["DET"],
+                    "LAM": rqa_output["LAM"],
+                    "L_avg": rqa_output["L_avg"],
+                    "TT": rqa_output["TT"],
+                    "DIV": rqa_output["DIV"],
+                    "ENTR": rqa_output["ENTR"],
+                    "TREND": rqa_output["TREND"],
+                })
+                
+        return results
+    
+    def plot_rp(self, results, env='indoor', ncols = 5, seed = 10):
+        task_keys = list(results[env].keys())
+        nrows = len(task_keys)
+        fig, ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(10, 6))
+        for ii in range(nrows):
+            np.random.seed(seed + ii)
+            inds = np.random.choice(len(results[env][task_keys[ii]]), ncols, replace=False)
+            for jj in range(ncols):
+                # rqa_dataset['indoor']['reward_to_reward'][0]['RP']
+                ax[ii, jj].matshow(results[env][task_keys[ii]][inds[jj]]['RP'], cmap='gray_r')
+                ax[ii, jj].grid(True)
+            ax[ii, 0].set_ylabel(f'{task_keys[ii]}')
+        ax[0, 0].set_title(env)
+        plt.tight_layout()
+        
+        return None
+    
+    def plot_rqa_distributions(self, results):
+        """
+        Generates a 2x3 subplot figure comparing the distributions of DET, LAM, and DIV
+        with automated pairwise significance testing annotated on each plot.
+        """
+        from scipy.stats import mannwhitneyu
+        from itertools import combinations
+
+        # 1. Flatten the nested results dictionary into a tidy pandas DataFrame
+        data_list = []
+        for env, tasks in results.items():
+            for task_str, flights in tasks.items():
+                for flight in flights:
+                    data_list.append({
+                        "Environment": env.capitalize(),
+                        "Flight Type": task_str.replace("_", " ").title(),
+                        "DET": flight["DET"],
+                        "LAM": flight["LAM"],
+                        "L_avg": flight["L_avg"],
+                        "TT": flight["TT"],
+                        "DIV": flight["DIV"],
+                        "ENTR": flight["ENTR"],
+                        "TREND": flight["TREND"],
+                    })
+        
+        df = pd.DataFrame(data_list)
+        if df.empty:
+            print("No data available to plot.")
+            return
+
+        # 2. Set up layout
+        environments = ["Indoor", "Outdoor"]
+        # We ignore L_avg, TT, DIV, ENTR which are influenced by the flight length.
+        metrics = ["DET", "LAM", "TREND"]
+        titles = ["DET", "LAM", "TREND"]
+        palettes = {"Indoor": "Blues", "Outdoor": "Oranges"}
+        fig, axes = plt.subplots(len(environments), len(metrics), figsize=(10, 6), sharex=True)
+        
+        # Helper function to convert p-values to your exact star mapping
+        def get_star_string(p):
+            if p < 0.0001: return '*****'
+            elif p < 0.001: return '***'
+            elif p < 0.01:  return '**'
+            elif p < 0.05:  return '*'
+            return None
+
+        # 3. Loop through rows and columns
+        for row_idx, env_name in enumerate(environments):
+            df_env = df[df["Environment"] == env_name]
+            
+            for col_idx, metric in enumerate(metrics):
+                ax = axes[row_idx, col_idx]
+                
+                if df_env.empty:
+                    continue
+
+                # Ensure order of categories matches across plots
+                flight_types = sorted(df_env["Flight Type"].unique())[::-1]
+                
+                sns.boxenplot(
+                    data=df_env,
+                    x="Flight Type",
+                    y=metric,
+                    order=flight_types,
+                    hue="Flight Type",
+                    legend=False,
+                    palette=palettes[env_name],
+                    ax=ax
+                )
+                
+                # --- STATISTICAL ANNOTATION LOGIC ---
+                # Find the maximum y-value currently in the data to place annotations dynamically
+                y_max_base = df_env[metric].max()
+                y_range = y_max_base - df_env[metric].min()
+                if np.isnan(y_range) or y_range == 0: y_range = 1.0
+                
+                # Generate all unique pairs of categories
+                pairs = list(combinations(flight_types, 2))
+                annotation_count = 0
+                
+                for pair in pairs:
+                    # Isolate data arrays for the two categories
+                    group1 = df_env[df_env["Flight Type"] == pair[0]][metric].dropna().values
+                    group2 = df_env[df_env["Flight Type"] == pair[1]][metric].dropna().values
+                    
+                    # We need at least 3 samples per group to run a meaningful comparison
+                    if len(group1) < 3 or len(group2) < 3:
+                        continue
+                        
+                    # Perform Mann-Whitney U test
+                    stat, p_val = mannwhitneyu(group1, group2, alternative='two-sided')
+                    star_str = get_star_string(p_val)
+                    
+                    if star_str: # Only plot if statistically significant
+                        # Find indices to know where to draw lines horizontally
+                        idx1 = flight_types.index(pair[0])
+                        idx2 = flight_types.index(pair[1])
+                        
+                        # Dynamically step up the height of each bar to prevent overlapping lines
+                        y_line = y_max_base + (0.08 * y_range) + (annotation_count * 0.12 * y_range)
+                        h = 0.02 * y_range # Tick height
+                        
+                        # Draw the bracket line
+                        ax.plot([idx1, idx1, idx2, idx2], [y_line-h, y_line, y_line, y_line-h], lw=1.5, c='k')
+                        # Draw the star text centered over the line
+                        ax.text((idx1 + idx2) * 0.5, y_line + (0.005 * y_range), star_str, ha='center', va='bottom', 
+                            color='k', fontsize=12, fontweight='bold')
+                        
+                        annotation_count += 1
+                
+                # Adjust Y-limits to fit the annotations without clipping
+                if annotation_count > 0:
+                    ax.set_ylim(bottom=df_env[metric].min() - (0.05 * y_range), 
+                                top=y_max_base + (annotation_count * 0.15 * y_range))
+                
+                # Aesthetics
+                if row_idx == 0:
+                    ax.set_title(titles[col_idx], fontsize=14, pad=15)
+                
+                # ax.set_ylabel(f"{metric} ({env_name})", fontsize=12, fontweight='bold')
+                if col_idx == 0:
+                    ax.set_ylabel(env_name)
+                else:
+                    ax.set_ylabel("")
+
+                
+                if row_idx == 1:
+                    ax.set_xlabel("")
+                    ax.tick_params(axis='x', rotation=45)
+                else:
+                    ax.set_xlabel("")
+                    
+                ax.grid(axis='y', linestyle='--', alpha=0.3)
+
+        plt.tight_layout()
+        return None
