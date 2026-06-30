@@ -2798,3 +2798,160 @@ class FlightRQAAnalyzer:
 
         plt.tight_layout()
         return None
+    
+
+class FlightSharedStates():
+    def __init__(self, all_latents, all_rel_time, all_reward, all_perch, all_session, 
+                 MIN_LEN=20, MAX_LEN=100):
+        """
+        Parses concatenated data arrays, separates them into individual flight trials, 
+        filters by length, and groups them by environment and functional type.
+        """
+        self.all_latents = all_latents
+        self.all_rel_time = all_rel_time
+        
+        # Dictionary structure: env -> function_type -> list of flight dicts
+        # Environments: 'indoor' (Dataset_1/3), 'outdoor' (Dataset_2)
+        # Function types: 0 (R->R), 1 (R->P), 2 (P->R), 3 (P->P), 4 (Others)
+        self.grouped_flights = {
+            'indoor': {0: [], 1: [], 2: [], 3: [], 4: []},
+            'outdoor': {0: [], 1: [], 2: [], 3: [], 4: []}
+        }
+        
+        self._parse_and_group_flights(all_reward, all_perch, all_session, MIN_LEN, MAX_LEN)
+
+    def _parse_and_group_flights(self, all_reward, all_perch, all_session, MIN_LEN, MAX_LEN):
+        # Identify start boundaries where relative time resets to 0.0
+        start_indices = np.where(self.all_rel_time == 0.0)[0]
+        flight_boundaries = np.append(start_indices, len(self.all_rel_time))
+        
+        for i in range(len(flight_boundaries) - 1):
+            idx_start = flight_boundaries[i]
+            idx_end = flight_boundaries[i+1]
+            
+            # 1. Filter by Flight Trajectory Length
+            length = idx_end - idx_start
+            if not (MIN_LEN <= length <= MAX_LEN):
+                continue
+                
+            # 2. Determine Environment Type
+            session_name = all_session[idx_start]
+            if "Dataset_1" in session_name or "Dataset_3" in session_name:
+                env = 'indoor'
+            elif "Dataset_2" in session_name:
+                env = 'outdoor'
+            else:
+                continue # Skip unrecognized datasets
+                
+            # 3. Classify Flight Function Type
+            is_start_reward = all_reward[idx_start]
+            is_start_perch = all_perch[idx_start]
+            is_end_reward = all_reward[idx_end - 1]
+            is_end_perch = all_perch[idx_end - 1]
+            
+            if is_start_reward and is_end_reward:
+                cond = 0  # R -> R
+            elif is_start_reward and is_end_perch:
+                cond = 1  # R -> P
+            elif is_start_perch and is_end_reward:
+                cond = 2  # P -> R
+            elif is_start_perch and is_end_perch:
+                cond = 3  # P -> P
+            else:
+                cond = 4 # Others
+                
+            # Pack flight data along with its global time indices
+            flight_dict = {
+                'latent': self.all_latents[idx_start:idx_end, :],
+                'global_indices': np.arange(idx_start, idx_end)
+            }
+            
+            self.grouped_flights[env][cond].append(flight_dict)
+            
+        # Print summary statistics upon initialization
+        for env in ['indoor', 'outdoor']:
+            print(f"--- {env.capitalize()} Environment ---")
+            print(f"  Type 0 (R->R): {len(self.grouped_flights[env][0])} flights")
+            print(f"  Type 1 (R->P): {len(self.grouped_flights[env][1])} flights")
+            print(f"  Type 2 (P->R): {len(self.grouped_flights[env][2])} flights")
+            print(f"  Type 3 (P->P): {len(self.grouped_flights[env][3])} flights")
+            print(f"  Type 4 (Others): {len(self.grouped_flights[env][4])} flights")
+
+    def find_shared_states(self, env='indoor', type_A=1, type_B=2, metric='cosine', thresh='min', num_pairs=500, seed=42):
+        """
+        Systematically random-samples pairs of flights from two function types, 
+        computes their cross-distance, and extracts all global indices where the 
+        pairwise distance falls below the specified percentile threshold.
+        """
+        from scipy.spatial.distance import cdist
+        print(f'\nEnvironment: {env}: Type {type_A} vs. Type {type_B}')
+
+        np.random.seed(seed)
+        
+        flights_A = self.grouped_flights[env][type_A]
+        flights_B = self.grouped_flights[env][type_B]
+        
+        if len(flights_A) == 0 or len(flights_B) == 0:
+            raise ValueError(f"One or both selected flight types contain 0 trajectories in the '{env}' environment.")
+            
+        pooled_global_indices = []
+        all_thresholded_distances = []
+        
+        for _ in range(num_pairs):
+            # Randomly select one flight from each type
+            fA = np.random.choice(flights_A)
+            fB = np.random.choice(flights_B)
+            
+            # Compute pairwise 32D distance matrix (Shape: Len_A x Len_B) using specified metric
+            dist_matrix = cdist(fA['latent'], fB['latent'], metric=metric)
+
+            if thresh == 'min':
+                eps = np.min(dist_matrix)
+            else:
+                # Dynamically calculate the cutoff value for the bottom X% of distances for this pair
+                eps = np.percentile(dist_matrix, thresh * 100)
+            
+            # Find all matrix coordinate pairs matching the threshold criteria
+            idx_A_coords, idx_B_coords = np.where(dist_matrix <= eps)
+            
+            # Extract the actual distance values for tracking/diagnostics
+            matching_distances = dist_matrix[idx_A_coords, idx_B_coords]
+            all_thresholded_distances.extend(matching_distances)
+            
+            # Map the local flight time indices back to their absolute indices in all_latents
+            global_idx_A = fA['global_indices'][idx_A_coords]
+            global_idx_B = fB['global_indices'][idx_B_coords]
+            
+            pooled_global_indices.extend(global_idx_A)
+            pooled_global_indices.extend(global_idx_B)
+            
+        # Deduplicate indices since overlapping pairs or adjacent time points can occur frequently
+        unique_shared_indices = np.unique(pooled_global_indices)
+
+        # Extract the latent vectors for just your discovered bottleneck points
+        bottleneck_latents = self.all_latents[unique_shared_indices]
+        # Compute the average distance between ALL discovered bottleneck points
+        internal_distances = pdist(bottleneck_latents, metric=metric)
+        np.random.seed(seed + 10)
+        internal_distances = np.random.choice(internal_distances, num_pairs, replace=False)
+
+        # NULL distances: randomly select pairs of points from flights_A and flights_B
+        # Pre-pool all latent points from flights_A and flights_B to efficiently sample null pairs
+        pooled_latents_A = np.vstack([f['latent'] for f in flights_A])
+        pooled_latents_B = np.vstack([f['latent'] for f in flights_B])
+        np.random.seed(seed + 100)
+        idx_1 = np.random.choice(len(pooled_latents_A), num_pairs, replace=True)
+        idx_2 = np.random.choice(len(pooled_latents_B), num_pairs, replace=True)
+        # Compute baseline background distances
+        null_distances = [cdist(pooled_latents_A[i:i+1], pooled_latents_B[j:j+1], metric=metric)[0,0] for i, j in zip(idx_1, idx_2)]
+        
+        results = {
+            'shared_indices': unique_shared_indices,
+            'pair_thresholded_distances': np.array(all_thresholded_distances),
+            'mean_thresholded_distance': np.mean(all_thresholded_distances) if all_thresholded_distances else None,
+            'total_points_collected': len(unique_shared_indices),
+            'internal_distances': np.array(internal_distances),
+            'pair_null_distances': np.array(null_distances),
+        }
+        
+        return results
