@@ -22,6 +22,7 @@ from sklearn.model_selection import KFold
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 import seaborn as sns
+from scipy import stats
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -2969,7 +2970,7 @@ class SharedStatesSingleNeuron:
         bottleneck_indices : np.ndarray or list
             The global unique shared indices discovered from your low-dim PC analysis.
         grouped_flights : dict
-            The nested dictionary (FlightSharedStates.grouped_flights) containing flight trajectories and their global_indices.
+            The nested dictionary (FlightSharedStates.grouped_flights) containing flight trajectories.
         env : str
             The specific environment to isolate (e.g., 'indoor').
         flight_types : list of int
@@ -2977,52 +2978,62 @@ class SharedStatesSingleNeuron:
         """
         self.all_true_spike = all_true_spike
         self.all_session = all_session
+        self.bottleneck_set = set(bottleneck_indices)
         
-        # 1. Gather all global time indices belonging ONLY to the selected flights/environment
+        # 1. Retain individual flight structures grouped by flight function types
+        self.selected_flights = []
         selected_flight_indices = []
+        
         for f_type in flight_types:
             flights = grouped_flights[env].get(f_type, [])
             for flight in flights:
+                self.selected_flights.append(flight)
                 selected_flight_indices.extend(flight['global_indices'])
                 
-        # Convert to a set for O(1) lookups
+        # Convert to a set for O(1) lookups during pooled baseline processing
         self.selected_flight_set = set(selected_flight_indices)
         
-        # 2. Convert global bottleneck indices to a set for quick intersection
-        self.bottleneck_set = set(bottleneck_indices)
-        
-        # 3. Only evaluate sessions that actually contain these selected flights
-        # Determine which sessions are active based on the global indices of the chosen flights
+        # 2. Determine active sessions based on the global indices of chosen flights
         self.active_sessions = np.unique(all_session[list(self.selected_flight_set)])
 
     def analyze_session_neurons(self, session_name, p_threshold=0.05):
         """
-        Finds neurons within a specific session that are significantly modulated
-        by the bottleneck intersection volume, restricted strictly to the chosen flights.
-        """
-        from scipy import stats
+        # Old:
+        # Finds neurons within a session that pass the statistical modulation t-test 
+        # AND strictly satisfy the trial-by-trial bottleneck participation rule.
 
+        Iterate through each distinct flight belonging to the session and verifies 
+        if the neuron spikes at least once (>=1) within the bottleneck zone on every 
+        single flight to qualify as an anchor cell, and is completely silent (==0) within 
+        the bottleneck zone on every single flight to qualify as a suppressed cell.
+        """
         # Get all global indices for this session
         session_global_indices = np.where(self.all_session == session_name)[0]
+        session_global_set = set(session_global_indices)
         
-        # Filter session indices: must be part of our selected flight types
-        session_flight_indices = [idx for idx in session_global_indices if idx in self.selected_flight_set]
-        
-        if len(session_flight_indices) == 0:
+        # Filter down to the flights that belong strictly to THIS session
+        session_flights = []
+        for flight in self.selected_flights:
+            # Check the first index to verify session membership
+            if flight['global_indices'][0] in session_global_set:
+                session_flights.append(flight)
+                
+        if len(session_flights) == 0:
             return pd.DataFrame()
             
-        # Separate the flight indices into inside vs outside the bottleneck
+        # Isolate pooled session indices inside vs outside the hub for the background t-test
+        session_flight_indices = [idx for idx in session_global_indices if idx in self.selected_flight_set]
         inside_indices = [idx for idx in session_flight_indices if idx in self.bottleneck_set]
         outside_indices = [idx for idx in session_flight_indices if idx not in self.bottleneck_set]
         
         if len(inside_indices) < 3 or len(outside_indices) < 3:
-            return pd.DataFrame() # Insufficient data points in this session's selected flights
+            return pd.DataFrame()
             
-        # Extract the neural activity matrices for these specific time points
+        # Extract pooled session spikes
         spikes_inside = self.all_true_spike[inside_indices, :]
         spikes_outside = self.all_true_spike[outside_indices, :]
         
-        # Filter out NaN columns (neurons not recorded in this specific session)
+        # Filter out NaN columns (neurons not recorded in this session)
         valid_neuron_mask = ~np.all(np.isnan(spikes_inside), axis=0)
         valid_neuron_indices = np.where(valid_neuron_mask)[0]
         
@@ -3032,21 +3043,53 @@ class SharedStatesSingleNeuron:
             rates_inside = spikes_inside[:, neuron_idx]
             rates_outside = spikes_outside[:, neuron_idx]
             
-            # Clean up point-wise NaNs if they exist
             rates_inside = rates_inside[~np.isnan(rates_inside)]
             rates_outside = rates_outside[~np.isnan(rates_outside)]
             
             if len(rates_inside) < 3 or len(rates_outside) < 3:
                 continue
                 
-            # Perform Welch's t-test
+            # Perform baseline Welch's t-test for modulation direction
             t_stat, p_val = stats.ttest_ind(rates_inside, rates_outside, equal_var=False)
-            
             mean_inside = np.mean(rates_inside)
             mean_outside = np.mean(rates_outside)
             
-            is_anchor = (p_val < p_threshold) and (mean_inside > mean_outside)
-            is_suppressed = (p_val < p_threshold) and (mean_inside < mean_outside)
+            # Initialize flight-by-flight tracking flags
+            fired_in_all_bottlenecks = True
+            silenced_in_all_bottlenecks = True
+            valid_flight_count = 0
+            
+            # Evaluate the strict trial-by-trial rule over each individual flight
+            for flight in session_flights:
+                g_indices = flight['global_indices']
+                # Isolate the bottleneck entries specific to this single flight
+                flight_b_indices = [idx for idx in g_indices if idx in self.bottleneck_set]
+                
+                if len(flight_b_indices) == 0:
+                    continue # Skip flights that do not enter the hub coordinates
+                    
+                valid_flight_count += 1
+                flight_b_spikes = self.all_true_spike[flight_b_indices, neuron_idx]
+                
+                # Check metrics for this flight's bottleneck pass
+                total_spikes_in_hub = np.nansum(flight_b_spikes)
+                
+                if total_spikes_in_hub < 1.0:
+                    fired_in_all_bottlenecks = False # Broke the anchor rule
+                if total_spikes_in_hub > 0.0:
+                    silenced_in_all_bottlenecks = False # Broke the suppressed rule
+
+            # If no flights actually intersected the hub, it cannot be classified
+            if valid_flight_count == 0:
+                fired_in_all_bottlenecks = False
+                silenced_in_all_bottlenecks = False
+
+            # # Enforce the dual constraints: statistical modulation AND 100% flight compliance
+            # is_anchor = (p_val < p_threshold) and (mean_inside > mean_outside) and fired_in_all_bottlenecks
+            # is_suppressed = (p_val < p_threshold) and (mean_inside < mean_outside) and silenced_in_all_bottlenecks
+            # 100% flight compliance
+            is_anchor = bool(fired_in_all_bottlenecks)
+            is_suppressed = bool(silenced_in_all_bottlenecks)
             
             session_results.append({
                 'neuron_idx_global': neuron_idx,
@@ -3054,8 +3097,8 @@ class SharedStatesSingleNeuron:
                 'mean_outside_hub': mean_outside,
                 'fold_change': mean_inside / (mean_outside + 1e-5),
                 'p_value': p_val,
-                'is_anchor': is_anchor,
-                'is_suppressed': is_suppressed
+                'is_anchor': is_anchor, # is_anchor
+                'is_suppressed': is_suppressed, # is_suppressed
             })
             
         return pd.DataFrame(session_results)
@@ -3076,8 +3119,8 @@ class SharedStatesSingleNeuron:
             all_session_dfs[session] = df_session
             
             total_valid_cells = len(df_session)
-            total_anchors = df_session['is_anchor'].sum()
-            total_suppressed = df_session['is_suppressed'].sum()
+            total_anchors = df_session['is_anchor'].astype(int).sum()
+            total_suppressed = df_session['is_suppressed'].astype(int).sum()
             
             summary_data.append({
                 'session': session,
@@ -3151,11 +3194,13 @@ def plot_bottleneck_single_neuron(session_name, all_session, detailed_session_da
             
             in_bottleneck = np.array([idx_g in b_set for idx_g in g_indices])
             bottleneck_entry_idx = np.where(in_bottleneck)[0][0] if np.any(in_bottleneck) else len(g_indices)//2
+            bottleneck_exit_idx = np.where(in_bottleneck)[0][-1] if np.any(in_bottleneck) else len(g_indices)//2
             
             norm_spikes = []
             peak_times = []
             for c in range(flight_spikes.shape[1]):
-                curve = pd.Series(flight_spikes[:, c]).rolling(window=3, min_periods=1, center=True).mean().values
+                # curve = pd.Series(flight_spikes[:, c]).rolling(window=3, min_periods=1, center=True).mean().values
+                curve = flight_spikes[:, c]
                 c_min, c_max = np.min(curve), np.max(curve)
                 curve_norm = (curve - c_min) / (c_max - c_min + 1e-5)
                 norm_spikes.append(curve_norm)
@@ -3172,11 +3217,12 @@ def plot_bottleneck_single_neuron(session_name, all_session, detailed_session_da
             
             # Plot Heatmap
             sns.heatmap(sorted_raster, cmap='viridis', cbar=(idx == len(valid_flights)-1), 
-                        cbar_kws={'label': 'Normalized Firing Rate'} if idx == len(valid_flights)-1 else {},
+                        cbar_kws={'label': 'Normalized responses'} if idx == len(valid_flights)-1 else {},
                         xticklabels=5, yticklabels=False, ax=ax)
             
             # Draw bottleneck trigger and align x-axis ticks to 0
-            ax.axvline(x=bottleneck_entry_idx, color='white', linestyle='--', linewidth=2, label='Bottleneck Entry')
+            ax.axvline(x=bottleneck_entry_idx, color='white', linestyle='--', linewidth=2, label='Bottleneck')
+            ax.axvline(x=bottleneck_exit_idx, color='white', linestyle='--', linewidth=2)
             # xticks = ax.get_xticks()
             # ax.set_xticks(xticks)
             # ax.set_xticklabels((xticks - bottleneck_entry_idx).astype(int))
@@ -3190,60 +3236,63 @@ def plot_bottleneck_single_neuron(session_name, all_session, detailed_session_da
             if idx == 0:
                 ax.set_ylabel("Sorted Neurons (▶ = Anchor)", labelpad=20)
                 
-        plt.suptitle(f"Population Cascades across Flights\nSession: {session_name}", fontsize=14, y=1.02)
+        plt.suptitle(f"Population Cascades; Session: {session_name}", y=1.01)
         plt.tight_layout()
 
     # ----------------------------------------------------
     # 2. Figure 2: Cross-Flight Directional Invariance
     # ----------------------------------------------------
-    # Let's take the top anchor cell with the largest fold change
-    best_anchor_global_idx = anchor_cell_info.sort_values(by='fold_change', ascending=False)['neuron_idx_global'].values[0]
-    
-    plt.figure(figsize=(6, 3))
+    # Let's take the top anchor cells with the largest fold change
+    best_anchor_global_idxs = anchor_cell_info.sort_values(by='fold_change', ascending=False)['neuron_idx_global'].values
     
     # Separately plot profiles for Type 1 and Type 2 flights to verify alignment
     colors = {flight_types[0]: '#1f77b4', flight_types[1]: '#ff7f0e'}
-    labels = {flight_types[0]: 'Reward -> Perch', flight_types[1]: 'Perch -> Reward'}
+    labels = {flight_types[0]: 'R -> P', flight_types[1]: 'P -> R'}
     # Create a set of starting indices for fast, error-free membership checking
     session_flight_starts = {f['global_indices'][0] for f in session_flights}
-    
-    for f_type in flight_types:
-        # type_flights = [f for f in grouped_flights[env].get(f_type, []) if f in session_flights]
-        # Check matching starting index instead of comparing the raw dictionary objects
-        type_flights = [f for f in grouped_flights[env].get(f_type, []) 
-                        if f['global_indices'][0] in session_flight_starts]
-        # Limit to requested number of curves for readability
-        curves_plotted = 0
-        
-        for flight in type_flights:
-            g_indices = flight['global_indices']
-            in_b = np.array([idx in b_set for idx in g_indices])
-            
-            if not np.any(in_b):
-                continue
-                
-            b_entry = np.where(in_b)[0][0]  # bottleneck (intersection hub, shared states) entry
-            # Construct a relative time alignment window (-15 bins to +15 bins around entry)
-            rel_time = np.arange(len(g_indices)) - b_entry
-            neuron_activity = all_true_spike[g_indices, best_anchor_global_idx]
-            
-            # Smooth curve
-            smoothed_activity = pd.Series(neuron_activity).rolling(window=3, min_periods=1, center=True).mean().values
-            
-            # Plot individual flight line centered at 0
-            plt.plot(rel_time, smoothed_activity, color=colors[f_type], alpha=0.3, 
-                     label=labels[f_type] if curves_plotted == 0 else "")
-            curves_plotted += 1
-            if curves_plotted >= num_tuning_curves:
-                break
 
-    plt.axvline(x=0, color='red', linestyle=':', linewidth=2, label='Bottleneck Entry Trigger')
-    plt.xlim(-15, 15)
-    plt.title(f"Directional Invariance of Anchor Cell #{best_anchor_global_idx}\nAcross Opposing Trajectories")
-    plt.xlabel("Time Bins (Relative to Bottleneck Entry)")
-    plt.ylabel("Raw Spike Rates / Counts")
-    plt.legend(loc='upper left')
-    plt.grid(True, alpha=0.2)
+    ncols = 3
+    fig, axes = plt.subplots(ncols=ncols, figsize=(4*ncols, 3))
+    for ii in range(ncols):
+        for f_type in flight_types:
+            # type_flights = [f for f in grouped_flights[env].get(f_type, []) if f in session_flights]
+            # Check matching starting index instead of comparing the raw dictionary objects
+            type_flights = [f for f in grouped_flights[env].get(f_type, []) 
+                            if f['global_indices'][0] in session_flight_starts]
+            # Limit to requested number of curves for readability
+            curves_plotted = 0
+            
+            for flight in type_flights:
+                g_indices = flight['global_indices']
+                in_b = np.array([idx in b_set for idx in g_indices])
+                
+                if not np.any(in_b):
+                    continue
+                    
+                b_entry = np.where(in_b)[0][0]  # bottleneck (intersection hub, shared states) entry
+                # Construct a relative time alignment window (-15 bins to +15 bins around entry)
+                rel_time = np.arange(len(g_indices)) - b_entry
+                neuron_activity = all_true_spike[g_indices, best_anchor_global_idxs[ii]]
+                
+                # Smooth curve
+                # smoothed_activity = pd.Series(neuron_activity).rolling(window=3, min_periods=1, center=True).mean().values
+                
+                # Plot individual flight line centered at 0
+                axes[ii].plot(rel_time, neuron_activity, color=colors[f_type], alpha=0.3, 
+                        label=labels[f_type] if curves_plotted == 0 else "")
+                curves_plotted += 1
+                if curves_plotted >= num_tuning_curves:
+                    break
+        axes[ii].axvline(x=0, color='red', linestyle=':', linewidth=2)
+        axes[ii].set_xlim(-10, 15)
+        axes[ii].set_title(f"Cell #{best_anchor_global_idxs[ii]}")
+        axes[ii].grid(True, alpha=0.2)
+    axes[0].set_xlabel("Time Bins (Relative to Bottleneck Entry)")
+    axes[0].set_ylabel("Spike Counts")
+    axes[0].legend(loc='upper left')
+    
+    plt.suptitle(f"Anchor Cells Across Trajectories;Session: {session_name}", y=1.01)
     plt.tight_layout()
+
     return None
 
