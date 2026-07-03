@@ -23,6 +23,8 @@ from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 import seaborn as sns
 from scipy import stats
+from scipy.ndimage import gaussian_filter1d
+from sklearn.manifold import TSNE
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -3097,6 +3099,186 @@ class FlightDMDAnalyzer:
                 })
                 
         return results
+
+
+class FlightDMDPostAnalysis:
+    def __init__(self, dmd_dataset, env='indoor'):
+        """
+        Initializes the cross-flight analyzer for a specific environment.
+        
+        Parameters:
+        -----------
+        dmd_dataset : dict, from FlightDMDAnalyzer()
+            The nested data structure containing flight DMD metrics
+        env : str
+            'indoor' or 'outdoor'
+        """
+        if env not in dmd_dataset:
+            raise ValueError(f"Environment '{env}' not found in the dataset.")
+            
+        self.env = env
+        self.env_data = dmd_dataset[env]
+        self.tasks = list(self.env_data.keys()) # ["R_to_R", "R_to_P", "P_to_R"]
+        
+    def plot_error_distributions(self):
+        """1. Plots a histogram/KDE of reconstruction errors across flight types."""
+        plt.figure(figsize=(8, 5))
+        
+        for task in self.tasks:
+            errors = [flight['rec_error'] for flight in self.env_data[task]]
+            sns.histplot(errors, kde=True, element="step", stat="density", 
+                         label=task, alpha=0.4, bins=15)
+                         
+        plt.title(f"Reconstruction Error ({self.env.capitalize()})")
+        plt.xlabel("Frobenius Norm")
+        plt.ylabel("Density")
+        plt.legend(title="Flight Type")
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.tight_layout()
+        return None
+
+    def analyze_spatial_subspaces(self, n_top_modes=3):
+        """
+        2. Computes and plots subspace alignment (similarity matrix) 
+        between the dominant spatial modes across all flights with task labels.
+        """
+        all_modes = []
+        labels = []
+        
+        for task in self.tasks:
+            for flight in self.env_data[task]:
+                modes = flight['dmd_modes']
+                power = flight['mode_power']
+                top_indices = np.argsort(power)[::-1][:n_top_modes]
+                
+                primary_mode = np.real(modes[:, top_indices[0]])
+                primary_mode /= (np.linalg.norm(primary_mode) + 1e-12)
+                
+                all_modes.append(primary_mode)
+                labels.append(task)
+                
+        all_modes = np.array(all_modes)
+        similarity_matrix = np.abs(all_modes @ all_modes.T)
+        
+        sort_idx = np.argsort(labels)
+        sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
+        sorted_labels = [labels[i] for i in sort_idx]
+        
+        plt.figure(figsize=(8, 7))
+        ax = sns.heatmap(sorted_matrix, cmap='viridis', xticklabels=False, yticklabels=False,
+                         cbar_kws={'label': 'Absolute Cosine Similarity'})
+        
+        # Calculate block boundaries and midpoints for placing labels
+        unique_labels, counts = np.unique(sorted_labels, return_counts=True)
+        
+        current_idx = 0
+        tick_positions = []
+        for label, count in zip(unique_labels, counts):
+            # Line boundary
+            current_idx += count
+            plt.axhline(current_idx, color='white', linewidth=1.5)
+            plt.axvline(current_idx, color='white', linewidth=1.5)
+            # Find center of block for label placement
+            tick_positions.append(current_idx - (count / 2))
+            
+        # Apply the centered task names to the y-axis and x-axis
+        ax.set_yticks(tick_positions)
+        ax.set_yticklabels(unique_labels, rotation=0, fontsize=10, fontweight='bold')
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(unique_labels, rotation=45, fontsize=10, fontweight='bold')
+        
+        plt.title(f"Spatial Subspace Alignment Map ({self.env.capitalize()})", pad=15, fontsize=12)
+        plt.tight_layout()
+        return None
+
+    def plot_spectral_density_profiles(self, max_freq=5.0, sigma=0.1):
+        """
+        3. Smooths, normalizes, and averages discrete spectra into 
+        continuous continuous spectral density curves per flight type.
+        """
+        plt.figure(figsize=(9, 5))
+        freq_grid = np.linspace(0, max_freq, 200)
+        
+        for task in self.tasks:
+            task_curves = []
+            for flight in self.env_data[task]:
+                freqs = flight['frequencies']
+                powers = flight['mode_power']
+                
+                # Project discrete power points onto a continuous evaluation grid
+                curve = np.zeros_like(freq_grid)
+                for f, p in zip(freqs, powers):
+                    if f <= max_freq:
+                        # Find closest bin index on grid
+                        idx = np.argmin(np.abs(freq_grid - f))
+                        curve[idx] += p
+                        
+                # Smooth the discrete delta spikes into continuous density curves
+                smoothed_curve = gaussian_filter1d(curve, sigma=sigma / (freq_grid[1] - freq_grid[0]))
+                
+                # Normalize total area under curve to 1.0 to standardize power scales
+                total_power = np.sum(smoothed_curve)
+                if total_power > 0:
+                    smoothed_curve /= total_power
+                task_curves.append(smoothed_curve)
+                
+            task_curves = np.array(task_curves)
+            mean_profile = np.mean(task_curves, axis=0)
+            sem_profile = np.std(task_curves, axis=0) / np.sqrt(len(task_curves))
+            
+            line = plt.plot(freq_grid, mean_profile, label=task, lw=2)
+            plt.fill_between(freq_grid, mean_profile - sem_profile, mean_profile + sem_profile, 
+                             alpha=0.15, color=line[0].get_color())
+                             
+        plt.title(f"Average Continuous Spectral Density ({self.env.capitalize()})")
+        plt.xlabel("Frequency (Hz)")
+        plt.ylabel("Normalized Power Density")
+        plt.legend(title="Flight Type")
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.tight_layout()
+        return None
+
+    def analyze_eigenvalue_fingerprints(self):
+        """
+        4. Bins the complex eigenvalue plane to generate feature vectors, 
+        then projects them using t-SNE to see if dynamics cluster by task type.
+        """
+        feature_vectors = []
+        task_labels = []
+        
+        # Set up a fixed 2D grid matrix across the complex plane domain
+        real_bins = np.linspace(-1.2, 1.2, 10)
+        imag_bins = np.linspace(-1.2, 1.2, 10)
+        
+        for task in self.tasks:
+            for flight in self.env_data[task]:
+                lambdas = flight['eigenvalues']
+                
+                # Create a 2D density histogram of where eigenvalues fall in the complex plane
+                H, _, _ = np.histogram2d(np.real(lambdas), np.imag(lambdas), bins=[real_bins, imag_bins])
+                
+                # Flatten the 2D grid into a 1D feature array for this flight trial
+                feature_vectors.append(H.flatten())
+                task_labels.append(task)
+                
+        feature_vectors = np.array(feature_vectors)
+        
+        # Apply t-SNE dimensionality reduction to cluster complex constellations
+        perplexity = min(15, max(5, len(feature_vectors) // 3))
+        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, init='pca')
+        embeddings = tsne.fit_transform(feature_vectors)
+        
+        plt.figure(figsize=(8, 6))
+        sns.scatterplot(x=embeddings[:, 0], y=embeddings[:, 1], hue=task_labels, 
+                        palette='Set1', s=70, edgecolor='k', alpha=0.8)
+                        
+        plt.title(f"t-SNE Mapping of Eigenvalue 'Fingerprints' ({self.env.capitalize()})")
+        plt.xlabel("t-SNE Dimension 1")
+        plt.ylabel("t-SNE Dimension 2")
+        plt.legend(title="Flight Type")
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.tight_layout()
+        return None
 
 
 class FlightSharedStates():
