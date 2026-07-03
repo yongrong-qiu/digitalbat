@@ -2801,6 +2801,301 @@ class FlightRQAAnalyzer:
         return None
     
 
+class FlightDMD:
+    def __init__(self, use_stacking=False, h=None, dt=0.1):
+        """
+        Initializes the DMD analyzer.
+        
+        Parameters:
+        -----------
+        use_stacking : bool
+            Whether to use the shift-stacking method.
+        h : int or None
+            Stacking depth parameter (ignored if use_stacking is False).
+            If use_stacking, when h is not set, it would be automatically set.
+        dt : float
+            Sampling time interval in seconds (default is 0.1s).
+        """
+        self.use_stacking = use_stacking
+        self.h = h if use_stacking else 1
+        self.dt = dt
+        
+        # Placeholders for results
+        self.eigenvalues = None
+        self.dmd_modes = None
+        self.z = None
+        self.reconstructed_data = None
+        self.rec_error = None
+        self.frequencies = None
+        self.power = None
+        self.data = None
+        self.n_features = None
+        self.m_timepoints = None
+
+    def _build_matrices(self, data):
+        """
+        Constructs snapshot matrices X and X' from the raw input data (shape: n_features x m_timepoints).
+        Implements shift-stacking if enabled.
+        """
+        n, m = data.shape
+        self.data = data
+        self.n_features = n
+        self.m_timepoints = m
+        
+        if not self.use_stacking:
+            X = data[:, :-1]
+            X_prime = data[:, 1:]
+        else:
+            # Construct augmented data matrix X_aug as described in Section 2.2
+            if self.h is None:
+                self.h = int(2 * m / n) + 1
+            m_aug = m - self.h + 1
+            X_aug_whole = np.zeros((self.h * n, m_aug))
+            for i in range(self.h):
+                X_aug_whole[i*n:(i+1)*n, :] = data[:, i:i+m_aug]
+                
+            X = X_aug_whole[:, :-1]
+            X_prime = X_aug_whole[:, 1:]
+            
+        return X, X_prime
+
+    def fit(self, data):
+        """
+        Computes DMD modes, eigenvalues, energy scaling, power spectrum, 
+        and reconstruction based on Brunton et al. 2015 DMD.
+        
+        Parameters:
+        -----------
+        data : numpy.ndarray
+            Input matrix of shape (n, m), where n is features and m is time steps.
+        """
+        # Step 1: Matrix building and SVD
+        X, X_prime = self._build_matrices(data)
+        U, Sigma, VT = np.linalg.svd(X, full_matrices=False)
+        V = VT.conj().T
+        
+        # Step 2: Define low-rank companion matrix A_tilde
+        Sigma_mat = np.diag(Sigma)
+        Sigma_inv = np.diag(1.0 / Sigma)
+        A_tilde = U.conj().T @ X_prime @ V @ Sigma_inv
+        
+        # Step 3+: Energy-scaled Eigendecomposition
+        # Compute A_hat = Sigma^(-1/2) * A_tilde * Sigma^(1/2)
+        Sigma_half = np.diag(np.sqrt(Sigma))
+        Sigma_half_inv = np.diag(1.0 / np.sqrt(Sigma))
+        A_hat = Sigma_half_inv @ A_tilde @ Sigma_half
+        
+        # Eigendecomposition of A_hat
+        lambdas, W_hat = np.linalg.eig(A_hat)
+        self.eigenvalues = lambdas
+        
+        # Reconstruct scaled W matrices to retain energy constraints
+        W = Sigma_half @ W_hat
+        
+        # Step 4: Compute exact DMD modes (Equation 4)
+        self.dmd_modes = X_prime @ V @ Sigma_inv @ W
+        
+        # Step 5: Compute initial weight vector z (Equation 5)
+        # x1 = Phi * z -> z = pseudoinverse(Phi) * x1
+        x1 = X[:, 0]
+        self.z = np.linalg.pinv(self.dmd_modes) @ x1
+        
+        # --- Time Reconstruction ---
+        # Omega = log(Lambda)/dt
+        omega = np.log(self.eigenvalues + 1e-12) / self.dt
+
+        # Real part of omega dictates growth/decay. Clamp positive growth to 0 to prevent overflow.
+        real_omega = np.real(omega)
+        imag_omega = np.imag(omega)
+        clamped_real = np.minimum(real_omega, 0.0) # Prevents exponential explosion
+        omega = clamped_real + 1j * imag_omega
+        
+        # Reconstruct the augmented time series matrix using Equation 5
+        # X_hat(t) = Phi * exp(Omega * t) * z
+        t_steps = X.shape[1] + 1
+        X_hat_aug = np.zeros((self.dmd_modes.shape[0], t_steps), dtype=complex)
+        
+        for k in range(t_steps):
+            t = k * self.dt
+            X_hat_aug[:, k] = self.dmd_modes @ (np.exp(omega * t) * self.z)
+            
+        # Extract the original system size coordinates from the stacked/unstacked matrix
+        # Per paper: include the first n elements if it is a shift-stacked matrix
+        self.reconstructed_data = np.real(X_hat_aug[:self.n_features, :])
+        
+        # Calculate Frobenius norm reconstruction error (Figure 3 formula)
+        # Slice the original data to match the reconstructed time horizon
+        time_horizon = self.reconstructed_data.shape[1]
+        self.rec_error = np.linalg.norm(data[:, :time_horizon] - self.reconstructed_data, 
+            'fro') / np.linalg.norm(data[:, :time_horizon], 'fro')
+        
+        # --- Power Spectrum Parameters (Equation 6 & 7) ---
+        # Frequency in Hz (cycles per second)
+        self.frequencies = np.abs(np.imag(omega)) / (2 * np.pi)
+        
+        # Extract first n spatial dimensions of the modes for power calculations
+        truncated_modes = self.dmd_modes[:self.n_features, :]
+        self.power = np.zeros(len(lambdas))
+        for i in range(len(lambdas)):
+            self.power[i] = np.linalg.norm(truncated_modes[:, i])**2
+
+    def plot_reconstruction(self):
+        """Generates a diagnostic overview plot matching Figure 2 concepts."""
+        if self.reconstructed_data is None:
+            raise ValueError("Model must be fitted to data before plotting.")
+            
+        fig, axes = plt.subplots(4, 1, figsize=(8, 6), sharex=True)
+        
+        # Plot raw coordinates over time indices
+        time_bins = self.reconstructed_data.shape[1]
+        data = self.data[:, :time_bins] # due to shift_stacking, it drops its last h-1 time points
+        # vmin = np.min(np.concatenate((data, self.reconstructed_data)))
+        # vmax = np.max(np.concatenate((data, self.reconstructed_data)))
+        im0 = axes[0].imshow(data, aspect='auto', cmap='viridis')
+        axes[0].set_title('Raw Data')
+        axes[0].set_ylabel("Amplitude")
+        fig.colorbar(im0, ax=axes[0], orientation='vertical')
+        # Plot full reconstruction grid map
+        im1 = axes[1].imshow(self.reconstructed_data, aspect='auto', cmap='viridis')
+        axes[1].set_title("Reconstructed Data")
+        fig.colorbar(im1, ax=axes[1], orientation='vertical')
+        # Plot the absolute difference
+        im2 = axes[2].imshow(np.abs(data - self.reconstructed_data), 
+            aspect='auto', cmap='gray_r')
+        axes[2].set_title("Absolute difference")
+        fig.colorbar(im2, ax=axes[2], orientation='vertical')
+        
+        # Real part of the top spatial modes
+        im3 = axes[3].imshow(np.real(self.dmd_modes[:self.n_features, :min(20, len(self.eigenvalues))]), 
+                             aspect='auto', cmap='coolwarm')
+        axes[3].set_title("Real Part of DMD Modes")
+        fig.colorbar(im3, ax=axes[3], orientation='vertical')
+        
+        plt.xlabel("Time Bins")
+        plt.tight_layout()
+        return None
+
+    def plot_power_spectrum(self):
+        """Generates dynamic mode distributions and discrete spectrum matching Figure 4."""
+        if self.eigenvalues is None:
+            raise ValueError("Model must be fitted to data before plotting.")
+            
+        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+        
+        # Subplot A: Unit Circle Domain
+        theta = np.linspace(0, 2*np.pi, 100)
+        axes[0].plot(np.cos(theta), np.sin(theta), color='gray', linestyle='--')
+        
+        # Scatter eigenvalues scaled by log-power amplitudes
+        scatter_size = 20 + 200 * (self.power / np.max(self.power))
+        sc = axes[0].scatter(np.real(self.eigenvalues), np.imag(self.eigenvalues), 
+                             s=scatter_size, c=self.frequencies, cmap='viridis', edgecolors='k', zorder=3)
+        
+        axes[0].set_xlabel("$Real(\lambda)$")
+        axes[0].set_ylabel("$Imag(\lambda)$")
+        axes[0].set_title("DMD Eigenvalues")
+        axes[0].grid(True, linestyle=':')
+        axes[0].set_aspect('equal')
+        
+        # Subplot B: Power vs Frequency Spectrum
+        axes[1].stem(self.frequencies, self.power, basefmt=" ")
+        axes[1].set_xlabel("Frequency (Hz)")
+        axes[1].set_ylabel("Mode Power")
+        axes[1].set_title("DMD Power Spectrum")
+        axes[1].grid(True, linestyle=':')
+        
+        fig.colorbar(sc, ax=axes[0], label='Frequency (Hz)')
+        plt.tight_layout()
+        return None
+
+class FlightDMDAnalyzer:
+    def __init__(self, min_len=20, max_len=100):
+        """
+        Args:
+            min_len: Minimum number of time points for a valid flight.
+            max_len: Maximum number of time points for a valid flight.
+        """
+        self.min_len = min_len
+        self.max_len = max_len
+
+    def analyze(self, all_latents, all_rel_time, all_reward, all_perch, all_session):
+        """
+        Slices concatenated data and runs DMD across nested conditions:
+        Environment (indoor vs outdoor) -> Task Type (R->R, R->P, P->R).
+        """
+        # Identify individual flight boundaries
+        start_indices = np.where(all_rel_time == 0.0)[0]
+        flight_boundaries = np.append(start_indices, len(all_rel_time))
+        
+        # Map conditions to human-readable strings
+        task_mapping = {0: "R_to_R", 1: "R_to_P", 2: "P_to_R"}
+        
+        # Initialize structured nested dictionary output
+        results = {
+            "indoor": {name: [] for name in task_mapping.values()},
+            "outdoor": {name: [] for name in task_mapping.values()}
+        }
+        
+        for i in range(len(flight_boundaries) - 1):
+            idx_start = flight_boundaries[i]
+            idx_end = flight_boundaries[i+1]
+            length = idx_end - idx_start
+            
+            # Filter by trajectory duration criteria
+            if not (self.min_len <= length <= self.max_len):
+                continue
+                
+            # Parse Environment Type
+            session_name = all_session[idx_start]
+            if "Dataset_1" in session_name or "Dataset_3" in session_name:
+                env = "indoor"
+            elif "Dataset_2" in session_name:
+                env = "outdoor"
+            else:
+                continue # Unknown dataset group
+                
+            # Parse Flight Task Conditions
+            is_start_reward = all_reward[idx_start]
+            is_start_perch = all_perch[idx_start]
+            is_end_reward = all_reward[idx_end - 1]
+            is_end_perch = all_perch[idx_end - 1]
+            
+            if is_start_reward and is_end_reward:
+                cond_id = 0
+            elif is_start_reward and is_end_perch:
+                cond_id = 1
+            elif is_start_perch and is_end_reward:
+                cond_id = 2
+            else:
+                continue # Exclude non-target trajectories (e.g., perch->perch)
+                
+            task_str = task_mapping[cond_id]
+            flight_latents = all_latents[idx_start:idx_end, :]
+            # If use all_true_spike (shape: 8332 by 266): 
+            # Select all rows, but only columns (neurons) that are NOT completely NaN
+            flight_latents = flight_latents[:, ~np.isnan(flight_latents).all(axis=0)] # shape: (num_time_points, num_features)
+            flight_latents = flight_latents.T # DMD works for the data with a shape of (num_feature, num_time_points)
+            
+            # Run DMD
+            flight_dmd = FlightDMD(use_stacking=True)
+            flight_dmd.fit(flight_latents)
+            if flight_dmd.eigenvalues is not None:
+                # Store the results metadata along with metrics
+                results[env][task_str].append({
+                    "flight_idx": i,
+                    "global_indices": (idx_start, idx_end),
+                    "trajectory_len": length,
+                    "raw_data": flight_dmd.data,
+                    "reconstructed_data": flight_dmd.reconstructed_data,
+                    "eigenvalues": flight_dmd.eigenvalues,
+                    "dmd_modes":flight_dmd.dmd_modes,
+                    "frequencies": flight_dmd.frequencies,
+                    "mode_power": flight_dmd.power,
+                })
+                
+        return results
+
+
 class FlightSharedStates():
     def __init__(self, all_latents, all_rel_time, all_reward, all_perch, all_session, 
                  MIN_LEN=20, MAX_LEN=100):
