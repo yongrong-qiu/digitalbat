@@ -3009,7 +3009,7 @@ class FlightDMD:
         return None
 
 class FlightDMDAnalyzer:
-    def __init__(self, min_len=20, max_len=100):
+    def __init__(self, min_len=20, max_len=100, use_stacking=False, h=None ):
         """
         Args:
             min_len: Minimum number of time points for a valid flight.
@@ -3017,6 +3017,8 @@ class FlightDMDAnalyzer:
         """
         self.min_len = min_len
         self.max_len = max_len
+        self.use_stacking = use_stacking
+        self.h = h
 
     def analyze(self, all_latents, all_rel_time, all_reward, all_perch, all_session):
         """
@@ -3077,7 +3079,7 @@ class FlightDMDAnalyzer:
             flight_latents = flight_latents.T # DMD works for the data with a shape of (num_feature, num_time_points)
             
             # Run DMD
-            flight_dmd = FlightDMD(use_stacking=True)
+            flight_dmd = FlightDMD(use_stacking=self.use_stacking, h=self.h)
             flight_dmd.fit(flight_latents)
             if flight_dmd.eigenvalues is not None:
                 # Store the results metadata along with metrics
@@ -3091,6 +3093,7 @@ class FlightDMDAnalyzer:
                     "dmd_modes":flight_dmd.dmd_modes,
                     "frequencies": flight_dmd.frequencies,
                     "mode_power": flight_dmd.power,
+                    "rec_error": flight_dmd.rec_error,
                 })
                 
         return results
