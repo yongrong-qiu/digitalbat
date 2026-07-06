@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.sampler import SubsetRandomSampler
@@ -56,7 +55,7 @@ class Data_Prep_for_Raw():
         use_LFP_flag,
         use_ripple_flag,
         only_flight_flag,
-        firing_rate_criterion_flog=False, # default: no firing_rate threshold to exclude neurons
+        firing_rate_criterion_flag=False, # default: no firing_rate threshold to exclude neurons
         no_3d_location=False, # default: we use 3d locations
         spike_count_flag=False, # default: we use spiking event, not spike counts 
         bin_width=0.010, # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
@@ -67,24 +66,24 @@ class Data_Prep_for_Raw():
         special_id_count_thresh=3,  # for splitting flight clustering data
         only_use_special_id_4train_flag=False, # Only use the "special_id" flight types (e.g., flight clusters with more than "special_id_count_thresh" repeats) for training 
         time_shuffle_for_trajecotry_flag=False, # Whether to shuffle temporal order of trajectory
-        simulate_place_cell_flag=False, # Whether to generate simulation data of pure place cells using training data.
         # After splitting fight-clustering data into train, validation and test, we may want to use/split each flight trajectory as/into one/multiple data samples.
         # With such data, we can build a network (such as Transformer) to model the temporal dependency of animal behavior (and neural activity) during each flight 
         split_each_trajectory_flag=False, 
         window_size: int|None = None, # for splitting each trajectory into multiple samples
         stride_train: int|None = None, # splitting each trajectory into multiple samples, for training data
         stride_test: int|None = None, # splitting each trajectory into multiple samples, for test data
+        max_acceleration: float|None = 40, # m/s²; exclude flights whose peak acceleration exceeds this
     ):
         super().__init__()
         self.parent_folder = parent_folder
-        self.su_file_path = glob.glob(su_file_path)  # a list of strings
+        self.su_file_path = sorted(glob.glob(su_file_path))  # a list of strings
         self.use_speed_head_dir = use_speed_head_dir
         self.use_IMU_flag = use_IMU_flag
         self.use_click_flag = use_click_flag
         self.use_LFP_flag = use_LFP_flag
         self.use_ripple_flag = use_ripple_flag
         self.only_flight_flag = only_flight_flag
-        self.firing_rate_criterion_flog = firing_rate_criterion_flog
+        self.firing_rate_criterion_flag = firing_rate_criterion_flag
         self.no_3d_location = no_3d_location
         self.spike_count_flag = spike_count_flag
         self.type_train_num = type_train_num
@@ -92,7 +91,6 @@ class Data_Prep_for_Raw():
         self.special_id_count_thresh = special_id_count_thresh
         self.only_use_special_id_4train_flag = only_use_special_id_4train_flag
         self.time_shuffle_for_trajecotry_flag = time_shuffle_for_trajecotry_flag
-        self.simulate_place_cell_flag = simulate_place_cell_flag
         self.split_each_trajectory_flag = split_each_trajectory_flag
         self.window_size = window_size
         self.stride_train = stride_train
@@ -113,6 +111,7 @@ class Data_Prep_for_Raw():
         self.spike_ratio = None # spike ratio for each unit after resampling
         self.firing_rate = None # firing rate for each unit 
 
+        self.max_acceleration = max_acceleration
         self.flight_cluster_alpha = flight_cluster_alpha
         self.flight_cluster_results = None
         self.all_behavior_clustered = None  # a list of arrays, each array contains behavior for each trajectory
@@ -152,6 +151,9 @@ class Data_Prep_for_Raw():
         bhv_v_abs = bhv['v_abs'][:,0]
         # bhv_v_abs[np.where(bhv_v_abs > bhv_thresh)] = bhv_thresh
         bhv_r = bhv['r'] # 3D position
+        # Dataset_2 stores t as a column vector (t[:,0]); Datasets 1/3 as a row
+        # (t[0,:]).  No coordinate transform is applied -- positions are used in
+        # the raw ciholas frame for every dataset.
         if 'Dataset_2' in self.parent_folder:
             bhv_t = bhv['t'][:,0]
         else:
@@ -326,12 +328,25 @@ class Data_Prep_for_Raw():
 
         su_goods_cluster_id = []
         su_goods_time = []
+        su_goods_pType = []
+        su_goods_position = []  # mean spike position (µm) per neuron
         for temppath in self.su_file_path:
             su_good = loadmat(temppath)
             temp_cluster_id = np.array([x[0][0,0] for x in su_good['out_Gunits']['cluster_id']])
             temp_good1_time = [x[0][:,0]/1e6 for x in su_good['out_Gunits']['spikeTimes_usec']]
+            # pType: putative cell type (stored in the same out_Gunits struct).
+            # Use object dtype so strings / scalars / arrays all survive.
+            temp_pType = np.array(
+                [np.squeeze(x[0]).item() if np.squeeze(x[0]).ndim == 0 else np.squeeze(x[0])
+                 for x in su_good['out_Gunits']['pType']],
+                dtype=object,
+            )
+            # Mean spike position from center-of-mass estimates
+            temp_position = [x[0].mean(axis=0) for x in su_good['out_Gunits']['spikePos_um']]
             su_goods_cluster_id.append(temp_cluster_id)
             su_goods_time.append(temp_good1_time)
+            su_goods_pType.append(list(temp_pType))
+            su_goods_position.append(temp_position)
 
         # merge units
         mergesFile = glob.glob(self.parent_folder + '/merges_Dataset_*.mat')[0]
@@ -371,9 +386,26 @@ class Data_Prep_for_Raw():
                 # print(f"Merged units {cluster_ids} into unit {cluster_ids[0]} with {len(clean_merged_times)} spikes remaining.")
                 # remove the merged-away empty units from your lists (su_goods_time and su_goods_cluster_id)
                 # Keep only those entries that have spike times
+                # Average positions of merged units into the surviving unit
+                pos_list = su_goods_position[ii]
+                merged_pos = np.mean([pos_list[idx] for idx in merge_indices], axis=0)
+                pos_list[merge_indices[0]] = merged_pos
                 valid_indices = [i for i, t in enumerate(time_list) if len(t) > 0]
                 su_goods_time[ii] = [time_list[i] for i in valid_indices]
                 su_goods_cluster_id[ii] = [cluster_id_list[i] for i in valid_indices]
+                su_goods_pType[ii] = [su_goods_pType[ii][i] for i in valid_indices]
+                su_goods_position[ii] = [pos_list[i] for i in valid_indices]
+
+        # Flatten pType across probes so it is aligned row-for-row with all_spike
+        # before any downstream filtering (only_flight_flag does not touch rows,
+        # but the firing-rate criterion below does).
+        pType_all = np.array(
+            [pt for probe_pTypes in su_goods_pType for pt in probe_pTypes],
+            dtype=object,
+        )
+        self.probe_id = np.concatenate([np.full(len(t), i) for i, t in enumerate(su_goods_time)])
+        self.cluster_id = np.concatenate([np.asarray(c, dtype=int) for c in su_goods_cluster_id])
+        self.neuron_position = np.vstack([pos for probe_pos in su_goods_position for pos in probe_pos])
 
         # su_goods_time = [su_good1_time, su_good2_time, su_good3_time]
         all_spike = []
@@ -397,13 +429,18 @@ class Data_Prep_for_Raw():
         # spike ratio for each neuron
         self.spike_ratio = np.sum((all_spike>0) * 1.0, axis=1)/all_spike.shape[1]
         firing_rate = np.sum(all_spike, axis=1)/(all_spike.shape[1] * self.bin_width)
-        if self.firing_rate_criterion_flog:
+        if self.firing_rate_criterion_flag:
             self.neuron_ind = np.where(firing_rate>0.3)[0] # 0.3 Hz, based on Dotson & Yartsev 2021
             firing_rate = firing_rate[self.neuron_ind]
             all_spike = all_spike[self.neuron_ind]
+            pType_all = pType_all[self.neuron_ind]
+            self.probe_id = self.probe_id[self.neuron_ind]
+            self.cluster_id = self.cluster_id[self.neuron_ind]
+            self.neuron_position = self.neuron_position[self.neuron_ind]
 
         self.firing_rate = firing_rate
         self.all_spike = all_spike
+        self.pType = pType_all
 
         self._spike_ready = True
 
@@ -511,6 +548,24 @@ class Data_Prep_for_Raw():
         # np.random.seed(100)
         # np.random.shuffle(all_behavior_clustered)
         # np.random.shuffle(all_spike_clustered)
+
+        # Filter out flights with acceleration artifacts
+        if self.max_acceleration is not None:
+            keep = []
+            for i, beh in enumerate(all_behavior_clustered):
+                pos = beh[:3, :].T  # (T, 3)
+                vel = np.gradient(pos, self.bin_width, axis=0)
+                acc = np.gradient(vel, self.bin_width, axis=0)
+                peak_acc = np.linalg.norm(acc, axis=1).max()
+                if peak_acc <= self.max_acceleration:
+                    keep.append(i)
+            n_removed = len(all_behavior_clustered) - len(keep)
+            if n_removed > 0:
+                print(f'  Acceleration filter: removed {n_removed}/{len(all_behavior_clustered)} flights '
+                      f'(peak |acc| > {self.max_acceleration} m/s²)')
+            all_behavior_clustered = [all_behavior_clustered[i] for i in keep]
+            all_behavior_type = [all_behavior_type[i] for i in keep]
+            all_spike_clustered = [all_spike_clustered[i] for i in keep]
 
         self.all_behavior_clustered = all_behavior_clustered
         self.all_behavior_type = all_behavior_type
@@ -634,32 +689,6 @@ class Data_Prep_for_Raw():
                 spike_train_shuffle.append(spike_train[ii][:, inds])
             behavior_train = behavior_train_shuffle[:]
             spike_train = spike_train_shuffle[:]
-
-        # Generate simulation data of "pure place-field cells" based on the actual behavior and rate maps computed from training data
-        if self.simulate_place_cell_flag:
-            loc_bin_width = 0.1 
-            place_cell_simulator_3D = PlaceCellSimulator3D(bin_size=loc_bin_width, smoothing_sigma=1) # smoothing_sigma=1
-            _ = place_cell_simulator_3D.fit(behavior_train, spike_train, dt=self.bin_width)
-            spike_train_simulation = place_cell_simulator_3D.simulate(behavior_train, dt=self.bin_width)
-            # spike_valid_simulation = place_cell_simulator_3D.simulate(behavior_valid, dt=self.bin_width)
-            # spike_test_simulation = place_cell_simulator_3D.simulate(behavior_test, dt=self.bin_width)
-            # # for sanity check
-            # plot_2d_trajectory_4_simulation(
-            #     behavior_train,
-            #     spike_train,
-            #     behavior_train,
-            #     spike_train_simulation,
-            #     behavior_test,
-            #     spike_test,
-            #     behavior_test,
-            #     spike_test_simulation,
-            #     units = [101, 130, 184], # For 'Dataset_3_29959_240403'
-            #     loc_bin_width = loc_bin_width,
-            #     dt = self.bin_width,
-            # )
-            spike_train = spike_train_simulation[:]
-            # spike_valid = spike_valid_simulation[:]
-            # spike_test = spike_test_simulation[:]
 
         # print(len(behavior_train), len(behavior_valid), len(behavior_test))  # 22 2 13
         # print(len(spike_train), len(spike_valid), len(spike_test))  # 22 2 13
@@ -1157,7 +1186,7 @@ def bat_data_loader(
     use_LFP_flag = False,  # True
     use_ripple_flag = False,
     only_flight_flag = True,  # True
-    firing_rate_criterion_flog = False, 
+    firing_rate_criterion_flag = False,
     no_3d_location = False, # False
     spike_count_flag = True,
     bin_width = 0.10, # 0.10, in seconds
@@ -1168,13 +1197,14 @@ def bat_data_loader(
     only_use_special_id_4train_flag=False,
     shuffle_flag=False, # shuffle the training data
     time_shuffle_for_trajecotry_flag=False, # shuffle temporal order for each trajectory
-    simulate_place_cell_flag=False,
-    split_each_trajectory_flag=False, 
+    split_each_trajectory_flag=False,
     window_size = 20, 
     stride_train = 20, 
     stride_test = 20, 
     batch_size_train=None, # batch_size for training data
     batch_size_test=None,
+    parent_folder=None,
+    max_acceleration=40, # m/s²; exclude flights whose peak acceleration exceeds this
 ):
     """
     Dataloaders for multiple sessions of bat data.
@@ -1194,12 +1224,15 @@ def bat_data_loader(
     meta_info_dict['behavior_std'] = {}
     meta_info_dict['spike_std'] = {}
     meta_info_dict['spatial_centers_sigma'] = {}
+    meta_info_dict['pType'] = {}
+    meta_info_dict['probe_id'] = {}
+    meta_info_dict['neuron_position'] = {}
 
     for session_id, session_name in enumerate(session_names):
-        parent_folder = '/mnt/at-globusshare/Users/Yongrong/' + session_name
-        su_file_path = '/mnt/at-globusshare/Users/Yongrong/To_transfer/out_Gunits_probe*_' + session_name + '.mat'
+        session_folder = parent_folder + session_name
+        su_file_path = parent_folder + '/To_transfer/out_Gunits_probe*_' + session_name + '_with_metrics.mat'
         data_prep_for_raw = Data_Prep_for_Raw(
-            parent_folder = parent_folder,
+            parent_folder = session_folder,
             su_file_path = su_file_path,
             use_speed_head_dir = use_speed_head_dir,
             use_IMU_flag = use_IMU_flag,
@@ -1207,7 +1240,7 @@ def bat_data_loader(
             use_LFP_flag = use_LFP_flag,
             use_ripple_flag = use_ripple_flag,
             only_flight_flag = only_flight_flag,
-            firing_rate_criterion_flog = firing_rate_criterion_flog,
+            firing_rate_criterion_flag = firing_rate_criterion_flag,
             no_3d_location = no_3d_location,
             spike_count_flag = spike_count_flag,
             bin_width = bin_width, 
@@ -1217,16 +1250,19 @@ def bat_data_loader(
             special_id_count_thresh = special_id_count_thresh,
             only_use_special_id_4train_flag = only_use_special_id_4train_flag,
             time_shuffle_for_trajecotry_flag = time_shuffle_for_trajecotry_flag,
-            simulate_place_cell_flag = simulate_place_cell_flag,
             split_each_trajectory_flag = split_each_trajectory_flag,
             window_size = window_size, 
-            stride_train = stride_train, 
-            stride_test = stride_test, 
+            stride_train = stride_train,
+            stride_test = stride_test,
+            max_acceleration = max_acceleration,
         )
         
         all_behavior = data_prep_for_raw.get_all_behavior()
         meta_info_dict['r_lim'][session_name] = data_prep_for_raw.r_lim
         all_spike = data_prep_for_raw.get_all_spike()
+        meta_info_dict['pType'][session_name] = data_prep_for_raw.pType
+        meta_info_dict['probe_id'][session_name] = data_prep_for_raw.probe_id
+        meta_info_dict['neuron_position'][session_name] = data_prep_for_raw.neuron_position
         # spike_ratio = data_prep_for_raw.spike_ratio
         # print(f'all_behavior.shape: {all_behavior.shape}') # all_behavior.shape: (3, 2820), 3 represents behavior features
         # print(f'all_spike.shape: {all_spike.shape}') # all_spike.shape: (95, 2820), 95 represents number of units
@@ -1458,14 +1494,18 @@ class PlaceCellSimulator3D:
                 )
                 spike_counts[n] += spike_hist
 
-        rate_map = spike_counts / (occupancy + 1e-8)
-        # -------- optional Gaussian smoothing --------
+        # Smooth spike counts and occupancy separately, THEN divide.  Smoothing
+        # the rate map directly leaks zero rates from unoccupied neighbor bins
+        # into the occupied bins and shrinks the time-averaged firing rate.
         if self.smoothing_sigma is not None:
+            occupancy_smoothed = gaussian_filter(occupancy, sigma=self.smoothing_sigma)
+            spike_counts_smoothed = np.empty_like(spike_counts)
             for n in range(N):
-                rate_map[n] = gaussian_filter(
-                    rate_map[n],
-                    sigma=self.smoothing_sigma
-                )
+                spike_counts_smoothed[n] = gaussian_filter(
+                    spike_counts[n], sigma=self.smoothing_sigma)
+            rate_map = spike_counts_smoothed / (occupancy_smoothed + 1e-8)
+        else:
+            rate_map = spike_counts / (occupancy + 1e-8)
         self.rate_map = rate_map
 
         return self.rate_map
@@ -1509,98 +1549,121 @@ class PlaceCellSimulator3D:
             spike_test.append(spikes)
 
         return spike_test
-    
 
-def plot_2d_trajectory_4_simulation(
-    behavior_train,
-    spike_train,
-    behavior_train_simulation,
-    spike_train_simulation,
-    behavior_test,
-    spike_test,
-    behavior_test_simulation,
-    spike_test_simulation,
-    units,
-    loc_bin_width,
-    dt,
-):
+
+class EmpiricalCellSimulator3D(PlaceCellSimulator3D):
+    """Resample spikes from the empirical per-bin count distribution.
+
+    Drop-in replacement for :class:`PlaceCellSimulator3D` with the same
+    ``fit``/``simulate`` signatures and the same ``edges``/``shape``/
+    ``rate_map`` attributes (the smoothed rate map is still computed and
+    used for the deterministic ``poisson=False`` branch).
+
+    Whereas the base class models each neuron's per-bin count as
+    ``Poisson(rate * dt)``, this class draws -- per neuron independently --
+    from the *observed* counts conditioned on spatial bin.  Real
+    hippocampal counts are over-dispersed (bursting, refractoriness, slow
+    drift), so a Poisson surrogate understates the trial-to-trial
+    variability; empirical resampling preserves the true marginal
+    ``P(n | position)`` including its non-Poisson shape.  Across-neuron
+    simultaneity and within-flight temporal structure are still destroyed
+    (every timestep/neuron is an independent draw).
+
+    ``smoothing_sigma`` is reinterpreted as a Gaussian *pooling* radius (in
+    bins): a query bin's empirical pool is the union of observed counts in
+    nearby bins, each weighted ``exp(-d^2 / (2 sigma^2))``.  This mirrors
+    how the base class smoothed sparse bins and -- crucially -- gives each
+    bin enough samples that the resample genuinely decorrelates from the
+    real sequence rather than echoing the single count observed there.
     """
-    Plot 2D trajectory for the simulated 'pure place cell'
-    behavior_train : list of arrays (3,T)
-    spike_train : list of arrays (N,T)
-    """
-    all_pos = np.concatenate([b.T for b in behavior_train], axis=0)
-    loc_mins = all_pos.min(axis=0) # shape: (3, )
-    loc_maxs = all_pos.max(axis=0) # shape: (3, )
-    all_spike = np.concatenate([b.T for b in spike_train], axis=0)
-    spike_mins = all_spike.min(axis=0) # shape: (N, )
-    spike_maxs = all_spike.max(axis=0) # shape: (N, )
-    
-    behavior_lists = [behavior_train, behavior_train_simulation, behavior_test, behavior_test_simulation]
-    spike_lists = [spike_train, spike_train_simulation, spike_test, spike_test_simulation]
-    data_label_list = ['Train', 'Train_sim', 'Test', 'Test_sim']
 
-    ncols = len(units)
-    nrows = len(behavior_lists)
-    fig, axs = plt.subplots(nrows, ncols, figsize=(ncols*3, nrows*1.5))
-    for ii in range(nrows): # training, test, test_simulation
-        for jj, unit in enumerate(units): # each neuron/unit
-            loc_xx = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 0]
-            loc_yy = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 1]
-            spike_count = np.concatenate([s.T for s in spike_lists[ii]], axis=0)[:, unit]
-            # Make line segments between successive points
-            points = np.array([loc_xx, loc_yy]).T.reshape(-1, 1, 2)
-            segments = np.concatenate([points[:-1], points[1:]], axis=1)
-            # Normalize spike counts for colormap
-            norm = plt.Normalize(spike_mins[unit], spike_maxs[unit])
-            # Create a line collection with color mapping
-            lc = LineCollection(segments, cmap='hot', norm=norm)
-            lc.set_array(spike_count)
-            lc.set_linewidth(1)
-            # plot
-            line = axs[ii,jj].add_collection(lc)
-            if ii == 0:
-                axs[ii,jj].set_title(f"Unit: {unit}")
-            axs[ii,jj].set_xlim(loc_mins[0], loc_maxs[0])
-            axs[ii,jj].set_ylim(loc_mins[1], loc_maxs[1])
-            if ii == nrows-1:
-                axs[ii,jj].set_xlabel("X")
-            if jj == 0:
-                axs[ii,jj].set_ylabel(data_label_list[ii])
-            plt.colorbar(line, ax=axs[ii,jj], label="Spike count")
-            plt.tight_layout()
+    def fit(self, behavior_train, spike_train, dt):
+        super().fit(behavior_train, spike_train, dt)  # sets edges, shape, rate_map
+        pos_all = np.concatenate([b.T for b in behavior_train], axis=0)  # (M, 3)
+        cnt_all = np.concatenate([s.T for s in spike_train], axis=0)     # (M, N)
+        ix = np.clip(np.digitize(pos_all[:, 0], self.edges[0]) - 1, 0, self.shape[0] - 1)
+        iy = np.clip(np.digitize(pos_all[:, 1], self.edges[1]) - 1, 0, self.shape[1] - 1)
+        iz = np.clip(np.digitize(pos_all[:, 2], self.edges[2]) - 1, 0, self.shape[2] - 1)
+        flat = np.ravel_multi_index((ix, iy, iz), self.shape)
 
-    from ..utility.utils import generate_2d_rate_map
-    fig, axs = plt.subplots(nrows, ncols, figsize=(ncols*3, nrows*1.5))
-    for jj, unit in enumerate(units): # each neuron/unit
-        for ii in range(nrows): # training, test, test_simulation
-            loc_xx = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 0]
-            loc_yy = np.concatenate([b.T for b in behavior_lists[ii]], axis=0)[:, 1]
-            spike_count = np.concatenate([s.T for s in spike_lists[ii]], axis=0)[:, unit]
-            #
-            x_edges, y_edges, rate_map, smoothed_rate_map = generate_2d_rate_map(
-                loc_xx=loc_xx,
-                loc_yy=loc_yy,
-                unit_spike_count=spike_count,
-                loc_xx_lim=(loc_mins[0], loc_maxs[0]),
-                loc_yy_lim=(loc_mins[1], loc_maxs[1]),
-                loc_bin_width=loc_bin_width,
-                dt=dt,
+        self._counts_all = cnt_all
+        if len(flat):
+            order = np.argsort(flat, kind='stable')   # obs-row indices, sorted by bin
+            flat_sorted = flat[order]
+            boundaries = np.flatnonzero(np.diff(flat_sorted)) + 1
+            groups = np.split(order, boundaries)
+            keys = flat_sorted[np.concatenate(([0], boundaries))]
+            self._bin_to_obs = {int(k): g for k, g in zip(keys, groups)}
+        else:
+            self._bin_to_obs = {}
+        return self.rate_map
+
+    def simulate(self, behavior_test, dt, poisson=True):
+        """Generate spikes for new trajectories.
+
+        ``poisson=True`` draws stochastically from the empirical per-bin
+        distribution; ``poisson=False`` returns the deterministic per-bin
+        mean (the smoothed ``rate_map * dt``), matching the base class.
+        """
+        N = self._counts_all.shape[1]
+        sigma = self.smoothing_sigma or 0.0
+        R = int(np.ceil(3 * sigma)) if sigma > 0 else 0
+        offsets = []
+        for dx in range(-R, R + 1):
+            for dy in range(-R, R + 1):
+                for dz in range(-R, R + 1):
+                    d2 = dx * dx + dy * dy + dz * dz
+                    w = np.exp(-d2 / (2 * sigma ** 2)) if sigma > 0 else 1.0
+                    offsets.append((dx, dy, dz, w))
+        marginal_idx = np.arange(self._counts_all.shape[0])  # fallback pool
+        neuron_idx = np.arange(N)
+
+        spike_test = []
+        for beh in behavior_test:
+            pos = beh.T
+            T = pos.shape[0]
+            ix = np.digitize(pos[:, 0], self.edges[0]) - 1
+            iy = np.digitize(pos[:, 1], self.edges[1]) - 1
+            iz = np.digitize(pos[:, 2], self.edges[2]) - 1
+            valid = (
+                (ix >= 0) & (ix < self.shape[0]) &
+                (iy >= 0) & (iy < self.shape[1]) &
+                (iz >= 0) & (iz < self.shape[2])
             )
-            if ii==0: # Be carefule: for each neuron, we use the limits of the training data
-                vmin, vmax = np.min(rate_map), np.max(rate_map)
-            im = axs[ii,jj].imshow(rate_map.T, origin='lower', # vmin=vmin, vmax=vmax,
-                        extent=[loc_mins[0], loc_maxs[0], loc_mins[1], loc_maxs[1]],
-                        aspect='auto', cmap='hot_r')
-            if ii == 0:
-                axs[ii,jj].set_title(f"Unit: {unit}")
-            # axs[ii,jj].set_xlim(loc_mins[0], loc_maxs[0])
-            # axs[ii,jj].set_ylim(loc_mins[1], loc_maxs[1])
-            if ii == nrows-1:
-                axs[ii,jj].set_xlabel("X")
-            if jj == 0:
-                axs[ii,jj].set_ylabel(data_label_list[ii])
-            plt.colorbar(im, ax=axs[ii,jj], label="Spikes/s")
-            plt.tight_layout()
-
-    return None
+            spikes = np.zeros((N, T))
+            vts = np.flatnonzero(valid)
+            if len(vts):
+                vbins = np.ravel_multi_index(
+                    (ix[valid], iy[valid], iz[valid]), self.shape)
+                for b in np.unique(vbins):
+                    ts = vts[vbins == b]
+                    qx, qy, qz = np.unravel_index(int(b), self.shape)
+                    pool_parts, w_parts = [], []
+                    for dx, dy, dz, w in offsets:
+                        nx, ny, nz = qx + dx, qy + dy, qz + dz
+                        if not (0 <= nx < self.shape[0] and
+                                0 <= ny < self.shape[1] and
+                                0 <= nz < self.shape[2]):
+                            continue
+                        g = self._bin_to_obs.get(
+                            int(np.ravel_multi_index((nx, ny, nz), self.shape)))
+                        if g is None:
+                            continue
+                        pool_parts.append(g)
+                        w_parts.append(np.full(len(g), w))
+                    if pool_parts:
+                        pool_idx = np.concatenate(pool_parts)
+                        p = np.concatenate(w_parts)
+                        p = p / p.sum()
+                    else:
+                        pool_idx, p = marginal_idx, None  # bin unseen in training
+                    if poisson:
+                        draw = np.random.choice(
+                            len(pool_idx), size=(len(ts), N), p=p)
+                        cnts = self._counts_all[pool_idx[draw], neuron_idx[None, :]]
+                        spikes[:, ts] = cnts.T
+                    else:
+                        rate = self.rate_map.reshape(N, -1)[:, int(b)]
+                        spikes[:, ts] = (rate * dt)[:, None]
+            spike_test.append(spikes)
+        return spike_test
