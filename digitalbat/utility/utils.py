@@ -3137,7 +3137,7 @@ class FlightDMDPostAnalysis:
         plt.tight_layout()
         return None
 
-    def analyze_spatial_subspaces(self, n_top_modes=3):
+    def analyze_spatial_subspaces(self, n_top_modes=2):
         """
         2. Computes and plots subspace alignment (similarity matrix) 
         between the dominant spatial modes across all flights with task labels.
@@ -3188,6 +3188,76 @@ class FlightDMDPostAnalysis:
         ax.set_xticklabels(unique_labels, rotation=45, fontsize=10, fontweight='bold')
         
         plt.title(f"Spatial Subspace Alignment Map ({self.env.capitalize()})", pad=15, fontsize=12)
+        plt.tight_layout()
+        return None
+    
+    def analyze_temporal_subspaces(self):
+        """
+        Computes and plots the temporal subspace alignment map (similarity_matrix) based on the 
+        cosine similarity of power-weighted complex eigenvalue distributions.
+        """
+        temporal_profiles = []
+        labels = []
+        
+        # Define a high-resolution grid over the complex plane to capture subtle frequency shifts
+        # Expanded slightly beyond 1.2 to fully capture the slow-decaying baseline dynamics
+        real_bins = np.linspace(-1.2, 1.2, 20)
+        imag_bins = np.linspace(-1.2, 1.2, 20)
+        
+        for task in self.tasks:
+            for flight in self.env_data[task]:
+                lambdas = flight['eigenvalues']
+                power = flight['mode_power']
+                
+                # Create a 2D density distribution weighted explicitly by mode power
+                # This ensures highly energetic rhythms dominate the temporal signature
+                H, _, _ = np.histogram2d(
+                    np.real(lambdas), 
+                    np.imag(lambdas), 
+                    bins=[real_bins, imag_bins], 
+                    weights=power,
+                )
+                
+                # Flatten the 2D spectral map into a 1D temporal feature vector
+                feat = H.flatten()
+                
+                # Normalize the vector to unit norm
+                feat /= (np.linalg.norm(feat) + 1e-12)
+                
+                temporal_profiles.append(feat)
+                labels.append(task)
+                
+        temporal_profiles = np.array(temporal_profiles) # Shape: (n_flights, n_bins)
+        
+        # Compute pairwise temporal profile cosine similarity
+        similarity_matrix = temporal_profiles @ temporal_profiles.T
+        
+        # Here we use distance matrix, and then sort by task blocks to group matching flight conditions
+        sort_idx = np.argsort(labels)
+        sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
+        sorted_labels = [labels[i] for i in sort_idx]
+        
+        # Plot the resulting Temporal Alignment Heatmap
+        plt.figure(figsize=(7, 6))
+        ax = sns.heatmap(sorted_matrix, cmap='magma', xticklabels=False, yticklabels=False,
+                         cbar_kws={'label': 'Cosine Similarity'})
+        
+        # Add visual block borders
+        unique_labels, counts = np.unique(sorted_labels, return_counts=True)
+        current_idx = 0
+        tick_positions = []
+        for label, count in zip(unique_labels, counts):
+            current_idx += count
+            plt.axhline(current_idx, color='white', linewidth=1.5)
+            plt.axvline(current_idx, color='white', linewidth=1.5)
+            tick_positions.append(current_idx - (count / 2))
+            
+        ax.set_yticks(tick_positions)
+        ax.set_yticklabels(unique_labels, rotation=0, fontsize=10, fontweight='bold')
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(unique_labels, rotation=45, fontsize=10, fontweight='bold')
+        
+        plt.title(f"Temporal Subspace Alignment ({self.env.capitalize()})", pad=15, fontsize=12)
         plt.tight_layout()
         return None
 
