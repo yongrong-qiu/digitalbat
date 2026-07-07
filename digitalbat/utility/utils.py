@@ -3122,7 +3122,7 @@ class FlightDMDPostAnalysis:
         
     def plot_error_distributions(self):
         """1. Plots a histogram/KDE of reconstruction errors across flight types."""
-        plt.figure(figsize=(8, 5))
+        plt.figure(figsize=(5, 3))
         
         for task in self.tasks:
             errors = [flight['rec_error'] for flight in self.env_data[task]]
@@ -3151,7 +3151,7 @@ class FlightDMDPostAnalysis:
                 power = flight['mode_power']
                 top_indices = np.argsort(power)[::-1][:n_top_modes]
                 
-                primary_mode = np.real(modes[:, top_indices[0]])
+                primary_mode = np.real(modes[:, top_indices[:]]).flatten()
                 primary_mode /= (np.linalg.norm(primary_mode) + 1e-12)
                 
                 all_modes.append(primary_mode)
@@ -3164,7 +3164,7 @@ class FlightDMDPostAnalysis:
         sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
         sorted_labels = [labels[i] for i in sort_idx]
         
-        plt.figure(figsize=(8, 7))
+        plt.figure(figsize=(7, 6))
         ax = sns.heatmap(sorted_matrix, cmap='viridis', xticklabels=False, yticklabels=False,
                          cbar_kws={'label': 'Absolute Cosine Similarity'})
         
@@ -3196,7 +3196,7 @@ class FlightDMDPostAnalysis:
         3. Smooths, normalizes, and averages discrete spectra into 
         continuous continuous spectral density curves per flight type.
         """
-        plt.figure(figsize=(9, 5))
+        plt.figure(figsize=(4, 4))
         freq_grid = np.linspace(0, max_freq, 200)
         
         for task in self.tasks:
@@ -3255,7 +3255,8 @@ class FlightDMDPostAnalysis:
                 lambdas = flight['eigenvalues']
                 
                 # Create a 2D density histogram of where eigenvalues fall in the complex plane
-                H, _, _ = np.histogram2d(np.real(lambdas), np.imag(lambdas), bins=[real_bins, imag_bins])
+                weights = np.ones(len(lambdas))/len(lambdas)
+                H, _, _ = np.histogram2d(np.real(lambdas), np.imag(lambdas), bins=[real_bins, imag_bins], weights=weights)
                 
                 # Flatten the 2D grid into a 1D feature array for this flight trial
                 feature_vectors.append(H.flatten())
@@ -3264,18 +3265,19 @@ class FlightDMDPostAnalysis:
         feature_vectors = np.array(feature_vectors)
         
         # Apply t-SNE dimensionality reduction to cluster complex constellations
-        perplexity = min(15, max(5, len(feature_vectors) // 3))
-        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, init='pca')
-        embeddings = tsne.fit_transform(feature_vectors)
+        # perplexity = min(15, max(5, len(feature_vectors) // 3))
+        # tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, init='pca')
+        pca = PCA(n_components=2)
+        embeddings = pca.fit_transform(feature_vectors)
         
-        plt.figure(figsize=(8, 6))
+        plt.figure(figsize=(5, 4))
         sns.scatterplot(x=embeddings[:, 0], y=embeddings[:, 1], hue=task_labels, 
                         palette='Set1', s=70, edgecolor='k', alpha=0.8)
                         
-        plt.title(f"t-SNE Mapping of Eigenvalue 'Fingerprints' ({self.env.capitalize()})")
-        plt.xlabel("t-SNE Dimension 1")
-        plt.ylabel("t-SNE Dimension 2")
-        plt.legend(title="Flight Type")
+        plt.title(f"Eigenvalue 'Fingerprints' ({self.env.capitalize()})")
+        plt.xlabel("Dimension 1")
+        plt.ylabel("Dimension 2")
+        plt.legend()
         plt.grid(True, linestyle=':', alpha=0.6)
         plt.tight_layout()
         return None
