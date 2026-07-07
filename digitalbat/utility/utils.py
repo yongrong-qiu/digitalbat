@@ -3137,7 +3137,7 @@ class FlightDMDPostAnalysis:
         plt.tight_layout()
         return None
 
-    def analyze_spatial_subspaces(self, n_top_modes=2):
+    def analyze_spatial_subspaces(self, top_mode_index=0):
         """
         2. Computes and plots subspace alignment (similarity matrix) 
         between the dominant spatial modes across all flights with task labels.
@@ -3149,9 +3149,9 @@ class FlightDMDPostAnalysis:
             for flight in self.env_data[task]:
                 modes = flight['dmd_modes']
                 power = flight['mode_power']
-                top_indices = np.argsort(power)[::-1][:n_top_modes]
+                top_indices = np.argsort(power)[::-1][top_mode_index]
                 
-                primary_mode = np.real(modes[:, top_indices[:]]).flatten()
+                primary_mode = np.real(modes[:, top_indices])
                 primary_mode /= (np.linalg.norm(primary_mode) + 1e-12)
                 
                 all_modes.append(primary_mode)
@@ -3166,7 +3166,7 @@ class FlightDMDPostAnalysis:
         
         plt.figure(figsize=(7, 6))
         ax = sns.heatmap(sorted_matrix, cmap='viridis', xticklabels=False, yticklabels=False,
-                         cbar_kws={'label': 'Absolute Cosine Similarity'})
+                         cbar_kws={'label': 'Cosine Similarity'})
         
         # Calculate block boundaries and midpoints for placing labels
         unique_labels, counts = np.unique(sorted_labels, return_counts=True)
