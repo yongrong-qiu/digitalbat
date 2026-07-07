@@ -3191,10 +3191,16 @@ class FlightDMDPostAnalysis:
         plt.tight_layout()
         return None
     
-    def analyze_temporal_subspaces(self):
+    def analyze_temporal_subspaces(self, data_type='latent'):
         """
         Computes and plots the temporal subspace alignment map (similarity_matrix) based on the 
         cosine similarity of power-weighted complex eigenvalue distributions.
+
+        Parameters:
+        -----------
+        data_type : str
+            'latent' or 'neuronal'. If 'neuronal', the 0 Hz static baseline 
+            component is completely zeroed out to expose hidden rhythms.
         """
         temporal_profiles = []
         labels = []
@@ -3211,12 +3217,22 @@ class FlightDMDPostAnalysis:
                 
                 # Create a 2D density distribution weighted explicitly by mode power
                 # This ensures highly energetic rhythms dominate the temporal signature
-                H, _, _ = np.histogram2d(
+                H, x_edges, y_edges = np.histogram2d(
                     np.real(lambdas), 
                     np.imag(lambdas), 
                     bins=[real_bins, imag_bins], 
                     weights=power,
                 )
+
+                # IF NEURONAL: Suppress the 0.0 Hz imaginary axis line entirely
+                if data_type == 'neuronal':
+                    # Find the bin index matching Imaginary = 0.0
+                    # y_edges corresponds to the imaginary axis bins
+                    imag_centers = (y_edges[:-1] + y_edges[1:]) / 2.0
+                    zero_imag_idx = np.argmin(np.abs(imag_centers))
+                    
+                    # Zero out the entire real-axis row where imaginary frequency is 0
+                    H[:, zero_imag_idx] = 0.0
                 
                 # Flatten the 2D spectral map into a 1D temporal feature vector
                 feat = H.flatten()
