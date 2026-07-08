@@ -22,7 +22,8 @@ import torch
 from torch import nn
 import tqdm
 
-from ..models.joint import JointMaskedTransformer, SCHEMES, sample_mask, joint_loss
+from ..models.joint import (JointMaskedTransformer, SCHEMES, sample_mask,
+                            within_double_batch, forecast_input_mask, joint_loss)
 from ..utility.utils import (round_robin_session_batches, poisson_fde_population,
                              set_random_state)
 
@@ -121,11 +122,30 @@ def train_joint(model, dataloaders, device, meta, *, seed=1, n_epochs=300, lr=3e
         model.train()
         for s, b in round_robin_session_batches(dataloaders['train']):
             scheme = rng.choices(schemes, weights=scheme_p)[0]
+            spike, behavior = b.spike.to(device), b.behavior.to(device)
             m = b.mask.to(device)
-            nt, bt = sample_mask(b.mask, scheme)
-            nt, bt = nt.to(device), bt.to(device)
-            rate, beh, _ = model(s, b.spike.to(device), b.behavior.to(device), m, nt, bt)
-            loss = joint_loss(rate, beh, b.spike.to(device), b.behavior.to(device),
+            # (nt, bt) are the loss targets; (n_in, b_in) are the input masks passed
+            # to forward. They differ only for forecast (no stimulus), where all
+            # behaviour is hidden on input but not scored.
+            if scheme == 'within':
+                # Double the batch to 2B so each flight is infilled once as a
+                # neural target and once as a behaviour target (see
+                # within_double_batch); other schemes keep the batch at B.
+                spike = torch.cat([spike, spike], dim=0)
+                behavior = torch.cat([behavior, behavior], dim=0)
+                m = torch.cat([m, m], dim=0)
+                nt, bt = within_double_batch(b.mask)
+                n_in, b_in = nt, bt
+            elif scheme in ('forecast', 'forecast_stim'):
+                nt, bt = sample_mask(b.mask, scheme)          # 2nd-half neural; no beh loss
+                n_in = nt                                     # neural: hide 2nd half
+                b_in = forecast_input_mask(b.mask, scheme)    # beh hidden (forecast) / seen (+stim)
+            else:
+                nt, bt = sample_mask(b.mask, scheme)
+                n_in, b_in = nt, bt
+            n_in, b_in, nt, bt = (t.to(device) for t in (n_in, b_in, nt, bt))
+            rate, beh, _ = model(s, spike, behavior, m, n_in, b_in)
+            loss = joint_loss(rate, beh, spike, behavior,
                               m, nt, bt, lam, pois_fn, pos_weight=pos_weight)
             opt.zero_grad(); loss.backward(); opt.step()
         err = _decode_median_err_m(model, dataloaders['valid'], meta, device)

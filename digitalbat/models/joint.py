@@ -44,6 +44,8 @@ __all__ = [
     'JointMaskedTransformer',
     'SCHEMES',
     'sample_mask',
+    'within_double_batch',
+    'forecast_input_mask',
     'joint_loss',
     'JointEncoderAdapter',
     'encode_eval_records',
@@ -201,17 +203,31 @@ class JointMaskedTransformer(nn.Module):
 # ---------------------------------------------------------------------------
 # Masking schemes: the task is a choice of which tokens are prediction targets.
 # ---------------------------------------------------------------------------
-SCHEMES = ['encode', 'decode', 'within', 'cross', 'forecast']
+SCHEMES = ['encode', 'decode', 'within', 'cross', 'forecast', 'forecast_stim']
 
 
 def sample_mask(valid_mask, scheme, frac=0.5):
-    """Build ``(neural_target, beh_target)`` ``(B, T)`` float masks for a scheme.
+    """Build ``(neural_target, beh_target)`` ``(B, T)`` float **loss-target** masks.
 
-    ``*_target == 1`` marks tokens masked on input (i.e. prediction targets). Padded
-    timesteps (``valid_mask == 0``) are never targets. Schemes:
+    ``*_target == 1`` marks tokens that are *scored* by the loss (and, for most
+    schemes, also masked on input). Padded timesteps (``valid_mask == 0``) are never
+    targets. Schemes:
     ``encode`` (spikes <- behaviour), ``decode`` (behaviour <- spikes),
-    ``within`` (independent random infill per modality), ``cross`` (same random tokens
-    in both modalities), ``forecast`` (2nd half of valid timesteps in both modalities).
+    ``within`` (random infill of a *single* modality chosen per row, the other
+    left fully visible), ``cross`` (same random tokens in both modalities),
+    ``forecast`` / ``forecast_stim`` (predict the **2nd half of neural** activity;
+    behaviour is *not* scored in either).
+
+    The two forecasting variants (after Willeke et al. 2026, Fig. 5) return the
+    **same** loss target here — 2nd-half neural, no behaviour — because they differ
+    only in what the model *sees on input*, not in what is scored:
+
+    - ``forecast``       : behaviour fully masked on input (no stimulus).
+    - ``forecast_stim``  : behaviour fully visible on input (+ stimulus).
+
+    That input-visibility difference is applied by the trainer (which passes the
+    input mask to ``forward`` separately from the loss target it passes to
+    :func:`joint_loss`); see :func:`forecast_input_mask`.
     """
     B, T = valid_mask.shape
     v = valid_mask.bool()
@@ -221,20 +237,70 @@ def sample_mask(valid_mask, scheme, frac=0.5):
     if scheme == 'decode':
         return z.clone(), valid_mask.clone()
     if scheme == 'within':
-        nm = (torch.rand_like(valid_mask) < frac) & v
-        bm = (torch.rand_like(valid_mask) < frac) & v
-        return nm.float(), bm.float()
+        # True within-modal infill: each *sequence* targets ONE modality, the
+        # other left fully visible, chosen independently per row. If both were
+        # masked at once (even at different times), a masked token could lean on
+        # the same-time token in the other modality — the cross-modal crutch this
+        # scheme avoids. Per-row choice lets a doubled 2B batch (each flight
+        # stacked twice) carry every flight once as a neural target and once as a
+        # behaviour target; see :func:`within_double_batch`.
+        m = (torch.rand_like(valid_mask) < frac) & v
+        pick_neural = torch.rand(B, 1, device=valid_mask.device) < 0.5
+        return (m & pick_neural).float(), (m & ~pick_neural).float()
     if scheme == 'cross':
         m = (torch.rand_like(valid_mask) < frac) & v
         return m.float(), m.float()
-    if scheme == 'forecast':
+    if scheme in ('forecast', 'forecast_stim'):
+        # Predict the 2nd half of NEURAL activity from the 1st half; behaviour is
+        # never a loss target (it is only context, present or absent per variant).
         tgt = torch.zeros_like(valid_mask)
         for b in range(B):
             idx = torch.where(v[b])[0]
             if len(idx) >= 2:
                 tgt[b, idx[len(idx) // 2]:] = valid_mask[b, idx[len(idx) // 2]:]
-        return tgt.clone(), tgt.clone()
+        return tgt.clone(), z.clone()
     raise ValueError(scheme)
+
+
+def forecast_input_mask(valid_mask, scheme):
+    """Behaviour **input** mask for a forecasting scheme (``(B, T)`` float).
+
+    Distinct from the loss target of :func:`sample_mask`: this is what the model
+    *cannot see*, not what it is scored on. ``forecast`` (no stimulus) hides all
+    valid behaviour timesteps; ``forecast_stim`` (+ stimulus) hides none. Neural
+    input masking is the same as the neural loss target (2nd-half neural) for both,
+    so only the behaviour input mask differs and is returned here.
+    """
+    if scheme == 'forecast':
+        return valid_mask.clone()                 # hide all behaviour (no stimulus)
+    if scheme == 'forecast_stim':
+        return torch.zeros_like(valid_mask)       # behaviour fully visible (+ stimulus)
+    raise ValueError(scheme)
+
+
+def within_double_batch(valid_mask, frac=0.5):
+    """Deterministic within-modal doubling of a ``(B, T)`` batch to ``2B``.
+
+    Stacks the batch on top of itself so every flight is seen *twice* under
+    within-modal infill: the first ``B`` rows mask random valid **neural**
+    timepoints (behaviour fully visible), the next ``B`` rows mask random valid
+    **behaviour** timepoints (neural fully visible). Unlike ``sample_mask('within')``
+    (which picks one modality per row at random, so a flight may land as the same
+    modality every time), this guarantees each flight contributes once as a neural
+    target and once as a behaviour target.
+
+    Returns ``(neural_target, beh_target)`` each ``(2B, T)``. Pair with model inputs
+    doubled the same way (``torch.cat([x, x], dim=0)`` for spike / behaviour / mask).
+    The two halves draw independent random timepoints, so the neural and behaviour
+    views of a flight are not forced to hide the same bins.
+    """
+    v = valid_mask.bool()
+    z = torch.zeros_like(valid_mask)
+    mn = ((torch.rand_like(valid_mask) < frac) & v).float()
+    mb = ((torch.rand_like(valid_mask) < frac) & v).float()
+    neural_target = torch.cat([mn, z], dim=0)
+    beh_target = torch.cat([z, mb], dim=0)
+    return neural_target, beh_target
 
 
 def joint_loss(rate, beh, spike, behavior, valid_mask, neural_target, beh_target,
