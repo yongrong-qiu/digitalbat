@@ -303,14 +303,16 @@ def _star_row(ax, order, pvals, frac=0.96):
 def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
                        ylabel='', unit_ylabel=None, unit_name='neuron',
                        session_col='session', model_col='model', agg='median',
-                       clip=None, palette=None, zero_line=False,
+                       clip=None, sess_ylim=None, palette=None, zero_line=False,
                        higher_is_better=True, figsize=None):
     """Two-panel model comparison in the unified style.
 
     Left: per-session aggregate (`agg`) as a grey boxplot with per-session points
     coloured by bat; 3-tier stars mark session-level Wilcoxon signed-rank vs
     `ref`. Right: the per-unit distribution (boxplot). `clip=(lo,hi)` bounds the
-    *axes* only (e.g. FDE to [-1,1]); raw values drive the stats.
+    *axes* only (e.g. FDE to [-1,1]); raw values drive the stats. `sess_ylim=(lo,hi)`
+    overrides the left (session) panel's ylim (applied before the stars are placed,
+    so they stay on-axis); the right panel keeps `clip`.
 
     Returns (fig, p_table) where p_table has one row per model vs `ref`.
     """
@@ -346,7 +348,9 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
                           alpha=0.9, edgecolor='k', linewidth=0.3, ax=ax, legend=False)
         if zero_line:
             ax.axhline(0, color='0.5', ls='--', lw=0.9, zorder=0)
-        if clip:
+        if is_sess and sess_ylim is not None:
+            ax.set_ylim(*sess_ylim)
+        elif clip:
             ax.set_ylim(*clip)
         ax.set_xlabel('')
         ax.set_ylabel(ylabel if is_sess else (unit_ylabel or ylabel))
@@ -461,6 +465,59 @@ def plot_embedding(ax, emb2d, color, *, categorical=False, cmap='viridis',
     sc = ax.scatter(emb2d[:, 0], emb2d[:, 1], c=color, cmap=cmap, s=s, alpha=alpha,
                     vmin=vmin, vmax=vmax, rasterized=rasterized, linewidths=0)
     return sc
+
+
+def plot_trajectories_3d(ax, trajs, values, *, categorical=False, cmap='viridis',
+                         cat_colors=None, vlim=None, lw=1.2, alpha=0.8, rasterized=True,
+                         show_endpoints=False, start_color='tab:orange', end_color='deeppink'):
+    """Draw per-flight trajectories as connected 3-D polylines on a 3-D `ax`.
+
+    `trajs` is a list of (T_i, 3) arrays (one flight each). `values` supplies the
+    colour: if `categorical`, a per-flight class id (whole line one colour, via
+    `cat_colors`); otherwise a per-flight (T_i,) array coloured per segment with
+    `cmap` (optional (vmin, vmax) `vlim`). With `show_endpoints`, each flight's first
+    (`start_color`) and last (`end_color`) point is marked; the markers are drawn
+    *before* the lines so they sit behind them. Returns a mappable (continuous) or None.
+    """
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+    trajs = [np.asarray(t, float) for t in trajs]
+    ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
+    if show_endpoints:
+        good = [t for t in trajs if len(t) >= 1]
+        if good:
+            starts = np.array([t[0] for t in good]); ends = np.array([t[-1] for t in good])
+            ax.scatter(starts[:, 0], starts[:, 1], starts[:, 2], s=16, color=start_color,
+                       depthshade=False, edgecolors='none', zorder=0, rasterized=rasterized)
+            ax.scatter(ends[:, 0], ends[:, 1], ends[:, 2], s=16, color=end_color,
+                       depthshade=False, edgecolors='none', zorder=0, rasterized=rasterized)
+    if categorical:
+        cc = cat_colors or ROUTE_COLORS
+        for t, v in zip(trajs, values):
+            if len(t) < 2:
+                continue
+            ax.plot(t[:, 0], t[:, 1], t[:, 2], '-', lw=lw, alpha=alpha,
+                    color=cc[int(v) % len(cc)], rasterized=rasterized)
+        sm = None
+    else:
+        allc = np.concatenate([np.asarray(v, float) for v in values])
+        vmin, vmax = vlim if vlim is not None else np.nanpercentile(allc, [2, 98])
+        norm = plt.Normalize(vmin, vmax)
+        for t, v in zip(trajs, values):
+            if len(t) < 2:
+                continue
+            pts = t.reshape(-1, 1, 3)
+            segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+            v = np.asarray(v, float)
+            lc = Line3DCollection(segs, cmap=cmap, norm=norm, linewidths=lw, alpha=alpha)
+            lc.set_array((v[:-1] + v[1:]) / 2)
+            lc.set_rasterized(rasterized)
+            ax.add_collection3d(lc)
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
+    pts = np.vstack(trajs)
+    ax.set_xlim(pts[:, 0].min(), pts[:, 0].max())
+    ax.set_ylim(pts[:, 1].min(), pts[:, 1].max())
+    ax.set_zlim(pts[:, 2].min(), pts[:, 2].max())
+    return sm
 
 
 # ---------------------------------------------------------------------------
