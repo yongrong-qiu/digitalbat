@@ -232,8 +232,13 @@ class Data_Prep_for_Raw():
             # bin_size_sec = 0.1  # 100 ms
             lfp_filter = bandpass_filter(lfp, fs, beta_band)
 
-        # time resampling
-        self.global_t_end = np.min([bhv_t[-1], imu_t[-1]]) if self.use_IMU_flag else bhv_t[-1]
+        # time resampling. Clip the window to where NEURAL data actually exists
+        # (the last spike), independent of use_IMU_flag, so the flight split is
+        # identical whether or not IMU is loaded. Spikes and IMU are recorded by
+        # the same head logger and end together, so clipping to the last spike also
+        # guarantees the IMU channels cover every kept bin (no trailing NaNs) while
+        # excluding tail flights that have position tracking but no neural data.
+        self.global_t_end = min(bhv_t[-1], self._neural_recording_end())
         # print (f'global_t_end: {global_t_end}')
         all_time =np.arange(self.global_t_start, self.global_t_end, self.bin_width)
         # bin spike times
@@ -316,8 +321,26 @@ class Data_Prep_for_Raw():
         self.all_behavior = all_behavior
 
         self._behavior_ready = True
-        
+
         return self.all_behavior
+
+    def _neural_recording_end(self):
+        """Last spike time (s) across all single units -- the extent of the neural
+        recording. Used to clip the analysis window to where neural data actually
+        exists, so the flight set is identical whether or not IMU is loaded.
+        Cheap: mirrors the ``out_Gunits`` loading in ``get_all_spike`` but only
+        reads spike times (no merging / refractory logic, which do not change the
+        maximum). Merges only concatenate units, so the global max is unaffected."""
+        t_end = -np.inf
+        for temppath in self.su_file_path:
+            su_good = loadmat(temppath)
+            for x in su_good['out_Gunits']['spikeTimes_usec']:
+                st = x[0]
+                if st.size:
+                    t_end = max(t_end, st[:, 0].max() / 1e6)
+        if not np.isfinite(t_end):
+            raise RuntimeError(f'No spikes found in {self.su_file_path}')
+        return t_end
 
     def get_all_spike(self):
         """
