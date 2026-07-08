@@ -13,6 +13,7 @@ can import them instead of redefining them inline.
 import math
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.colors import ListedColormap
@@ -552,7 +553,7 @@ def plot_value_vs_occupancy(panels, occ_source, occ_pos_cols=('x_true', 'y_true'
             ax.errorbar(tx, ty, yerr=te, fmt='o-', color='firebrick', capsize=3, zorder=5)
             r = np.corrcoef(x, y)[0, 1]
             ax.annotate(f'r = {r:.3f}  (n={len(x)} bins)', xy=(0.04, 0.96),
-                        xycoords='axes fraction', va='top', fontsize=9)
+                        xycoords='axes fraction', va='top', fontsize=11)
         ax.set(xlabel='occupancy (test samples / bin)', ylabel=f'{agg} {vlabel}',
                title=f'{vlabel} vs occupancy')
     if suptitle:
@@ -623,7 +624,7 @@ def plot_value_vs_speed(panels, shared_room_prefixes=('Dataset_1', 'Dataset_3'),
         r_log = np.corrcoef(np.log(np.maximum(x, 1e-6)), y)[0, 1]
         rho, _ = spearmanr(x, y)
         ax.annotate(f'r(log) = {r_log:.3f}\n$\\rho$ = {rho:.3f}  (n={len(x)})',
-                    xy=(0.04, 0.96), xycoords='axes fraction', va='top', fontsize=9)
+                    xy=(0.04, 0.96), xycoords='axes fraction', va='top', fontsize=11)
         ax.set_xscale('log')
         ax.set(xlabel='speed (m/s)', ylabel=vlabel, title=f'{vlabel} vs speed')
     if suptitle:
@@ -642,35 +643,81 @@ SUBREGION_CMAP = ListedColormap([SUBREGION_COLORS['CA1'], SUBREGION_COLORS['CA3'
 SUBREGION_CMAP.set_bad('white')
 
 
-def plot_mantel_boxplots(mantel_df, comparison_col='comparison', ylabel='Mantel $\\rho$', ncols=4):
-    """Plot Mantel test results: grey boxplot of merged null + colored dots by bat."""
-    comparisons = mantel_df[comparison_col].unique()
+def plot_mantel_boxplots(mantel_df, comparison_col='comparison', ylabel='Mantel $\\rho$',
+                         ncols=4, axes=None, ax=None, palette=None):
+    """Plot Mantel test results: grey boxplot of merged null + colored dots by bat.
+
+    Three drawing modes:
+      * default (``axes`` and ``ax`` both ``None``): build and return a new
+        multi-panel figure, one panel per comparison.
+      * ``axes=[...]`` (one Axes per comparison): draw the multi-panel style onto
+        a caller-supplied list of axes (shared canvas); returns the parent figure.
+      * ``ax=<Axes>``: grouped single-axes mode -- every comparison is one x-tick
+        (grey null boxplots + bat-coloured Mantel-r dots), with a session-level
+        Wilcoxon-vs-0 star above each. Use this to fold the panel onto one cell of
+        a merged gridspec. Returns the parent figure.
+    """
+    from scipy.stats import wilcoxon
+    comparisons = list(mantel_df[comparison_col].unique())
     n = len(comparisons)
-    nrows = math.ceil(n / ncols)
-    ncols_actual = min(n, ncols)
-    fig, axes = plt.subplots(nrows, ncols_actual, figsize=(4 * ncols_actual, 4 * nrows),
-                             squeeze=False)
+
+    if ax is not None:                                   # grouped single-axes mode
+        null_long = pd.concat(
+            [pd.DataFrame({comparison_col: c,
+                           'null': np.concatenate(mantel_df[mantel_df[comparison_col] == c]['perm_rs'].values)})
+             for c in comparisons], ignore_index=True)
+        sns.boxplot(data=null_long, x=comparison_col, y='null', order=comparisons, color='0.85',
+                    width=0.5, whis=(0.5, 99.5), showfliers=False, ax=ax)
+        bats_present = [b for b in (palette or {}) if b in set(mantel_df['bat'])] or None
+        sns.stripplot(data=mantel_df, x=comparison_col, y='r', order=comparisons, hue='bat',
+                      palette=palette, hue_order=bats_present, size=6, jitter=0.12,
+                      edgecolor='k', linewidth=0.4, zorder=5, ax=ax, legend=False)
+        ax.axhline(0, color='k', linewidth=0.5, linestyle='--')
+        ymax = mantel_df['r'].max()
+        for idx, comp in enumerate(comparisons):
+            rs = mantel_df.loc[mantel_df[comparison_col] == comp, 'r'].dropna().values
+            if len(rs) >= 3 and np.any(rs != 0):
+                p = wilcoxon(rs, alternative='greater').pvalue
+                star = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
+                if star:
+                    ax.text(idx, ymax * 1.05, star, ha='center', va='bottom', fontsize=13)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel('')
+        ax.set_xticks(range(n))
+        ax.set_xticklabels(comparisons, rotation=25, ha='right')
+        sns.despine(ax=ax)
+        return ax.figure
+
+    if axes is not None:                                 # caller-supplied panel list
+        fig = np.ravel(axes)[0].figure
+        axgrid = np.ravel(axes)
+    else:
+        nrows = math.ceil(n / ncols)
+        ncols_actual = min(n, ncols)
+        fig, axgrid = plt.subplots(nrows, ncols_actual, figsize=(4 * ncols_actual, 4 * nrows),
+                                   squeeze=False)
+        axgrid = axgrid.ravel()
     for idx, comp in enumerate(comparisons):
-        ax = axes[idx // ncols_actual, idx % ncols_actual]
+        ax_i = axgrid[idx]
         sub = mantel_df[mantel_df[comparison_col] == comp].reset_index(drop=True)
         all_nulls = np.concatenate(sub['perm_rs'].values)
         sns.boxplot(y=all_nulls, color='0.85', width=0.4, whis=(0.5, 99.5),
-                    fliersize=0, ax=ax)
-        sns.stripplot(data=sub, y='r', hue='bat', ax=ax, size=8, jitter=0.1,
+                    fliersize=0, ax=ax_i)
+        sns.stripplot(data=sub, y='r', hue='bat', ax=ax_i, size=8, jitter=0.1,
                       zorder=5, edgecolor='k', linewidth=0.5)
         for _, row in sub.iterrows():
             star = '***' if row['p'] < 0.001 else '**' if row['p'] < 0.01 else '*' if row['p'] < 0.05 else ''
             if star:
-                ax.text(0.25, row['r'], star, ha='left', va='center', fontsize=8)
-        ax.set_ylabel(ylabel)
-        ax.set_title(comp, fontsize=9)
-        ax.axhline(0, color='k', linewidth=0.5, linestyle='--')
-        ax.set_xticks([])
-        ax.legend(title='Bat', fontsize=7, title_fontsize=7)
-    # Hide unused axes
-    for idx in range(n, nrows * ncols_actual):
-        axes[idx // ncols_actual, idx % ncols_actual].set_visible(False)
-    plt.tight_layout()
+                ax_i.text(0.25, row['r'], star, ha='left', va='center', fontsize=8)
+        ax_i.set_ylabel(ylabel)
+        ax_i.set_title(comp, fontsize=11)
+        ax_i.axhline(0, color='k', linewidth=0.5, linestyle='--')
+        ax_i.set_xticks([])
+        ax_i.legend(title='Bat', fontsize=7, title_fontsize=7)
+    for idx in range(n, len(axgrid)):                    # hide unused axes
+        axgrid[idx].set_visible(False)
+    if axes is None:
+        plt.tight_layout()
     return fig
 
 
@@ -804,6 +851,244 @@ def plot_similarity_heatmaps(matrices, clu_df, global_order, suptitle='',
     last_ax.legend(loc='upper right', fontsize=8, framealpha=0.8)
 
     if suptitle:
-        fig.suptitle(suptitle, fontsize=13)
+        fig.suptitle(suptitle, fontsize=15)
     plt.tight_layout()
     return fig
+
+
+# ===========================================================================
+# Dual-field example cells: raw spikes vs empirical rate vs predicted rate
+# ---------------------------------------------------------------------------
+# Picks neurons whose place field sits in two *physically different* locations
+# on two *different flight clusters*, then draws, per cluster, three views of
+# the flight path (3D + x-y projection):
+#   (1) raw spikes   -- red dots on a black flight path,
+#   (2) empirical    -- path coloured by observed firing rate (counts / dt),
+#   (3) predicted    -- path coloured by the model's predicted rate,
+# with panels (2) and (3) sharing one colour scale for a fair comparison.
+# All inputs come from the **test** dataloaders only.
+# ===========================================================================
+def build_flight_records(X, y, pred, mask, ftype, behavior_mean, behavior_std):
+    """Split padded ``(N, T, *)`` test batches into per-flight records of valid
+    timesteps, with denormalised 3D position.
+
+    Returns a list of dicts ``{'xyz': (t, 3), 'obs': (t, n), 'pred': (t, n),
+    'cluster': int}`` where ``xyz`` columns are physical x, y, z (meters),
+    ``obs`` are observed binned spike counts and ``pred`` the model's predicted
+    counts. Only timesteps with ``mask == 1.0`` are kept.
+    """
+    bm = np.asarray(behavior_mean)[0, 0, :3]
+    bs = np.asarray(behavior_std)[0, 0, :3]
+    flights = []
+    for i in range(X.shape[0]):
+        m = mask[i] == 1.0
+        if m.sum() < 2:
+            continue
+        xyz = X[i][m][:, :3] * bs + bm
+        flights.append(dict(xyz=xyz, obs=y[i][m], pred=pred[i][m],
+                            cluster=int(ftype[i])))
+    return flights
+
+
+def select_dual_field_cells(flights, n_neurons, dt, r_lim,
+                            loc_bin_width=0.3, min_flights=4, min_spikes=8,
+                            min_peak_rate=2.0, min_field_sep=1.0, n_top=2):
+    """Rank neurons by how spatially separated their two strongest place fields
+    are across two *different* flight clusters.
+
+    For each neuron and each flight cluster with at least ``min_flights``
+    flights, a smoothed 2D (x, y) rate map is built and its peak rate / location
+    recorded. A neuron is a dual-field candidate when two clusters each drive a
+    peak of at least ``min_peak_rate`` spikes/s whose peak locations lie at least
+    ``min_field_sep`` meters apart. Returns up to ``n_top`` candidates sorted by
+    peak separation (descending), each a dict with the neuron index, the two
+    cluster ids, per-cluster peak rate / location and the separation distance.
+    """
+    from collections import defaultdict
+    from digitalbat.utility.utils import generate_2d_rate_map
+
+    by_cluster = defaultdict(list)
+    for f in flights:
+        by_cluster[f['cluster']].append(f)
+    by_cluster = {c: fl for c, fl in by_cluster.items() if len(fl) >= min_flights}
+
+    loc_xx_lim, loc_yy_lim = r_lim[0], r_lim[1]
+    candidates = []
+    for neuron in range(n_neurons):
+        peaks = {}
+        for c, fl in by_cluster.items():
+            xx = np.concatenate([f['xyz'][:, 0] for f in fl])
+            yy = np.concatenate([f['xyz'][:, 1] for f in fl])
+            sc = np.concatenate([f['obs'][:, neuron] for f in fl])
+            if sc.sum() < min_spikes:
+                continue
+            x_edges, y_edges, _, smap = generate_2d_rate_map(
+                loc_xx=xx, loc_yy=yy, unit_spike_count=sc,
+                loc_xx_lim=loc_xx_lim, loc_yy_lim=loc_yy_lim,
+                loc_bin_width=loc_bin_width, dt=dt)
+            if not np.isfinite(smap).any():
+                continue
+            peak_rate = np.nanmax(smap)
+            if peak_rate < min_peak_rate:
+                continue
+            ix, iy = np.unravel_index(np.nanargmax(smap), smap.shape)
+            loc = np.array([0.5 * (x_edges[ix] + x_edges[ix + 1]),
+                            0.5 * (y_edges[iy] + y_edges[iy + 1])])
+            peaks[c] = dict(rate=float(peak_rate), loc=loc, n_flights=len(fl))
+        if len(peaks) < 2:
+            continue
+        cl = list(peaks)
+        best = None
+        for a in range(len(cl)):
+            for b in range(a + 1, len(cl)):
+                sep = float(np.linalg.norm(peaks[cl[a]]['loc'] - peaks[cl[b]]['loc']))
+                if best is None or sep > best['sep']:
+                    best = dict(sep=sep, clusters=(cl[a], cl[b]),
+                                peak_rate=min(peaks[cl[a]]['rate'], peaks[cl[b]]['rate']))
+        if best['sep'] >= min_field_sep:
+            candidates.append(dict(neuron=neuron, sep=best['sep'],
+                                   clusters=best['clusters'], peak_rate=best['peak_rate'],
+                                   peaks={c: peaks[c] for c in best['clusters']}))
+    candidates.sort(key=lambda d: (d['sep'], d['peak_rate']), reverse=True)
+    return candidates[:n_top]
+
+
+def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
+                         title='', peaks=None, rate_cmap='viridis',
+                         spike_color='red', axes3d=None, col_title_fs=13, row_label_fs=12):
+    """Draw the spikes / empirical-rate / predicted-rate triptych for one neuron
+    on two flight clusters, in 3D and in x-y projection.
+
+    Produces TWO figures -- one 3D, one x-y projection -- each with
+    ``len(clusters)`` rows by 3 columns (raw spikes, empirical rate, predicted
+    rate). The empirical and predicted panels share a single colour scale
+    (``norm``) so they are directly comparable; raw-spike panels show a black
+    flight path with red spike dots (dot area scales with the binned spike
+    count). Returns ``(fig_3d, fig_2d)``.
+    """
+    from matplotlib.collections import LineCollection
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.lines import Line2D
+
+    clusters = list(clusters)
+    data = {c: [f for f in flights if f['cluster'] == c] for c in clusters}
+
+    # Shared colour scale across empirical & predicted, both clusters.
+    all_rates = []
+    for c in clusters:
+        for f in data[c]:
+            all_rates.append(f['obs'][:, neuron] / dt)
+            all_rates.append(f['pred'][:, neuron] / dt)
+    all_rates = np.concatenate(all_rates) if all_rates else np.array([0.0])
+    vmax = float(np.nanpercentile(all_rates, 99))
+    norm = plt.Normalize(0.0, max(vmax, 1e-6))
+
+    xlim, ylim, zlim = r_lim[0], r_lim[1], r_lim[2]
+    col_titles = ['Empirical spikes', 'Empirical rate', 'Predicted rate (test set)']
+
+    def _seg_vals(v):
+        return 0.5 * (v[:-1] + v[1:])
+
+    def _draw(ax, fl, mode, three_d):
+        # start/end markers first so they sit behind the trajectory lines
+        for pts, mk, fc in ((np.array([f['xyz'][0] for f in fl]), '^', '#ff7f0e'),
+                            (np.array([f['xyz'][-1] for f in fl]), 's', 'deeppink')):
+            if not len(pts):
+                continue
+            if three_d:
+                ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker=mk, s=26, facecolors=fc,
+                           edgecolors='k', linewidths=0.6, depthshade=False, zorder=0)
+            else:
+                ax.scatter(pts[:, 0], pts[:, 1], marker=mk, s=26, facecolors=fc,
+                           edgecolors='k', linewidths=0.6, zorder=0)
+        for f in fl:
+            xyz = f['xyz']
+            if mode == 'spikes':
+                if three_d:
+                    ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], color='k', lw=0.5, alpha=0.5)
+                else:
+                    ax.plot(xyz[:, 0], xyz[:, 1], color='k', lw=0.5, alpha=0.5)
+            else:
+                vals = (f['obs'][:, neuron] if mode == 'emp' else f['pred'][:, neuron]) / dt
+                if three_d:
+                    pts = xyz[:, :3].reshape(-1, 1, 3)
+                    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                    lc = Line3DCollection(segs, cmap=rate_cmap, norm=norm)
+                else:
+                    pts = xyz[:, :2].reshape(-1, 1, 2)
+                    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                    lc = LineCollection(segs, cmap=rate_cmap, norm=norm)
+                lc.set_array(_seg_vals(vals))
+                lc.set_linewidth(1.6)
+                ax.add_collection(lc)
+        if mode == 'spikes':
+            xs, ys, zs, ss = [], [], [], []
+            for f in fl:
+                hit = f['obs'][:, neuron] > 0
+                if not hit.any():
+                    continue
+                xs.append(f['xyz'][hit, 0]); ys.append(f['xyz'][hit, 1])
+                zs.append(f['xyz'][hit, 2]); ss.append(f['obs'][hit, neuron])
+            if xs:
+                xs = np.concatenate(xs); ys = np.concatenate(ys)
+                zs = np.concatenate(zs); ss = 12 * np.concatenate(ss)
+                if three_d:
+                    ax.scatter(xs, ys, zs, s=ss, c=spike_color, alpha=0.75,
+                               edgecolors='none', depthshade=False)
+                else:
+                    ax.scatter(xs, ys, s=ss, c=spike_color, alpha=0.75, edgecolors='none')
+        # Mark the start (green circle) and end (blue square) of every flight.
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        if three_d:
+            ax.set_zlim(zlim)
+            ax.set_xlabel('x'); ax.set_ylabel('y'); ax.set_zlabel('z')
+            ax.view_init(elev=22, azim=-68)
+        else:
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_xlabel('x')
+
+    def _populate(axes, three_d):
+        for ci, c in enumerate(clusters):
+            row_label = f'cluster {c}'
+            for col, mode in enumerate(('spikes', 'emp', 'pred')):
+                ax = axes[ci, col]
+                _draw(ax, data[c], mode, three_d)
+                if ci == 0:
+                    ax.set_title(col_titles[col], fontsize=col_title_fs)
+                if col == 0:
+                    if three_d:
+                        ax.text2D(-0.10, 0.5, row_label, transform=ax.transAxes,
+                                  rotation=90, va='center', ha='center', fontsize=row_label_fs)
+                    else:
+                        ax.set_ylabel(row_label, fontsize=row_label_fs)
+        legend_handles = [
+            Line2D([], [], marker='^', color='w', markerfacecolor='#ff7f0e',
+                   markeredgecolor='k', markersize=7, label='start'),
+            Line2D([], [], marker='s', color='w', markerfacecolor='deeppink',
+                   markeredgecolor='k', markersize=7, label='end'),
+        ]
+        axes[0, 0].legend(handles=legend_handles, loc='upper right', fontsize=8,
+                          framealpha=0.85)
+
+    sm = ScalarMappable(norm=norm, cmap=rate_cmap)
+    sm.set_array([])
+
+    # Shared-canvas mode: draw only the 3-D triptych onto caller-provided axes
+    # (a (len(clusters), 3) grid of 3-D axes); return the mappable for a colourbar.
+    if axes3d is not None:
+        _populate(np.asarray(axes3d, dtype=object).reshape(len(clusters), 3), True)
+        return sm
+
+    figs = []
+    for three_d in (True, False):
+        fig, axes = plt.subplots(
+            len(clusters), 3, figsize=(11, 3.6 * len(clusters)), squeeze=False,
+            subplot_kw=dict(projection='3d') if three_d else None)
+        _populate(axes, three_d)
+        fig.colorbar(sm, ax=axes.ravel().tolist(), fraction=0.015, pad=0.02,
+                     label='firing rate (spikes/s)')
+        view = '3D' if three_d else 'x-y'
+        fig.suptitle(f'{title}  [{view}]' if title else view, fontsize=14)
+        figs.append(fig)
+    return tuple(figs)
