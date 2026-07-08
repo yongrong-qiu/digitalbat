@@ -51,12 +51,12 @@ def set_pub_style():
         'ps.fonttype': 42,
         'font.family': 'sans-serif',
         'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans'],
-        'axes.titlesize': 16,
-        'axes.labelsize': 15,
-        'xtick.labelsize': 13,
-        'ytick.labelsize': 13,
-        'legend.fontsize': 12,
-        'legend.title_fontsize': 12,
+        'axes.titlesize': 18,
+        'axes.labelsize': 17,
+        'xtick.labelsize': 15,
+        'ytick.labelsize': 15,
+        'legend.fontsize': 14,
+        'legend.title_fontsize': 14,
         'axes.spines.top': False,
         'axes.spines.right': False,
         'axes.linewidth': 1.2,
@@ -107,7 +107,7 @@ def order_categorical(series, order):
 # Significance brackets that DO NOT stretch the y-axis
 # ---------------------------------------------------------------------------
 def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
-                fontsize=15, base=0.98, step=0.07, show_ns=False):
+                fontsize=17, base=0.98, step=0.07, show_ns=False):
     """Draw a 3-tier-star significance bracket between categorical positions
     ``x1`` and ``x2`` **without** changing ``ax`` limits.
 
@@ -296,7 +296,7 @@ def _star_row(ax, order, pvals, frac=0.96):
     for x, m in enumerate(order):
         s = stars_for_p(pvals.get(m, np.nan))
         if s:
-            ax.text(x, y, s, ha='center', va='center', fontsize=14,
+            ax.text(x, y, s, ha='center', va='center', fontsize=16,
                     fontweight='bold', color='k')
 
 
