@@ -807,3 +807,242 @@ def plot_similarity_heatmaps(matrices, clu_df, global_order, suptitle='',
         fig.suptitle(suptitle, fontsize=13)
     plt.tight_layout()
     return fig
+
+
+# ===========================================================================
+# Dual-field example cells: raw spikes vs empirical rate vs predicted rate
+# ---------------------------------------------------------------------------
+# Picks neurons whose place field sits in two *physically different* locations
+# on two *different flight clusters*, then draws, per cluster, three views of
+# the flight path (3D + x-y projection):
+#   (1) raw spikes   -- red dots on a black flight path,
+#   (2) empirical    -- path coloured by observed firing rate (counts / dt),
+#   (3) predicted    -- path coloured by the model's predicted rate,
+# with panels (2) and (3) sharing one colour scale for a fair comparison.
+# All inputs come from the **test** dataloaders only.
+# ===========================================================================
+def build_flight_records(X, y, pred, mask, ftype, behavior_mean, behavior_std):
+    """Split padded ``(N, T, *)`` test batches into per-flight records of valid
+    timesteps, with denormalised 3D position.
+
+    Returns a list of dicts ``{'xyz': (t, 3), 'obs': (t, n), 'pred': (t, n),
+    'cluster': int}`` where ``xyz`` columns are physical x, y, z (meters),
+    ``obs`` are observed binned spike counts and ``pred`` the model's predicted
+    counts. Only timesteps with ``mask == 1.0`` are kept.
+    """
+    bm = np.asarray(behavior_mean)[0, 0, :3]
+    bs = np.asarray(behavior_std)[0, 0, :3]
+    flights = []
+    for i in range(X.shape[0]):
+        m = mask[i] == 1.0
+        if m.sum() < 2:
+            continue
+        xyz = X[i][m][:, :3] * bs + bm
+        flights.append(dict(xyz=xyz, obs=y[i][m], pred=pred[i][m],
+                            cluster=int(ftype[i])))
+    return flights
+
+
+def select_dual_field_cells(flights, n_neurons, dt, r_lim,
+                            loc_bin_width=0.3, min_flights=4, min_spikes=8,
+                            min_peak_rate=2.0, min_field_sep=1.0, n_top=2):
+    """Rank neurons by how spatially separated their two strongest place fields
+    are across two *different* flight clusters.
+
+    For each neuron and each flight cluster with at least ``min_flights``
+    flights, a smoothed 2D (x, y) rate map is built and its peak rate / location
+    recorded. A neuron is a dual-field candidate when two clusters each drive a
+    peak of at least ``min_peak_rate`` spikes/s whose peak locations lie at least
+    ``min_field_sep`` meters apart. Returns up to ``n_top`` candidates sorted by
+    peak separation (descending), each a dict with the neuron index, the two
+    cluster ids, per-cluster peak rate / location and the separation distance.
+    """
+    from collections import defaultdict
+    from digitalbat.utility.utils import generate_2d_rate_map
+
+    by_cluster = defaultdict(list)
+    for f in flights:
+        by_cluster[f['cluster']].append(f)
+    by_cluster = {c: fl for c, fl in by_cluster.items() if len(fl) >= min_flights}
+
+    loc_xx_lim, loc_yy_lim = r_lim[0], r_lim[1]
+    candidates = []
+    for neuron in range(n_neurons):
+        peaks = {}
+        for c, fl in by_cluster.items():
+            xx = np.concatenate([f['xyz'][:, 0] for f in fl])
+            yy = np.concatenate([f['xyz'][:, 1] for f in fl])
+            sc = np.concatenate([f['obs'][:, neuron] for f in fl])
+            if sc.sum() < min_spikes:
+                continue
+            x_edges, y_edges, _, smap = generate_2d_rate_map(
+                loc_xx=xx, loc_yy=yy, unit_spike_count=sc,
+                loc_xx_lim=loc_xx_lim, loc_yy_lim=loc_yy_lim,
+                loc_bin_width=loc_bin_width, dt=dt)
+            if not np.isfinite(smap).any():
+                continue
+            peak_rate = np.nanmax(smap)
+            if peak_rate < min_peak_rate:
+                continue
+            ix, iy = np.unravel_index(np.nanargmax(smap), smap.shape)
+            loc = np.array([0.5 * (x_edges[ix] + x_edges[ix + 1]),
+                            0.5 * (y_edges[iy] + y_edges[iy + 1])])
+            peaks[c] = dict(rate=float(peak_rate), loc=loc, n_flights=len(fl))
+        if len(peaks) < 2:
+            continue
+        cl = list(peaks)
+        best = None
+        for a in range(len(cl)):
+            for b in range(a + 1, len(cl)):
+                sep = float(np.linalg.norm(peaks[cl[a]]['loc'] - peaks[cl[b]]['loc']))
+                if best is None or sep > best['sep']:
+                    best = dict(sep=sep, clusters=(cl[a], cl[b]),
+                                peak_rate=min(peaks[cl[a]]['rate'], peaks[cl[b]]['rate']))
+        if best['sep'] >= min_field_sep:
+            candidates.append(dict(neuron=neuron, sep=best['sep'],
+                                   clusters=best['clusters'], peak_rate=best['peak_rate'],
+                                   peaks={c: peaks[c] for c in best['clusters']}))
+    candidates.sort(key=lambda d: (d['sep'], d['peak_rate']), reverse=True)
+    return candidates[:n_top]
+
+
+def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
+                         title='', peaks=None, rate_cmap='viridis',
+                         spike_color='red', axes3d=None, col_title_fs=11, row_label_fs=10):
+    """Draw the spikes / empirical-rate / predicted-rate triptych for one neuron
+    on two flight clusters, in 3D and in x-y projection.
+
+    Produces TWO figures -- one 3D, one x-y projection -- each with
+    ``len(clusters)`` rows by 3 columns (raw spikes, empirical rate, predicted
+    rate). The empirical and predicted panels share a single colour scale
+    (``norm``) so they are directly comparable; raw-spike panels show a black
+    flight path with red spike dots (dot area scales with the binned spike
+    count). Returns ``(fig_3d, fig_2d)``.
+    """
+    from matplotlib.collections import LineCollection
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.lines import Line2D
+
+    clusters = list(clusters)
+    data = {c: [f for f in flights if f['cluster'] == c] for c in clusters}
+
+    # Shared colour scale across empirical & predicted, both clusters.
+    all_rates = []
+    for c in clusters:
+        for f in data[c]:
+            all_rates.append(f['obs'][:, neuron] / dt)
+            all_rates.append(f['pred'][:, neuron] / dt)
+    all_rates = np.concatenate(all_rates) if all_rates else np.array([0.0])
+    vmax = float(np.nanpercentile(all_rates, 99))
+    norm = plt.Normalize(0.0, max(vmax, 1e-6))
+
+    xlim, ylim, zlim = r_lim[0], r_lim[1], r_lim[2]
+    col_titles = ['Spikes', 'Empirical rate', 'Predicted rate']
+
+    def _seg_vals(v):
+        return 0.5 * (v[:-1] + v[1:])
+
+    def _draw(ax, fl, mode, three_d):
+        # start/end markers first so they sit behind the trajectory lines
+        for pts, mk, fc in ((np.array([f['xyz'][0] for f in fl]), 'o', '#ff7f0e'),
+                            (np.array([f['xyz'][-1] for f in fl]), 's', 'deeppink')):
+            if not len(pts):
+                continue
+            if three_d:
+                ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker=mk, s=26, facecolors=fc,
+                           edgecolors='k', linewidths=0.6, depthshade=False, zorder=0)
+            else:
+                ax.scatter(pts[:, 0], pts[:, 1], marker=mk, s=26, facecolors=fc,
+                           edgecolors='k', linewidths=0.6, zorder=0)
+        for f in fl:
+            xyz = f['xyz']
+            if mode == 'spikes':
+                if three_d:
+                    ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], color='k', lw=0.5, alpha=0.5)
+                else:
+                    ax.plot(xyz[:, 0], xyz[:, 1], color='k', lw=0.5, alpha=0.5)
+            else:
+                vals = (f['obs'][:, neuron] if mode == 'emp' else f['pred'][:, neuron]) / dt
+                if three_d:
+                    pts = xyz[:, :3].reshape(-1, 1, 3)
+                    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                    lc = Line3DCollection(segs, cmap=rate_cmap, norm=norm)
+                else:
+                    pts = xyz[:, :2].reshape(-1, 1, 2)
+                    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                    lc = LineCollection(segs, cmap=rate_cmap, norm=norm)
+                lc.set_array(_seg_vals(vals))
+                lc.set_linewidth(1.6)
+                ax.add_collection(lc)
+        if mode == 'spikes':
+            xs, ys, zs, ss = [], [], [], []
+            for f in fl:
+                hit = f['obs'][:, neuron] > 0
+                if not hit.any():
+                    continue
+                xs.append(f['xyz'][hit, 0]); ys.append(f['xyz'][hit, 1])
+                zs.append(f['xyz'][hit, 2]); ss.append(f['obs'][hit, neuron])
+            if xs:
+                xs = np.concatenate(xs); ys = np.concatenate(ys)
+                zs = np.concatenate(zs); ss = 12 * np.concatenate(ss)
+                if three_d:
+                    ax.scatter(xs, ys, zs, s=ss, c=spike_color, alpha=0.75,
+                               edgecolors='none', depthshade=False)
+                else:
+                    ax.scatter(xs, ys, s=ss, c=spike_color, alpha=0.75, edgecolors='none')
+        # Mark the start (green circle) and end (blue square) of every flight.
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        if three_d:
+            ax.set_zlim(zlim)
+            ax.set_xlabel('x'); ax.set_ylabel('y'); ax.set_zlabel('z')
+            ax.view_init(elev=22, azim=-68)
+        else:
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_xlabel('x')
+
+    def _populate(axes, three_d):
+        for ci, c in enumerate(clusters):
+            n_fl = peaks[c]['n_flights'] if (peaks and c in peaks) else len(data[c])
+            row_label = f'cluster {c}\n{n_fl} flights'
+            for col, mode in enumerate(('spikes', 'emp', 'pred')):
+                ax = axes[ci, col]
+                _draw(ax, data[c], mode, three_d)
+                if ci == 0:
+                    ax.set_title(col_titles[col], fontsize=col_title_fs)
+                if col == 0:
+                    if three_d:
+                        ax.text2D(-0.18, 0.5, row_label, transform=ax.transAxes,
+                                  rotation=90, va='center', ha='center', fontsize=row_label_fs)
+                    else:
+                        ax.set_ylabel(row_label, fontsize=row_label_fs)
+        legend_handles = [
+            Line2D([], [], marker='o', color='w', markerfacecolor='#ff7f0e',
+                   markeredgecolor='k', markersize=7, label='start'),
+            Line2D([], [], marker='s', color='w', markerfacecolor='deeppink',
+                   markeredgecolor='k', markersize=7, label='end'),
+        ]
+        axes[0, 0].legend(handles=legend_handles, loc='upper right', fontsize=8,
+                          framealpha=0.85)
+
+    sm = ScalarMappable(norm=norm, cmap=rate_cmap)
+    sm.set_array([])
+
+    # Shared-canvas mode: draw only the 3-D triptych onto caller-provided axes
+    # (a (len(clusters), 3) grid of 3-D axes); return the mappable for a colourbar.
+    if axes3d is not None:
+        _populate(np.asarray(axes3d, dtype=object).reshape(len(clusters), 3), True)
+        return sm
+
+    figs = []
+    for three_d in (True, False):
+        fig, axes = plt.subplots(
+            len(clusters), 3, figsize=(11, 3.6 * len(clusters)), squeeze=False,
+            subplot_kw=dict(projection='3d') if three_d else None)
+        _populate(axes, three_d)
+        fig.colorbar(sm, ax=axes.ravel().tolist(), fraction=0.015, pad=0.02,
+                     label='firing rate (spikes/s)')
+        view = '3D' if three_d else 'x-y'
+        fig.suptitle(f'{title}  [{view}]' if title else view, fontsize=12)
+        figs.append(fig)
+    return tuple(figs)
