@@ -304,7 +304,7 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
                        ylabel='', unit_ylabel=None, unit_name='neuron',
                        session_col='session', model_col='model', agg='median',
                        clip=None, sess_ylim=None, palette=None, zero_line=False,
-                       higher_is_better=True, figsize=None):
+                       higher_is_better=True, figsize=None, axes=None):
     """Two-panel model comparison in the unified style.
 
     Left: per-session aggregate (`agg`) as a grey boxplot with per-session points
@@ -312,7 +312,8 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
     `ref`. Right: the per-unit distribution (boxplot). `clip=(lo,hi)` bounds the
     *axes* only (e.g. FDE to [-1,1]); raw values drive the stats. `sess_ylim=(lo,hi)`
     overrides the left (session) panel's ylim (applied before the stars are placed,
-    so they stay on-axis); the right panel keeps `clip`.
+    so they stay on-axis); the right panel keeps `clip`. Pass `axes=(ax_sess, ax_unit)`
+    to draw onto an existing shared canvas instead of a new figure.
 
     Returns (fig, p_table) where p_table has one row per model vs `ref`.
     """
@@ -336,8 +337,11 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
             recs.append(dict(model=m, vs=ref, n=len(pair), median_diff=float(d.median()),
                              p=pvals[m]))
 
-    figsize = figsize or (max(8, 1.4 * len(order)) + 2, PANEL_H + 1.5)
-    fig, (axs, axu) = plt.subplots(1, 2, figsize=figsize)
+    if axes is not None:
+        axs, axu = axes; fig = axs.figure          # draw onto a shared canvas
+    else:
+        figsize = figsize or (max(8, 1.4 * len(order)) + 2, PANEL_H + 1.5)
+        fig, (axs, axu) = plt.subplots(1, 2, figsize=figsize)
     bats_present = [b for b in palette if b in set(sess['bat'])]
     for ax, data, is_sess in ((axs, sess, True), (axu, unit_df, False)):
         sns.boxplot(data=data, x=model_col, y=value_col, order=order, color='0.85',
@@ -360,7 +364,8 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
         sns.despine(ax=ax)
     axs.set_title('session ' + agg)
     axu.set_title(f'per {unit_name}')
-    fig.tight_layout()
+    if axes is None:
+        fig.tight_layout()
     ptab = pd.DataFrame(recs)
     return fig, ptab
 
