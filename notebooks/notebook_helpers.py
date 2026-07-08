@@ -985,14 +985,14 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
     norm = plt.Normalize(0.0, max(vmax, 1e-6))
 
     xlim, ylim, zlim = r_lim[0], r_lim[1], r_lim[2]
-    col_titles = ['Spikes', 'Empirical rate', 'Predicted rate (test set)']
+    col_titles = ['Empirical spikes', 'Empirical rate', 'Predicted rate (test set)']
 
     def _seg_vals(v):
         return 0.5 * (v[:-1] + v[1:])
 
     def _draw(ax, fl, mode, three_d):
         # start/end markers first so they sit behind the trajectory lines
-        for pts, mk, fc in ((np.array([f['xyz'][0] for f in fl]), 'o', '#ff7f0e'),
+        for pts, mk, fc in ((np.array([f['xyz'][0] for f in fl]), '^', '#ff7f0e'),
                             (np.array([f['xyz'][-1] for f in fl]), 's', 'deeppink')):
             if not len(pts):
                 continue
@@ -1063,7 +1063,7 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
                     else:
                         ax.set_ylabel(row_label, fontsize=row_label_fs)
         legend_handles = [
-            Line2D([], [], marker='o', color='w', markerfacecolor='#ff7f0e',
+            Line2D([], [], marker='^', color='w', markerfacecolor='#ff7f0e',
                    markeredgecolor='k', markersize=7, label='start'),
             Line2D([], [], marker='s', color='w', markerfacecolor='deeppink',
                    markeredgecolor='k', markersize=7, label='end'),

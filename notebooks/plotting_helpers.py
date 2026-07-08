@@ -362,7 +362,7 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
         ax.set_xticklabels([labels[m] for m in order], rotation=35, ha='right')
         _star_row(ax, order, pvals)
         sns.despine(ax=ax)
-    axs.set_title('session ' + agg)
+    axs.set_title('session ' + agg + 's')
     axu.set_title(f'per {unit_name}')
     if axes is None:
         fig.tight_layout()
@@ -491,7 +491,7 @@ def plot_trajectories_3d(ax, trajs, values, *, categorical=False, cmap='viridis'
         good = [t for t in trajs if len(t) >= 1]
         if good:
             starts = np.array([t[0] for t in good]); ends = np.array([t[-1] for t in good])
-            ax.scatter(starts[:, 0], starts[:, 1], starts[:, 2], s=16, color=start_color,
+            ax.scatter(starts[:, 0], starts[:, 1], starts[:, 2], s=16, marker='^', color=start_color,
                        depthshade=False, edgecolors='none', zorder=0, rasterized=rasterized)
             ax.scatter(ends[:, 0], ends[:, 1], ends[:, 2], s=16, color=end_color,
                        depthshade=False, edgecolors='none', zorder=0, rasterized=rasterized)
