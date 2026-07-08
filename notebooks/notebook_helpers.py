@@ -13,6 +13,7 @@ can import them instead of redefining them inline.
 import math
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.colors import ListedColormap
@@ -552,7 +553,7 @@ def plot_value_vs_occupancy(panels, occ_source, occ_pos_cols=('x_true', 'y_true'
             ax.errorbar(tx, ty, yerr=te, fmt='o-', color='firebrick', capsize=3, zorder=5)
             r = np.corrcoef(x, y)[0, 1]
             ax.annotate(f'r = {r:.3f}  (n={len(x)} bins)', xy=(0.04, 0.96),
-                        xycoords='axes fraction', va='top', fontsize=9)
+                        xycoords='axes fraction', va='top', fontsize=11)
         ax.set(xlabel='occupancy (test samples / bin)', ylabel=f'{agg} {vlabel}',
                title=f'{vlabel} vs occupancy')
     if suptitle:
@@ -623,7 +624,7 @@ def plot_value_vs_speed(panels, shared_room_prefixes=('Dataset_1', 'Dataset_3'),
         r_log = np.corrcoef(np.log(np.maximum(x, 1e-6)), y)[0, 1]
         rho, _ = spearmanr(x, y)
         ax.annotate(f'r(log) = {r_log:.3f}\n$\\rho$ = {rho:.3f}  (n={len(x)})',
-                    xy=(0.04, 0.96), xycoords='axes fraction', va='top', fontsize=9)
+                    xy=(0.04, 0.96), xycoords='axes fraction', va='top', fontsize=11)
         ax.set_xscale('log')
         ax.set(xlabel='speed (m/s)', ylabel=vlabel, title=f'{vlabel} vs speed')
     if suptitle:
@@ -642,35 +643,81 @@ SUBREGION_CMAP = ListedColormap([SUBREGION_COLORS['CA1'], SUBREGION_COLORS['CA3'
 SUBREGION_CMAP.set_bad('white')
 
 
-def plot_mantel_boxplots(mantel_df, comparison_col='comparison', ylabel='Mantel $\\rho$', ncols=4):
-    """Plot Mantel test results: grey boxplot of merged null + colored dots by bat."""
-    comparisons = mantel_df[comparison_col].unique()
+def plot_mantel_boxplots(mantel_df, comparison_col='comparison', ylabel='Mantel $\\rho$',
+                         ncols=4, axes=None, ax=None, palette=None):
+    """Plot Mantel test results: grey boxplot of merged null + colored dots by bat.
+
+    Three drawing modes:
+      * default (``axes`` and ``ax`` both ``None``): build and return a new
+        multi-panel figure, one panel per comparison.
+      * ``axes=[...]`` (one Axes per comparison): draw the multi-panel style onto
+        a caller-supplied list of axes (shared canvas); returns the parent figure.
+      * ``ax=<Axes>``: grouped single-axes mode -- every comparison is one x-tick
+        (grey null boxplots + bat-coloured Mantel-r dots), with a session-level
+        Wilcoxon-vs-0 star above each. Use this to fold the panel onto one cell of
+        a merged gridspec. Returns the parent figure.
+    """
+    from scipy.stats import wilcoxon
+    comparisons = list(mantel_df[comparison_col].unique())
     n = len(comparisons)
-    nrows = math.ceil(n / ncols)
-    ncols_actual = min(n, ncols)
-    fig, axes = plt.subplots(nrows, ncols_actual, figsize=(4 * ncols_actual, 4 * nrows),
-                             squeeze=False)
+
+    if ax is not None:                                   # grouped single-axes mode
+        null_long = pd.concat(
+            [pd.DataFrame({comparison_col: c,
+                           'null': np.concatenate(mantel_df[mantel_df[comparison_col] == c]['perm_rs'].values)})
+             for c in comparisons], ignore_index=True)
+        sns.boxplot(data=null_long, x=comparison_col, y='null', order=comparisons, color='0.85',
+                    width=0.5, whis=(0.5, 99.5), showfliers=False, ax=ax)
+        bats_present = [b for b in (palette or {}) if b in set(mantel_df['bat'])] or None
+        sns.stripplot(data=mantel_df, x=comparison_col, y='r', order=comparisons, hue='bat',
+                      palette=palette, hue_order=bats_present, size=6, jitter=0.12,
+                      edgecolor='k', linewidth=0.4, zorder=5, ax=ax, legend=False)
+        ax.axhline(0, color='k', linewidth=0.5, linestyle='--')
+        ymax = mantel_df['r'].max()
+        for idx, comp in enumerate(comparisons):
+            rs = mantel_df.loc[mantel_df[comparison_col] == comp, 'r'].dropna().values
+            if len(rs) >= 3 and np.any(rs != 0):
+                p = wilcoxon(rs, alternative='greater').pvalue
+                star = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
+                if star:
+                    ax.text(idx, ymax * 1.05, star, ha='center', va='bottom', fontsize=13)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel('')
+        ax.set_xticks(range(n))
+        ax.set_xticklabels(comparisons, rotation=25, ha='right')
+        sns.despine(ax=ax)
+        return ax.figure
+
+    if axes is not None:                                 # caller-supplied panel list
+        fig = np.ravel(axes)[0].figure
+        axgrid = np.ravel(axes)
+    else:
+        nrows = math.ceil(n / ncols)
+        ncols_actual = min(n, ncols)
+        fig, axgrid = plt.subplots(nrows, ncols_actual, figsize=(4 * ncols_actual, 4 * nrows),
+                                   squeeze=False)
+        axgrid = axgrid.ravel()
     for idx, comp in enumerate(comparisons):
-        ax = axes[idx // ncols_actual, idx % ncols_actual]
+        ax_i = axgrid[idx]
         sub = mantel_df[mantel_df[comparison_col] == comp].reset_index(drop=True)
         all_nulls = np.concatenate(sub['perm_rs'].values)
         sns.boxplot(y=all_nulls, color='0.85', width=0.4, whis=(0.5, 99.5),
-                    fliersize=0, ax=ax)
-        sns.stripplot(data=sub, y='r', hue='bat', ax=ax, size=8, jitter=0.1,
+                    fliersize=0, ax=ax_i)
+        sns.stripplot(data=sub, y='r', hue='bat', ax=ax_i, size=8, jitter=0.1,
                       zorder=5, edgecolor='k', linewidth=0.5)
         for _, row in sub.iterrows():
             star = '***' if row['p'] < 0.001 else '**' if row['p'] < 0.01 else '*' if row['p'] < 0.05 else ''
             if star:
-                ax.text(0.25, row['r'], star, ha='left', va='center', fontsize=8)
-        ax.set_ylabel(ylabel)
-        ax.set_title(comp, fontsize=9)
-        ax.axhline(0, color='k', linewidth=0.5, linestyle='--')
-        ax.set_xticks([])
-        ax.legend(title='Bat', fontsize=7, title_fontsize=7)
-    # Hide unused axes
-    for idx in range(n, nrows * ncols_actual):
-        axes[idx // ncols_actual, idx % ncols_actual].set_visible(False)
-    plt.tight_layout()
+                ax_i.text(0.25, row['r'], star, ha='left', va='center', fontsize=8)
+        ax_i.set_ylabel(ylabel)
+        ax_i.set_title(comp, fontsize=11)
+        ax_i.axhline(0, color='k', linewidth=0.5, linestyle='--')
+        ax_i.set_xticks([])
+        ax_i.legend(title='Bat', fontsize=7, title_fontsize=7)
+    for idx in range(n, len(axgrid)):                    # hide unused axes
+        axgrid[idx].set_visible(False)
+    if axes is None:
+        plt.tight_layout()
     return fig
 
 
@@ -804,7 +851,7 @@ def plot_similarity_heatmaps(matrices, clu_df, global_order, suptitle='',
     last_ax.legend(loc='upper right', fontsize=8, framealpha=0.8)
 
     if suptitle:
-        fig.suptitle(suptitle, fontsize=13)
+        fig.suptitle(suptitle, fontsize=15)
     plt.tight_layout()
     return fig
 
@@ -908,7 +955,7 @@ def select_dual_field_cells(flights, n_neurons, dt, r_lim,
 
 def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
                          title='', peaks=None, rate_cmap='viridis',
-                         spike_color='red', axes3d=None, col_title_fs=11, row_label_fs=10):
+                         spike_color='red', axes3d=None, col_title_fs=13, row_label_fs=12):
     """Draw the spikes / empirical-rate / predicted-rate triptych for one neuron
     on two flight clusters, in 3D and in x-y projection.
 
@@ -938,7 +985,7 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
     norm = plt.Normalize(0.0, max(vmax, 1e-6))
 
     xlim, ylim, zlim = r_lim[0], r_lim[1], r_lim[2]
-    col_titles = ['Spikes', 'Empirical rate', 'Predicted rate']
+    col_titles = ['Spikes', 'Empirical rate', 'Predicted rate (test set)']
 
     def _seg_vals(v):
         return 0.5 * (v[:-1] + v[1:])
@@ -1003,8 +1050,7 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
 
     def _populate(axes, three_d):
         for ci, c in enumerate(clusters):
-            n_fl = peaks[c]['n_flights'] if (peaks and c in peaks) else len(data[c])
-            row_label = f'cluster {c}\n{n_fl} flights'
+            row_label = f'cluster {c}'
             for col, mode in enumerate(('spikes', 'emp', 'pred')):
                 ax = axes[ci, col]
                 _draw(ax, data[c], mode, three_d)
@@ -1012,7 +1058,7 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
                     ax.set_title(col_titles[col], fontsize=col_title_fs)
                 if col == 0:
                     if three_d:
-                        ax.text2D(-0.18, 0.5, row_label, transform=ax.transAxes,
+                        ax.text2D(-0.10, 0.5, row_label, transform=ax.transAxes,
                                   rotation=90, va='center', ha='center', fontsize=row_label_fs)
                     else:
                         ax.set_ylabel(row_label, fontsize=row_label_fs)
@@ -1043,6 +1089,6 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
         fig.colorbar(sm, ax=axes.ravel().tolist(), fraction=0.015, pad=0.02,
                      label='firing rate (spikes/s)')
         view = '3D' if three_d else 'x-y'
-        fig.suptitle(f'{title}  [{view}]' if title else view, fontsize=12)
+        fig.suptitle(f'{title}  [{view}]' if title else view, fontsize=14)
         figs.append(fig)
     return tuple(figs)
