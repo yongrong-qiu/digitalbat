@@ -1,3 +1,5 @@
+import random as _stdlib_random
+
 import numpy as np
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.interpolate import interp1d
@@ -17,6 +19,154 @@ from scipy.spatial.distance import pdist, squareform
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
+
+
+def round_robin_session_batches(loaders, rng=None):
+    """Yield `(session_name, batch)` from per-session DataLoaders, interleaved.
+
+    Each session contributes its own per-epoch worth of batches, but the order
+    of (session → batch) draws is uniformly random over the still-active set.
+    Compared to draining each session sequentially, this:
+      - keeps Adam's running m/v reflective of the joint multi-session
+        gradient distribution (no end-of-epoch momentum bias toward the last
+        session trained),
+      - avoids stale per-session readin parameters (`Bat_Transformer.readouts`,
+        `Bat_Transformer_Decoder.readins`, `PerceiverIOTrajectoryDecoder.neuron_embeds`),
+        since every session's parameter is re-touched throughout the epoch
+        alongside an up-to-date shared backbone.
+
+    Parameters
+    ----------
+    loaders : Mapping[str, DataLoader]
+        Per-session loaders. A one-key mapping (`{None: loader}`) degenerates
+        to plain in-order iteration of that single loader.
+    rng : random.Random | None
+        Seedable RNG for the session draws. If None, a fresh one is created
+        seeded from torch's current RNG state — so callers who set
+        `torch.manual_seed` upstream still get reproducible orderings.
+    """
+    if rng is None:
+        seed = int(torch.randint(0, 2 ** 31, (1,)).item())
+        rng = _stdlib_random.Random(seed)
+    iters = {sn: iter(loader) for sn, loader in loaders.items()}
+    active = list(iters.keys())
+    while active:
+        sn = rng.choice(active) if len(active) > 1 else active[0]
+        try:
+            yield sn, next(iters[sn])
+        except StopIteration:
+            active.remove(sn)
+
+
+def bat_palette(palette='tab10'):
+    """Return a `{bat_id: rgb}` dict in canonical project order.
+
+    Bats are extracted from `ALL_SESSION_NAMES` (third underscore-split token),
+    so the Krishna bat (11719) is covered alongside the Dataset 1-3 bats.  The
+    canonical Dataset 1-3 bats come first and keep their colors regardless of the
+    Krishna sessions.  Pass into seaborn via `palette=bat_palette()` with
+    `hue='bat'` to keep colors consistent across notebooks/figures.
+    """
+    import seaborn as sns
+    from ..datasets.defaults import ALL_SESSION_NAMES
+    seen = []
+    for s in ALL_SESSION_NAMES:
+        b = s.split('_')[2]
+        if b not in seen:
+            seen.append(b)
+    colors = sns.color_palette(palette, n_colors=max(len(seen), 3))
+    return {b: c for b, c in zip(seen, colors)}
+
+
+def parse_bat(session_name):
+    """`Dataset_3_14543_240419` -> `'14543'`."""
+    return session_name.split('_')[2]
+
+
+def wilcoxon_safe(diff):
+    """Two-sided Wilcoxon signed-rank on `diff`; returns (statistic, pvalue).
+
+    Handles empty / all-zero / all-NaN inputs by returning (nan, nan) so
+    callers can branch on `np.isfinite(p)` without try/except.
+    """
+    from scipy.stats import wilcoxon
+    diff = np.asarray(diff)
+    diff = diff[np.isfinite(diff)]
+    if diff.size < 1 or np.all(diff == 0):
+        return np.nan, np.nan
+    res = wilcoxon(diff, zero_method='wilcox', alternative='two-sided')
+    return float(res.statistic), float(res.pvalue)
+
+
+def stars_for_p(p):
+    """Three-tier stars: '*' p<.05, '**' p<.01, '***' p<.001.  '' for n.s. or nan."""
+    if p is None or not np.isfinite(p):
+        return ''
+    if p < 1e-3: return '***'
+    if p < 1e-2: return '**'
+    if p < 5e-2: return '*'
+    return ''
+
+
+def add_significance_bracket(ax, x1, x2, p, *, y=None, height_frac=0.03,
+                              color='k', linewidth=1.0, fontsize=12):
+    """Draw a horizontal bracket from `x1` to `x2` with stars above; no-op when p >= .05.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+    x1, x2 : float
+        Bracket endpoints in data coordinates (e.g. categorical positions 0, 1).
+    p : float
+        p-value; if >= .05 or non-finite, this function does nothing.
+    y : float, optional
+        Bracket baseline (data coords).  If None, placed just above the data
+        in the bracket span via `ax.dataLim`.
+    height_frac : float
+        Stem height as a fraction of the y-range.
+    """
+    stars = stars_for_p(p)
+    if not stars:
+        return
+    ymin, ymax = ax.get_ylim()
+    span = ymax - ymin if ymax > ymin else 1.0
+    if y is None:
+        y = ymax - 0.05 * span
+    h = height_frac * span
+    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y],
+            lw=linewidth, color=color, clip_on=False)
+    ax.text((x1 + x2) / 2, y + h, stars, ha='center', va='bottom',
+            fontsize=fontsize, fontweight='bold', color=color, clip_on=False)
+    # Make sure stars are visible.
+    ax.set_ylim(top=max(ymax, y + h + 0.08 * span))
+
+
+def annotate_pvalue_corner(ax, p, n=None, *, loc='upper right',
+                            fontsize=10, color='k'):
+    """Annotate a corner of `ax` with stars (+ optional p, n) when significant.
+
+    No-op if p >= .05 or non-finite, per the project convention to hide n.s.
+    """
+    stars = stars_for_p(p)
+    if not stars:
+        return
+    bits = [stars]
+    if np.isfinite(p):
+        bits.append(f'p={p:.1e}')
+    if n is not None:
+        bits.append(f'n={n}')
+    text = '\n'.join(bits)
+    xy_map = {
+        'upper right': (0.97, 0.97, 'right', 'top'),
+        'upper left':  (0.03, 0.97, 'left',  'top'),
+        'lower right': (0.97, 0.03, 'right', 'bottom'),
+        'lower left':  (0.03, 0.03, 'left',  'bottom'),
+    }
+    x, y, ha, va = xy_map[loc]
+    ax.text(x, y, text, transform=ax.transAxes, ha=ha, va=va,
+            fontsize=fontsize, fontweight='bold', color=color,
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                      edgecolor='none', alpha=0.85))
 
 
 def bandpass_filter(signal, fs, band):
@@ -247,9 +397,15 @@ def generate_2d_rate_map(
         rate_map = np.divide(spike_map, occupancy_time)
         rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
 
-    # Apply Gaussian smoothing to the rate map
+    # Smooth spike counts and occupancy separately, then divide.  Smoothing
+    # the rate map directly leaks zero rates from unoccupied neighbor bins
+    # into occupied ones and shrinks the time-averaged firing rate.
     sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
-    smoothed_rate_map = gaussian_filter(rate_map, sigma=sigma)
+    spike_map_smoothed = gaussian_filter(spike_map, sigma=sigma)
+    occupancy_time_smoothed = gaussian_filter(occupancy_time, sigma=sigma)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        smoothed_rate_map = np.divide(spike_map_smoothed, occupancy_time_smoothed)
+        smoothed_rate_map[np.isnan(smoothed_rate_map)] = 0
 
     return x_edges, y_edges, rate_map, smoothed_rate_map
 
@@ -662,6 +818,14 @@ def poisson_fde_population(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray
     
     return fdes
 
+
+# Valid function: FDE only on well-fit neurons (FDE > 0)
+def poisson_fde_population_filtered(y_true, y_pred):
+    """
+    Compute FDE for a population of neurons, only on well-fit neurons (FDE > 0)
+    """
+    fdes = poisson_fde_population(y_true, y_pred)
+    return fdes[fdes > 0]  # Only neurons with FDE > 0
 
 # ---------------------------------------------------------------------
 # Utility function: Arc length computation
@@ -1355,5 +1519,277 @@ class OrthogonalityPermutationTest:
         )
         plt.legend()
         plt.tight_layout()
+
+    @staticmethod
+    def _summary_statistic(dists_condensed, stat):
+        """Compute a scalar summary of a condensed cosine-distance vector.
+
+        cosine_similarity = 1 - cosine_distance, so a population is "less
+        orthogonal" when |cos sim| is large on average, or when the spread of
+        cos sim is wider than expected.
+        """
+        cos_sim = 1.0 - dists_condensed
+        if stat == "mean_abs_cos_sim":
+            return np.mean(np.abs(cos_sim), axis=-1)
+        if stat == "mean_cos_sim":
+            return np.mean(cos_sim, axis=-1)
+        if stat == "var_cos_sim":
+            return np.var(cos_sim, axis=-1)
+        raise ValueError(f"Unknown stat: {stat}")
+
+    def _compute_shuffle_weights_null(self):
+        """Build a shuffle_weights null over pairwise distances.
+
+        shuffle_neurons leaves the multiset of pairwise distances unchanged
+        (pdist is invariant to row permutations), so any whole-population
+        summary is degenerate under that null. This method always uses
+        shuffle_weights and caches the result on the instance.
+        """
+        if hasattr(self, "_null_dists_shuffle_weights"):
+            return self._null_dists_shuffle_weights
+
+        n_pairs = self.n * (self.n - 1) // 2
+        out = np.zeros((self.n_perm, n_pairs), dtype=np.float32)
+        for k in range(self.n_perm):
+            Xp = np.empty_like(self.Xs)
+            for i in range(self.n):
+                Xp[i] = self.rng.permutation(self.Xs[i])
+            out[k] = pdist(Xp, metric=self.metric)
+
+        self._null_dists_shuffle_weights = out
+        return out
+
+    def compute_distribution_pvalue(
+        self,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+    ):
+        """Test whether the observed pairwise cosine-similarity distribution
+        across all neurons in the session is *less orthogonal* than chance.
+
+        Parameters
+        ----------
+        stat : {"mean_abs_cos_sim", "mean_cos_sim", "var_cos_sim"}
+            Summary statistic computed over all neuron pairs:
+              - "mean_abs_cos_sim": mean |1 - d|. Higher = less orthogonal.
+              - "mean_cos_sim":     mean (1 - d). Tests systematic alignment bias.
+              - "var_cos_sim":      var (1 - d). Higher = wider spread than chance.
+        alternative : {"greater", "less", "two-sided"}
+            Direction of the test. Default "greater" answers
+            "is the observed statistic above the null?" — for mean |cos sim|
+            and var, that is the "less orthogonal than chance" direction.
+
+        Returns
+        -------
+        dict with keys: stat, alternative, observed, null, p_value.
+        Also cached on self as self.distribution_test_[stat].
+        """
+        if not hasattr(self, "dist_obs_condensed"):
+            self.compute_observed()
+        null_dists = self._compute_shuffle_weights_null()
+
+        observed = self._summary_statistic(self.dist_obs_condensed, stat)
+        null = self._summary_statistic(null_dists, stat)
+
+        if alternative == "greater":
+            p = (1 + np.sum(null >= observed)) / (1 + self.n_perm)
+        elif alternative == "less":
+            p = (1 + np.sum(null <= observed)) / (1 + self.n_perm)
+        elif alternative == "two-sided":
+            null_centered = null - np.mean(null)
+            obs_centered = observed - np.mean(null)
+            p = (1 + np.sum(np.abs(null_centered) >= np.abs(obs_centered))) / (1 + self.n_perm)
+        else:
+            raise ValueError(f"Unknown alternative: {alternative}")
+
+        result = {
+            "stat": stat,
+            "alternative": alternative,
+            "observed": float(observed),
+            "null": null,
+            "p_value": float(p),
+        }
+        if not hasattr(self, "distribution_test_"):
+            self.distribution_test_ = {}
+        self.distribution_test_[stat] = result
+        return result
+
+    def plot_null_vs_observed_distribution(
+        self,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+        bins=40,
+        ax=None,
+    ):
+        """Histogram the null distribution of a population-level summary
+        statistic with the observed value drawn as a vertical line.
+
+        Calls compute_distribution_pvalue() if results aren't cached.
+        """
+        cache = getattr(self, "distribution_test_", {})
+        if stat not in cache:
+            self.compute_distribution_pvalue(stat=stat, alternative=alternative)
+        res = self.distribution_test_[stat]
+
+        label_map = {
+            "mean_abs_cos_sim": r"$\langle |\cos\,\mathrm{sim}| \rangle$",
+            "mean_cos_sim":     r"$\langle \cos\,\mathrm{sim} \rangle$",
+            "var_cos_sim":      r"$\mathrm{Var}(\cos\,\mathrm{sim})$",
+        }
+        xlabel = label_map.get(stat, stat)
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(4, 3))
+        ax.hist(res["null"], bins=bins, density=True, alpha=0.7, color="gray")
+        ax.axvline(
+            res["observed"],
+            linestyle="--", linewidth=2, c="k",
+            label=f"Observed = {res['observed']:.4f}",
+        )
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Density")
+        ax.set_title(
+            f"Population orthogonality test ({stat})\n"
+            f"{self.session_name}: n={self.n} neurons, "
+            f"p = {res['p_value']:.3f} ({res['alternative']})"
+        )
+        ax.legend()
+        plt.tight_layout()
+        return ax
+
+    @classmethod
+    def run_across_sessions(
+        cls,
+        X,
+        df,
+        session_names=None,
+        *,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+        n_perm=1000,
+        random_state=0,
+        bat_col="bat",
+        extra_cols=(),
+    ):
+        """Run the population orthogonality test on each session and return
+        a tidy DataFrame in the same shape as Mantel-test outputs (one row
+        per session with 'r', 'p', 'perm_rs' columns).
+
+        The returned frame can be passed directly to plot_session_boxplot
+        below, or to a Mantel-style helper such as plot_mantel_boxplots,
+        producing one boxplot of pooled null draws across sessions with one
+        colored dot per session for the observed statistic.
+
+        Parameters
+        ----------
+        X : ndarray, (n_neurons, n_features)
+            Readout weights, aligned with df rows.
+        df : pandas.DataFrame
+            Must contain 'session_name'. If `bat_col` is present it is used
+            to populate a 'bat' column on the result for hue-based plotting.
+            Any column listed in `extra_cols` is forwarded as well (taken
+            from the first row of each session).
+        session_names : list[str] | None
+            Sessions to test. None = all unique session_names in df.
+        stat, alternative, n_perm, random_state :
+            Forwarded to compute_distribution_pvalue / __init__.
+        bat_col : str
+            Column to copy into the 'bat' field of the output (used as
+            hue when plotting).
+        extra_cols : iterable[str]
+            Additional df columns to attach per session.
+        """
+        if session_names is None:
+            session_names = df["session_name"].unique().tolist()
+
+        records = []
+        for s in session_names:
+            sess_mask = df["session_name"] == s
+            if int(sess_mask.sum()) < 2:
+                continue
+            tester = cls(
+                X=X, df=df, session_name=s,
+                n_perm=n_perm, random_state=random_state,
+                null_model="shuffle_weights",
+            )
+            res = tester.compute_distribution_pvalue(
+                stat=stat, alternative=alternative,
+            )
+            first_row = df.loc[sess_mask].iloc[0]
+            rec = dict(
+                comparison=f"orthogonality ({stat})",
+                session=s,
+                r=res["observed"],
+                p=res["p_value"],
+                perm_rs=res["null"],
+                n_neurons=tester.n,
+                n_pairs=tester.n * (tester.n - 1) // 2,
+                bat=first_row[bat_col] if bat_col in df.columns else None,
+            )
+            for c in extra_cols:
+                if c in df.columns:
+                    rec[c] = first_row[c]
+            records.append(rec)
+        return pd.DataFrame(records)
+
+    @staticmethod
+    def plot_session_boxplot(
+        results_df,
+        *,
+        comparison_col="comparison",
+        hue_col="bat",
+        ylabel=None,
+        zero_line=False,
+        ncols=4,
+    ):
+        """Mantel-style plot of run_across_sessions output: per comparison,
+        a grey boxplot of pooled null draws across sessions overlaid with
+        one strip-plot dot per session colored by `hue_col`. Stars
+        annotate sessions where p < {0.05, 0.01, 0.001}.
+        """
+        import math
+        import seaborn as sns
+
+        comparisons = list(results_df[comparison_col].unique())
+        n = len(comparisons)
+        ncols_actual = min(n, ncols)
+        nrows = math.ceil(n / ncols_actual)
+        fig, axes = plt.subplots(
+            nrows, ncols_actual,
+            figsize=(4 * ncols_actual, 4 * nrows),
+            squeeze=False,
+        )
+        for idx, comp in enumerate(comparisons):
+            ax = axes[idx // ncols_actual, idx % ncols_actual]
+            sub = results_df[results_df[comparison_col] == comp].reset_index(drop=True)
+            if len(sub) == 0:
+                ax.set_visible(False)
+                continue
+            all_nulls = np.concatenate(sub["perm_rs"].values)
+            sns.boxplot(y=all_nulls, color="0.85", width=0.4,
+                        whis=(0.5, 99.5), fliersize=0, ax=ax)
+            sns.stripplot(
+                data=sub, y="r",
+                hue=hue_col if hue_col in sub.columns else None,
+                ax=ax, size=8, jitter=0.1, zorder=5,
+                edgecolor="k", linewidth=0.5,
+            )
+            for _, row in sub.iterrows():
+                star = ("***" if row["p"] < 0.001 else
+                        "**"  if row["p"] < 0.01  else
+                        "*"   if row["p"] < 0.05  else "")
+                if star:
+                    ax.text(0.25, row["r"], star, ha="left", va="center", fontsize=8)
+            ax.set_ylabel(ylabel or "observed statistic")
+            ax.set_title(comp, fontsize=9)
+            if zero_line:
+                ax.axhline(0, color="k", linewidth=0.5, linestyle="--")
+            ax.set_xticks([])
+            if hue_col in sub.columns and ax.get_legend() is not None:
+                ax.legend(title=hue_col, fontsize=7, title_fontsize=7)
+        for idx in range(n, nrows * ncols_actual):
+            axes.flat[idx].set_visible(False)
+        plt.tight_layout()
+        return fig
 
 
