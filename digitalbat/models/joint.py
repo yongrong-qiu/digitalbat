@@ -31,6 +31,7 @@ with :func:`joint_loss` (Poisson NLL on masked neural targets + ``lam`` * MSE on
 behaviour targets). Both losses are computed only on masked *and* valid timesteps.
 """
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -44,6 +45,8 @@ __all__ = [
     'SCHEMES',
     'sample_mask',
     'joint_loss',
+    'JointEncoderAdapter',
+    'encode_eval_records',
 ]
 
 
@@ -266,3 +269,72 @@ def joint_loss(rate, beh, spike, behavior, valid_mask, neural_target, beh_target
             beh_loss = pos_weight * beh_loss + (1.0 - pos_weight) * diff2[:, pos_dim:].mean()
         loss = loss + lam * beh_loss
     return loss
+
+
+class JointEncoderAdapter(nn.Module):
+    """Expose a trained :class:`JointMaskedTransformer` with the standalone
+    ``Bat_Transformer`` encoder interface (behaviour in -> spike rate out) plus
+    per-session ``readouts``.
+
+    The encode masking scheme is applied internally: neural tokens are the
+    prediction targets (masked) and behaviour tokens are seen, so a single call
+    ``adapter(session_name, behaviour, mask)`` returns the predicted Poisson rate,
+    exactly like the encoder-only model. ``readouts[session]`` wraps the joint
+    model's per-session spike readout, so the encoding / embedding / readout-weight
+    analyses can treat the joint model as a drop-in encoder.
+    """
+
+    def __init__(self, joint, unit_num_dict):
+        super().__init__()
+        self.joint = joint
+        self.unit_num_dict = dict(unit_num_dict)
+        self.readouts = {s: nn.Sequential(joint.spike_readout[s])
+                         for s in joint.spike_readout}
+        self.final_activation = joint.spike_act
+
+    def forward(self, session_name, x, mask, return_attn_weights=False, **kwargs):
+        B, T, _ = x.shape
+        K = self.unit_num_dict[session_name]
+        spike = x.new_zeros(B, T, K)
+        neural_target = mask.to(x.dtype)        # encode: neural tokens are targets
+        beh_target = torch.zeros_like(neural_target)   # behaviour is seen
+        if return_attn_weights:
+            _, _, xfull, attn = self.joint(session_name, spike, x, mask,
+                                           neural_target, beh_target,
+                                           return_attn_weights=True)
+            h_n = xfull[:, :T]
+            rate = self.final_activation(self.readouts[session_name](h_n))
+            return rate, [a[:, :, :T, T:] for a in attn]
+        _, _, xfull = self.joint(session_name, spike, x, mask, neural_target, beh_target)
+        h_n = xfull[:, :T]
+        return self.final_activation(self.readouts[session_name](h_n))
+
+
+@torch.no_grad()
+def encode_eval_records(model, loaders, device, *, split='test'):
+    """Per-(session, neuron) encoding metrics for an encoder-like ``model`` on
+    ``loaders[split]``.
+
+    Returns a tidy ``pandas.DataFrame`` with columns ``session, bat, unit, corr,
+    fde`` (raw FDE, not clipped). ``model`` is anything with the
+    ``model(session, behaviour, mask) -> rate`` interface (e.g.
+    :class:`JointEncoderAdapter` or ``Bat_Transformer``).
+    """
+    import pandas as pd
+    from ..utility.utils import corr, poisson_fde_population, parse_bat
+
+    rows = []
+    for sn, sd in loaders[split].items():
+        yv, yp = [], []
+        for batch in sd:
+            m = batch.mask.to(device)
+            rate = model(sn, batch.behavior.to(device), m)
+            yv.append(batch.spike[batch.mask == 1.0].numpy())
+            yp.append(rate[m == 1.0].detach().cpu().numpy())
+        yv, yp = np.vstack(yv), np.vstack(yp)
+        c = corr(yv, yp, axis=0)
+        f = poisson_fde_population(yv, yp)
+        for u in range(yv.shape[1]):
+            rows.append(dict(session=sn, bat=parse_bat(sn), unit=u,
+                             corr=float(c[u]), fde=float(f[u])))
+    return pd.DataFrame(rows)
