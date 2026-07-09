@@ -104,6 +104,87 @@ def order_categorical(series, order):
 
 
 # ---------------------------------------------------------------------------
+# Canonical categorical palettes
+# ---------------------------------------------------------------------------
+# Six independent category *kinds* each get their own colour family so a colour
+# never carries two meanings within a figure.  Listed in order of importance:
+#   1. routes          - ROUTE_COLORS / ROUTE_LABELS (hand-picked, defined below)
+#   2. bats            - bat_pal()  (tab10; from digitalbat.utility.utils)
+#   3. neuron clusters - readout-weight clusters            (Set2, pastel)
+#   4. environments    - recording room / indoor-outdoor    (named ENV_PALETTE)
+#   5. sessions        - individual recording sessions      (husl ramp)
+#   6. flight clusters - trajectory clusters                (tab20b)
+# Builders take the *ordered* category values and return a ``{value: rgb}`` dict
+# keyed by the values themselves (dtype preserved) so they drop straight into
+# seaborn via ``hue=<col>, palette=<dict>`` - see ``cat_boxplot``.
+CLUSTER_CMAP = 'Set2'           # neuron (readout) clusters
+SESSION_CMAP = 'husl'           # recording sessions
+FLIGHT_CLUSTER_CMAP = 'tab20b'  # flight / trajectory clusters
+
+# Environments: canonical names -> colour. Superset of the indoor/outdoor split
+# and the 3-config room map (lab / dataset_2 / krishna_fs) used across notebooks.
+ENV_PALETTE = {
+    'indoor': '#3b6ea5', 'outdoor': '#d1874b',
+    'lab': '#3b6ea5', 'dataset_2': '#6a51a3', 'krishna_fs': '#41ae76',
+}
+
+
+def _ordered_palette(values, source, *, cycle=False):
+    """``{value: rgb}`` for the distinct ``values`` (first-seen order) drawn from
+    a seaborn colour source. ``cycle`` wraps a fixed qualitative palette when
+    there are more categories than colours (else the source is sampled to N)."""
+    keys = list(dict.fromkeys(values))
+    n = len(keys)
+    if cycle:
+        base = sns.color_palette(source)
+        cols = [base[i % len(base)] for i in range(n)]
+    else:
+        cols = sns.color_palette(source, n_colors=max(n, 3))
+    return dict(zip(keys, cols))
+
+
+def route_palette():
+    """``{route_id: rgb}`` for route ids 0..4 (labels in ROUTE_LABELS)."""
+    return {i: mpl.colors.to_rgb(c) for i, c in enumerate(ROUTE_COLORS)}
+
+
+def cluster_palette(order):
+    """``{cluster_id: rgb}`` for neuron (readout) clusters in the given order."""
+    return _ordered_palette(order, CLUSTER_CMAP)
+
+
+def env_palette(order=None):
+    """``{env: rgb}`` for environments; the full canonical map when ``order`` is
+    None, else restricted/ordered to ``order`` (unknown envs -> grey)."""
+    src = ENV_PALETTE.keys() if order is None else order
+    return {e: mpl.colors.to_rgb(ENV_PALETTE.get(e, '0.5')) for e in src}
+
+
+def session_palette(sessions):
+    """``{session: rgb}`` for recording sessions in the given order (husl ramp)."""
+    return _ordered_palette(sessions, SESSION_CMAP)
+
+
+def flight_cluster_palette(order):
+    """``{flight_cluster_id: rgb}`` for trajectory clusters in the given order."""
+    return _ordered_palette(order, FLIGHT_CLUSTER_CMAP, cycle=True)
+
+
+def cat_boxplot(ax, data, x, y, order, palette, *, showfliers=False, **kw):
+    """Categorical boxplot coloured by a ``{level: rgb}`` dict, robust to
+    seaborn >= 0.13.
+
+    Assigns ``hue=x`` internally (with ``legend=False``) so a dict palette keyed
+    by the native level values is honoured - avoiding the "palette without hue"
+    deprecation, which silently stringifies the levels and breaks int/other-keyed
+    palette dicts. ``palette`` may also be any seaborn colour name.
+    """
+    return sns.boxplot(data=data, x=x, y=y, order=order, hue=x, hue_order=order,
+                       palette=palette, legend=False, showfliers=showfliers,
+                       ax=ax, **kw)
+
+
+# ---------------------------------------------------------------------------
 # Significance brackets that DO NOT stretch the y-axis
 # ---------------------------------------------------------------------------
 def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
@@ -531,11 +612,59 @@ def plot_trajectories_3d(ax, trajs, values, *, categorical=False, cmap='viridis'
 FIG_DIR = None  # set by notebook; e.g. Path('out/figures')
 
 
-def save_fig(fig, name, *, subdir='figures'):
-    """Save `fig` as both PDF and PNG under ``notebooks/out/<subdir>/``."""
+def _cap_first(s):
+    """Capitalise the first character iff it is a lowercase ASCII letter."""
+    c = s[:1]
+    return c.upper() + s[1:] if (c.isascii() and c.isalpha() and c.islower()) else s
+
+
+def _cap_legend(leg):
+    if leg is None:
+        return
+    title = leg.get_title()
+    if title is not None:
+        title.set_text(_cap_first(title.get_text()))
+    for txt in leg.get_texts():
+        txt.set_text(_cap_first(txt.get_text()))
+
+
+def capitalize_labels(fig):
+    """Upper-case the first letter of every title, axis label, legend entry and
+    categorical (non-numeric) tick label in `fig`. Anything starting with a digit,
+    symbol, math (``$``) or non-ASCII/Greek character is left untouched. Idempotent."""
+    for ax in fig.axes:
+        ax.set_title(_cap_first(ax.get_title()))
+        ax.set_xlabel(_cap_first(ax.get_xlabel()))
+        ax.set_ylabel(_cap_first(ax.get_ylabel()))
+        if hasattr(ax, 'get_zlabel'):
+            ax.set_zlabel(_cap_first(ax.get_zlabel()))
+        for axis, setter in ((ax.xaxis, ax.set_xticklabels), (ax.yaxis, ax.set_yticklabels)):
+            labs = [t.get_text() for t in axis.get_ticklabels()]
+            if any(l[:1].isascii() and l[:1].isalpha() and l[:1].islower() for l in labs):
+                try:
+                    setter([_cap_first(l) for l in labs])
+                except Exception:
+                    pass
+        _cap_legend(ax.get_legend())
+    for leg in getattr(fig, 'legends', []):
+        _cap_legend(leg)
+    if getattr(fig, '_suptitle', None) is not None:
+        fig._suptitle.set_text(_cap_first(fig._suptitle.get_text()))
+    return fig
+
+
+def save_fig(fig, name, *, subdir='figures', capitalize=True):
+    """Save `fig` as PDF and PNG under ``notebooks/out/<subdir>/{pdf,png}/``.
+
+    With ``capitalize`` (default), first letters of titles / axis labels / legend
+    text / categorical tick labels are upper-cased via :func:`capitalize_labels`.
+    """
     from pathlib import Path
+    if capitalize:
+        capitalize_labels(fig)
     base = FIG_DIR or Path('out') / subdir
-    base.mkdir(parents=True, exist_ok=True)
     for ext in ('pdf', 'png'):
-        fig.savefig(base / f'{name}.{ext}', dpi=300, bbox_inches='tight')
-    return base / f'{name}.pdf'
+        d = base / ext
+        d.mkdir(parents=True, exist_ok=True)
+        fig.savefig(d / f'{name}.{ext}', dpi=300, bbox_inches='tight')
+    return base / 'pdf' / f'{name}.pdf'
