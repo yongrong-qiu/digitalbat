@@ -31,7 +31,7 @@ DEFAULT_SESSION_NAMES = [
 
 
 def make_data_config(session_names=None, parent_folder=DEFAULT_PARENT_FOLDER,
-                     max_acceleration=40):
+                     max_acceleration=50.0):
     """Return the standard ``data_config`` dict for ``bat_data_loader``."""
     if session_names is None:
         session_names = list(DEFAULT_SESSION_NAMES)
