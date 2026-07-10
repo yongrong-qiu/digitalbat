@@ -188,14 +188,15 @@ def cat_boxplot(ax, data, x, y, order, palette, *, showfliers=False, **kw):
 # Significance brackets that DO NOT stretch the y-axis
 # ---------------------------------------------------------------------------
 def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
-                fontsize=17, base=0.98, step=0.07, show_ns=False):
+                fontsize=17, base=0.98, step=0.07, show_ns=False, star_gap=0.0):
     """Draw a 3-tier-star significance bracket between categorical positions
     ``x1`` and ``x2`` **without** changing ``ax`` limits.
 
     The bracket is drawn in a blended transform: x in data coordinates, y in
     axes-fraction coordinates, so it floats above the data near the top of the
     panel regardless of the data range. ``level`` stacks multiple brackets
-    (0 = lowest). Hidden entirely when p >= .05 unless ``show_ns``.
+    (0 = lowest). Hidden entirely when p >= .05 unless ``show_ns``. ``star_gap``
+    nudges the star label vertically off the bar (negative pulls it closer).
     """
     stars = stars_for_p(p)
     if not stars:
@@ -207,7 +208,7 @@ def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
     h = 0.015
     ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], transform=trans,
             lw=linewidth, color=color, clip_on=False)
-    ax.text((x1 + x2) / 2, y + h, stars, transform=trans, ha='center',
+    ax.text((x1 + x2) / 2, y + h + star_gap, stars, transform=trans, ha='center',
             va='bottom', fontsize=fontsize, fontweight='bold', color=color,
             clip_on=False)
 
@@ -381,11 +382,32 @@ def _star_row(ax, order, pvals, frac=0.96):
                     fontweight='bold', color='k')
 
 
+def _star_brackets(ax, order, pvals, ref, *, show_ns=False, base=1.02, step=0.09,
+                   star_gap=0.0):
+    """Stacked significance brackets from `ref` to every other category.
+
+    One bracket per non-reference model (a line connecting the two x-positions
+    with 3-tier stars above), nested so the narrowest span sits lowest and the
+    widest on top. Drawn in the axes-fraction transform used by ``sig_bracket``;
+    with ``base`` >= 1 they float just above the panel frame (clear of the box
+    whiskers). Only the brackets that actually render are stacked, so hiding
+    ``n.s.`` (``show_ns=False``, the default) leaves no gaps."""
+    xref = order.index(ref)
+    ordered = sorted((abs(x - xref), x, m) for x, m in enumerate(order) if m != ref)
+    shown = [(x, m) for _, x, m in ordered
+             if show_ns or stars_for_p(pvals.get(m, np.nan))]
+    for lvl, (x, m) in enumerate(shown):   # narrowest first -> lowest bracket
+        sig_bracket(ax, xref, x, pvals.get(m, np.nan), level=0,
+                    base=base + lvl * step, show_ns=show_ns, star_gap=star_gap)
+
+
 def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
                        ylabel='', unit_ylabel=None, unit_name='neuron',
                        session_col='session', model_col='model', agg='median',
                        clip=None, sess_ylim=None, palette=None, zero_line=False,
-                       higher_is_better=True, figsize=None, axes=None):
+                       higher_is_better=True, figsize=None, axes=None,
+                       star_style='row', star_kw=None, show_titles=True, title_y=1.0,
+                       show_xticklabels=True, show_sess_ylabel=True, show_unit_ylabel=True):
     """Two-panel model comparison in the unified style.
 
     Left: per-session aggregate (`agg`) as a grey boxplot with per-session points
@@ -395,6 +417,17 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
     overrides the left (session) panel's ylim (applied before the stars are placed,
     so they stay on-axis); the right panel keeps `clip`. Pass `axes=(ax_sess, ax_unit)`
     to draw onto an existing shared canvas instead of a new figure.
+
+    `star_style='row'` (default) prints one star per category above it. `'bracket'`
+    instead draws a connecting line from `ref` to each other category with the
+    3-tier stars above (stacked, narrowest span lowest) — useful when `ref` is the
+    baseline being compared against every alternative; `star_kw` is forwarded to
+    the bracket drawer (e.g. `show_ns`, `base`, `step`).
+
+    For small-multiple grids, `show_titles` / `show_xticklabels` /
+    `show_sess_ylabel` / `show_unit_ylabel` suppress the corresponding decoration
+    on interior panels, and `title_y` lifts the panel titles (axes-fraction) to
+    clear tall significance brackets.
 
     Returns (fig, p_table) where p_table has one row per model vs `ref`.
     """
@@ -438,13 +471,21 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
         elif clip:
             ax.set_ylim(*clip)
         ax.set_xlabel('')
-        ax.set_ylabel(ylabel if is_sess else (unit_ylabel or ylabel))
+        show_yl = show_sess_ylabel if is_sess else show_unit_ylabel
+        ax.set_ylabel((ylabel if is_sess else (unit_ylabel or ylabel)) if show_yl else '')
         ax.set_xticks(range(len(order)))
-        ax.set_xticklabels([labels[m] for m in order], rotation=35, ha='right')
-        _star_row(ax, order, pvals)
+        if show_xticklabels:
+            ax.set_xticklabels([labels[m] for m in order], rotation=35, ha='right')
+        else:
+            ax.set_xticklabels([])
+        if star_style == 'bracket' and ref in order:
+            _star_brackets(ax, order, pvals, ref, **(star_kw or {}))
+        else:
+            _star_row(ax, order, pvals)
         sns.despine(ax=ax)
-    axs.set_title('session ' + agg + 's')
-    axu.set_title(f'per {unit_name}')
+    if show_titles:
+        axs.set_title('session ' + agg + 's', y=title_y)
+        axu.set_title(f'per {unit_name}', y=title_y)
     if axes is None:
         fig.tight_layout()
     ptab = pd.DataFrame(recs)
@@ -633,9 +674,11 @@ def capitalize_labels(fig):
     categorical (non-numeric) tick label in `fig`. Anything starting with a digit,
     symbol, math (``$``) or non-ASCII/Greek character is left untouched. Idempotent."""
     for ax in fig.axes:
-        ax.set_title(_cap_first(ax.get_title()))
-        ax.set_xlabel(_cap_first(ax.get_xlabel()))
-        ax.set_ylabel(_cap_first(ax.get_ylabel()))
+        # Update text in place so a custom title position (e.g. set_title(y=...))
+        # survives; re-issuing set_title/set_xlabel/set_ylabel would reset it.
+        ax.title.set_text(_cap_first(ax.get_title()))
+        ax.xaxis.label.set_text(_cap_first(ax.get_xlabel()))
+        ax.yaxis.label.set_text(_cap_first(ax.get_ylabel()))
         if hasattr(ax, 'get_zlabel'):
             ax.set_zlabel(_cap_first(ax.get_zlabel()))
         for axis, setter in ((ax.xaxis, ax.set_xticklabels), (ax.yaxis, ax.set_yticklabels)):
