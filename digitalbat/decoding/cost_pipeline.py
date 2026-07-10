@@ -57,6 +57,8 @@ from digitalbat.models.glm import (
 from digitalbat.models.decoder import (
     GLM_MAP_Decoder, Bat_Transformer_Decoder, bat_decoder_trainer,
 )
+from digitalbat.models.joint import JointMaskedTransformer
+from digitalbat.training.joint_trainer import train_joint, scheme_weights
 from digitalbat.datasets.synthetic import (
     make_synthetic_train_dataloaders, make_synthetic_train_dataloaders_traj,
 )
@@ -118,6 +120,7 @@ MODEL_ORDER_4G = [
     'glm_map_coup',
     'glm_map_joint',
     'transformer',
+    'joint',
 ]
 MODEL_LABEL_4G = {
     'naive_bayes':            'NB (place)',
@@ -131,7 +134,25 @@ MODEL_LABEL_4G = {
     'svm':                    'pairwise SVM (place)',
     'svm_cluster':            'pairwise SVM (place, trajectory)',
     'transformer':            'transformer',
+    'joint':                  'Hippo-NEDS',
 }
+
+# Joint (Hippo-NEDS) decoder defaults — the consensus masked encoder/decoder used
+# as a *decoder* (all behaviour masked → predict 3-D position).  Overridable via
+# generate_ed2_decode_costs(joint_params=..., joint_train=...) so the notebook can
+# pass its parsed consensus hyperparameters.  Trained fresh per mode on that mode's
+# surrogate spikes (real valid/test by reference), in the cost-pipeline session
+# universe (existing joint checkpoints live in the 17-session universe and do not
+# transfer key-for-key).
+JOINT_DECODER_PARAMS = dict(num_layers=4, latent_dim=64, num_heads=4, ff_dim=64,
+                            dropout=0.2)
+JOINT_DECODER_INPUT_TRANSFORM = 'identity'
+# Consensus training config (lam/pos_weight/scheme weights parsed from the
+# production checkpoint joint_v2_cross1000_..._lam0.68_pw0.36_we2.8_wd2.2_wa0.31).
+# `scheme_weights` requires w_encode / w_decode / w_aux.
+JOINT_DECODER_TRAIN = dict(n_epochs=1000, lr=3e-3, weight_decay=1e-2, lam=0.68,
+                           pos_weight=0.36, w_encode=2.8, w_decode=2.2, w_aux=0.31,
+                           fde_weight=0.5, err_ref=0.3, fde_ref=0.1)
 DATA_ORDER_4G = ['real', 'trial_shuffled', 'time_shuffled',
                  'both_shuffled', 'synthetic', 'synthetic_traj']
 DATA_LABEL_4G = {
@@ -1355,6 +1376,116 @@ def eval_transformer_by_mode(decoder_models, mode_dataloaders, modes,
 
 
 # ===========================================================================
+# ## Joint (Hippo-NEDS) decoder — masked encoder/decoder used as a decoder
+# ===========================================================================
+def _joint_session_room(session_name):
+    """3-config room map (matches figures.ipynb `joint_session_room` /
+    joint-encode-decode.ipynb `session_room`)."""
+    if '_fs' in session_name:
+        return 'krishna_fs'
+    if session_name.startswith('Dataset_2_'):
+        return 'dataset_2'
+    return 'lab'
+
+
+def build_joint_decoders(modes, mode_dataloaders, unit_num_dict, meta_info_dict,
+                         device, seed, out_dir='./out', *, joint_params=None,
+                         joint_train=None, input_transform=None,
+                         synth_sampling='empirical'):
+    """Load (or train-if-missing) one Hippo-NEDS joint model per mode.
+
+    Each model is trained on that mode's surrogate TRAIN spikes (real valid/test
+    by reference — same contract as the transformer decoder) and used purely as a
+    3-D position decoder (all behaviour masked at eval).  Returns
+    `joint_models` (dict {mode -> model on device}).
+    """
+    jp = dict(JOINT_DECODER_PARAMS if joint_params is None else joint_params)
+    jt = dict(JOINT_DECODER_TRAIN if joint_train is None else joint_train)
+    itf = JOINT_DECODER_INPUT_TRANSFORM if input_transform is None else input_transform
+    session_to_room = {s: _joint_session_room(s) for s in unit_num_dict}
+
+    joint_models = {}
+    for mode in modes:
+        suffix = '' if mode == 'real' else f'_{mode}'
+        if mode in CLUSTER_DEPENDENT_MODES:
+            suffix += f'_{CLUSTER_TAG}'
+        if mode in ('synthetic', 'synthetic_traj') and synth_sampling == 'empirical':
+            suffix += '_emp'
+        ckpt = (f'{out_dir}/joint/ed2_joint_decoder_seed_{seed}'
+                f'_L{jp["num_layers"]}_d{jp["latent_dim"]}_ff{jp["ff_dim"]}{suffix}.pth')
+        os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+
+        set_random_state(seed)
+        jm = JointMaskedTransformer(
+            unit_num_dict, behavior_dim=3, latent_dim=jp['latent_dim'],
+            num_heads=jp['num_heads'], ff_dim=jp['ff_dim'], num_layers=jp['num_layers'],
+            dropout=jp['dropout'], input_transform=itf,
+            session_to_room=session_to_room).to(device)
+        if os.path.exists(ckpt) and _try_load_state_dict(jm, ckpt, device):
+            joint_models[mode] = jm.to(device).eval()
+            continue
+        jm, _best, _ = train_joint(
+            jm, mode_dataloaders[mode], device, meta_info_dict, seed=seed,
+            n_epochs=jt['n_epochs'], lr=jt['lr'], weight_decay=jt['weight_decay'],
+            lam=jt['lam'], pos_weight=jt['pos_weight'], scheme_p=scheme_weights(jt),
+            select='joint', fde_weight=jt['fde_weight'], err_ref=jt['err_ref'],
+            fde_ref=jt['fde_ref'])
+        torch.save(jm.state_dict(), ckpt)
+        joint_models[mode] = jm.eval()
+    return joint_models
+
+
+@torch.no_grad()
+def _eval_joint_records(model, dataloaders, meta_info_dict, device):
+    """Decode 3-D position (all behaviour masked) on the real TEST split; return
+    per-timestep records in the shared decode schema (mirrors
+    `_eval_decoder_records` so `build_cost_tables` treats it identically)."""
+    records = []
+    model.eval()
+    for session_name, session_data in dataloaders['test'].items():
+        bm = np.asarray(meta_info_dict['behavior_mean'][session_name]).reshape(-1)[:3]
+        bs = np.asarray(meta_info_dict['behavior_std'][session_name]).reshape(-1)[:3]
+        bat = parse_bat(session_name)
+        for batch in session_data:
+            m = batch.mask.to(device)
+            beh_target = batch.mask.clone().to(device)     # decode: mask all behaviour
+            neural_target = torch.zeros_like(beh_target)
+            _, beh_pred, _ = model(session_name, batch.spike.to(device),
+                                   batch.behavior.to(device), m, neural_target, beh_target)
+            y_pred = beh_pred[:, :, :3].cpu().numpy() * bs + bm
+            y_true = batch.behavior[:, :, :3].numpy() * bs + bm
+            mask_np = batch.mask.numpy().astype(bool)
+            B, T = mask_np.shape
+            fpi_per_t = np.broadcast_to(batch.flight_path_index.numpy()[:, None], (B, T))
+            t_idx_per = np.broadcast_to(np.arange(T)[None, :], (B, T))
+            yt, yp = y_true[mask_np], y_pred[mask_np]
+            fpi_flat = fpi_per_t[mask_np].astype(int)
+            t_flat = t_idx_per[mask_np].astype(int)
+            err_2d = np.sqrt(((yt[:, :2] - yp[:, :2]) ** 2).sum(axis=1))
+            err_3d = np.sqrt(((yt - yp) ** 2).sum(axis=1))
+            for i in range(len(err_2d)):
+                records.append({
+                    'bat': bat, 'session': session_name, 'flight_id': int(fpi_flat[i]),
+                    't_idx': int(t_flat[i]),
+                    'x_true': float(yt[i, 0]), 'y_true': float(yt[i, 1]), 'z_true': float(yt[i, 2]),
+                    'x_pred': float(yp[i, 0]), 'y_pred': float(yp[i, 1]), 'z_pred': float(yp[i, 2]),
+                    'err_2d': float(err_2d[i]), 'err_3d': float(err_3d[i]),
+                })
+    return records
+
+
+def eval_joint_by_mode(joint_models, mode_dataloaders, modes, meta_info_dict, device):
+    """Decode the real TEST flights with each mode's joint model.  Returns
+    joint_dfs (dict {mode -> per-flight-timestep test DataFrame})."""
+    joint_dfs = {}
+    for mode in modes:
+        recs = _eval_joint_records(
+            joint_models[mode], mode_dataloaders[mode], meta_info_dict, device)
+        joint_dfs[mode] = pd.DataFrame(recs).assign(decoder='joint')
+    return joint_dfs
+
+
+# ===========================================================================
 # ## Aggregation / export
 # ===========================================================================
 def frechet_per_flight_4g(decoder_dfs):
@@ -1477,12 +1608,16 @@ def _load_optuna_best_params(out_dir, seed):
 
 def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
                               out_path=None, run_shuffles=True, run_synthetic=True,
-                              synth_sampling='empirical'):
+                              synth_sampling='empirical', run_joint=True,
+                              joint_params=None, joint_train=None,
+                              joint_input_transform=None):
     """Top-level ED Fig 2 decode-cost generator (what figures.ipynb calls).
 
-    Self-contained given cached artifacts under `out_dir`.  Runs the 4 decoders
-    (glm_map, glm_map_coup, glm_map_joint, transformer) across the modes and
-    returns the ED Fig 2 export dict (also pickled if `out_path` given).
+    Self-contained given cached artifacts under `out_dir`.  Runs the decoders
+    (glm_map, glm_map_coup, glm_map_joint, transformer, and — when `run_joint` —
+    the Hippo-NEDS joint decoder) across the modes and returns the ED Fig 2 export
+    dict (also pickled if `out_path` given).  `joint_params` / `joint_train` /
+    `joint_input_transform` override the joint decoder's consensus config.
     """
     dt = data_config['bin_width']
 
@@ -1559,7 +1694,17 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
     transformer_dfs = eval_transformer_by_mode(
         decoder_models, mode_dataloaders, modes, meta_info_dict, device)
 
-    # 8. Assemble PER_MODEL_DFS_4G + FRECHET_4G (4 models only).
+    # 7b. Per-mode Hippo-NEDS joint decoder (train-if-missing, decode real test).
+    joint_dfs = {}
+    if run_joint:
+        joint_models = build_joint_decoders(
+            modes, mode_dataloaders, unit_num_dict, meta_info_dict, device, seed,
+            out_dir=out_dir, joint_params=joint_params, joint_train=joint_train,
+            input_transform=joint_input_transform, synth_sampling=synth_sampling)
+        joint_dfs = eval_joint_by_mode(
+            joint_models, mode_dataloaders, modes, meta_info_dict, device)
+
+    # 8. Assemble PER_MODEL_DFS_4G + FRECHET_4G.
     PER_MODEL_DFS_4G = {}
     for _m in modes:
         PER_MODEL_DFS_4G[_m] = {
@@ -1567,6 +1712,7 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
             'glm_map_coup':   glm_map_coup_dfs.get(_m, pd.DataFrame()),
             'glm_map_joint':  glm_map_joint_dfs.get(_m, pd.DataFrame()),
             'transformer':    transformer_dfs.get(_m, pd.DataFrame()),
+            'joint':          joint_dfs.get(_m, pd.DataFrame()),
         }
 
     FRECHET_4G = {}
@@ -1583,7 +1729,9 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
         FRECHET_4G[_m] = frechet_per_flight_4g(coords)
 
     # 9. Build + return the export dict.
+    _model_order = ['glm_map', 'glm_map_coup', 'glm_map_joint', 'transformer']
+    if run_joint:
+        _model_order.append('joint')
     return build_cost_tables(
-        PER_MODEL_DFS_4G, modes, seed,
-        model_order=['glm_map', 'glm_map_coup', 'glm_map_joint', 'transformer'],
+        PER_MODEL_DFS_4G, modes, seed, model_order=_model_order,
         frechet_by_mode_4g=FRECHET_4G, out_path=out_path)

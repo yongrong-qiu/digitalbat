@@ -300,7 +300,7 @@ def bat_former_trainer(
     early_stopping_patience: int | None = None, # stop if no improvement for this many epochs
     save_model: bool = False, # whether to save model or not
     model_name: str = 'best_model_weights.pth',
-    # verbose=False, # not display the progress
+    verbose: bool = True, # show the per-epoch tqdm progress bar
 ):
     """
     Training transfomer models for predicting neural activity
@@ -332,7 +332,7 @@ def bat_former_trainer(
     val_scores = []
     epochs_without_improvement = 0
 
-    for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
+    for epoch in tqdm.tqdm(range(n_epochs), desc="Training", disable=not verbose):
         model.train()
         # Round-robin per-session batches: see `round_robin_session_batches`.
         for session_name, batch in round_robin_session_batches(dataloaders['train']):
