@@ -1094,6 +1094,38 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
     return tuple(figs)
 
 
+# --- Joint encode/decode latent conventions (shared by Fig 2 & ED Fig 5) ---
+def masked_latent(x, T, kind):
+    """Pre-read-out latent of the MASKED (predicted) modality for one joint-model pass.
+
+    `x` is the full transformer output ``(B, 2T, D)``; the joint model lays tokens
+    out as ``cat([neural(0:T), behaviour(T:2T)])``. In an encode pass the neural tokens
+    are masked and predicted from behaviour, so the encode latent is the neural half
+    ``x[:, :T]`` (what the spike read-out acts on); in a decode pass the behaviour
+    tokens are masked and predicted from neural, so the decode latent is the behaviour
+    half ``x[:, T:]`` (what the behaviour read-out acts on). Each pass's latent is the
+    representation of the modality being reconstructed.
+    """
+    if kind == 'encode':
+        return x[:, :T]
+    if kind == 'decode':
+        return x[:, T:]
+    raise ValueError(f"kind must be 'encode' or 'decode', got {kind!r}")
+
+
+def fit_shared_latent_pca(latent_encode, latent_decode, n_components=3, random_state=None):
+    """Fit ONE PCA on the row-concatenation of the encode and decode latents.
+
+    Returns the fitted sklearn ``PCA`` so both branches share a single principal-
+    component basis: call ``.transform`` on either branch to project into the shared
+    space. Fig 2 and ED Fig 5 use this on their own (different) data subsets, so the
+    concatenation-PCA functionality is identical even though the inputs differ.
+    """
+    from sklearn.decomposition import PCA
+    X = np.vstack([latent_encode, latent_decode])
+    return PCA(n_components=n_components, random_state=random_state).fit(X)
+
+
 # --- Interactive Plotly HTML with a live matplotlib-style (elev, azim) readout ---
 # Plotly's 3-D scenes rotate on click-drag, but their orientation is a camera
 # `eye` vector, not the (elev, azim) that matplotlib's Axes3D.view_init wants.
