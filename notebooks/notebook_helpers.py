@@ -1092,3 +1092,59 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
         fig.suptitle(f'{title}  [{view}]' if title else view, fontsize=14)
         figs.append(fig)
     return tuple(figs)
+
+
+# --- Interactive Plotly HTML with a live matplotlib-style (elev, azim) readout ---
+# Plotly's 3-D scenes rotate on click-drag, but their orientation is a camera
+# `eye` vector, not the (elev, azim) that matplotlib's Axes3D.view_init wants.
+# This overlay converts every scene's camera to (elev, azim) and updates it live
+# as you drag, so you can dial in a view (e.g. the Fig-2 "figure-eight") in the
+# browser and read off the exact numbers to paste into view_init.
+_VIEW_READOUT_JS = r"""
+var gd = document.getElementById('{plot_id}');
+var box = document.createElement('div');
+box.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9999;'
+  + 'background:rgba(255,255,255,0.92);padding:6px 10px;font:12px/1.45 monospace;'
+  + 'color:#111;border:1px solid #666;border-radius:4px;white-space:pre;pointer-events:none;';
+document.body.appendChild(box);
+function _ea(eye) {
+  var r = Math.hypot(eye.x, eye.y, eye.z);
+  return {e: Math.asin(eye.z / r) * 180 / Math.PI,
+          a: Math.atan2(eye.y, eye.x) * 180 / Math.PI};
+}
+var _last = null;
+function _render() {
+  var L = gd._fullLayout || gd.layout || {};
+  var lines = [];
+  Object.keys(L).forEach(function(k) {
+    if (!/^scene[0-9]*$/.test(k)) return;
+    var cam = L[k] && L[k].camera;
+    if (!cam || !cam.eye) return;
+    var v = _ea(cam.eye);
+    lines.push((k === _last ? '▶ ' : '  ') + k
+               + ': elev=' + v.e.toFixed(1) + ' azim=' + v.a.toFixed(1));
+  });
+  box.textContent = 'view_init (elev, azim)\n' + (lines.join('\n') || '(drag a 3-D panel)');
+}
+gd.on('plotly_relayout', function(ed) {
+  Object.keys(ed).forEach(function(k) {
+    var m = k.match(/^(scene[0-9]*)\./);
+    if (m) _last = m[1];
+  });
+  _render();
+});
+_render();
+"""
+
+
+def write_html_with_view_readout(fig, out_path, **kwargs):
+    """`fig.write_html` plus a drag-live matplotlib (elev, azim) overlay.
+
+    Drop-in for ``fig.write_html(out_path)`` on any Plotly 3-D figure. The saved
+    HTML shows a small corner box reporting each scene's current view as the
+    (elev, azim) you would pass to ``Axes3D.view_init`` — updated on every
+    click-drag — so an orientation found in the browser transfers exactly to a
+    matplotlib figure. Extra ``kwargs`` pass through to ``fig.write_html``.
+    """
+    kwargs.setdefault('post_script', _VIEW_READOUT_JS)
+    fig.write_html(out_path, **kwargs)
