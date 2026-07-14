@@ -7,7 +7,7 @@ import copy
 from typing import Callable
 from transformers import get_cosine_schedule_with_warmup
 
-from ..utility.utils import corr, poisson_fde_population
+from ..utility.utils import corr, poisson_fde_population, round_robin_session_batches
 from ..models.layers import FocalLoss, BCEFocalCombinedLoss
 
 
@@ -170,21 +170,19 @@ def bat_mlp_trainer(
  
     for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
         model.train()
-        for session_name, session_data in dataloaders['train'].items():
-            # print(session_name, session_data)
-            for batch_id, batch in enumerate(session_data):
-                # print(batch[0].shape, batch[1].shape) # (N, behavior_feature), (N, spiking_unit_number)
-                # take a batch
-                X_batch = batch[0].to(device)
-                y_batch = batch[1].to(device)
-                # forward pass
-                y_pred = model(session_name, X_batch)
-                loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
-                # backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                # update weights
-                optimizer.step()
+        # Round-robin per-session batches: see `round_robin_session_batches`.
+        for session_name, batch in round_robin_session_batches(dataloaders['train']):
+            # batch[0]: (N, behavior_feature)  batch[1]: (N, spiking_unit_number)
+            X_batch = batch[0].to(device)
+            y_batch = batch[1].to(device)
+            # forward pass
+            y_pred = model(session_name, X_batch)
+            loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
+            # backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            # update weights
+            optimizer.step()
 
         # evaluate accuracy at end of each epoch
         model.eval()
@@ -244,21 +242,20 @@ def bat_mlp_behavior_trainer(
  
     for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
         model.train()
-        for session_name, session_data in dataloaders['train'].items():
-            # print(session_name, session_data)
-            for batch_id, batch in enumerate(session_data):
-                # print(batch[0].shape, batch[1].shape) # (N, behavior_feature), (N, spiking_unit_number)
-                # take a batch
-                X_batch = batch[1].to(device) # use spikes as model input
-                y_batch = batch[0].to(device)
-                # forward pass
-                y_pred = model(session_name, X_batch)
-                loss = loss_fn(y_pred, y_batch) # + torch.sigmoid(y_pred).mean() * 10.0
-                # backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                # update weights
-                optimizer.step()
+        # Round-robin per-session batches: see `round_robin_session_batches`.
+        for session_name, batch in round_robin_session_batches(dataloaders['train']):
+            # batch[0]: (N, behavior_feature)  batch[1]: (N, spiking_unit_number)
+            # use spikes as model input, behavior as target
+            X_batch = batch[1].to(device)
+            y_batch = batch[0].to(device)
+            # forward pass
+            y_pred = model(session_name, X_batch)
+            loss = loss_fn(y_pred, y_batch)
+            # backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            # update weights
+            optimizer.step()
 
         # evaluate accuracy at end of each epoch
         model.eval()
@@ -303,7 +300,7 @@ def bat_former_trainer(
     early_stopping_patience: int | None = None, # stop if no improvement for this many epochs
     save_model: bool = False, # whether to save model or not
     model_name: str = 'best_model_weights.pth',
-    # verbose=False, # not display the progress
+    verbose: bool = True, # show the per-epoch tqdm progress bar
 ):
     """
     Training transfomer models for predicting neural activity
@@ -335,37 +332,35 @@ def bat_former_trainer(
     val_scores = []
     epochs_without_improvement = 0
 
-    for epoch in tqdm.tqdm(range(n_epochs), desc="Training"):
+    for epoch in tqdm.tqdm(range(n_epochs), desc="Training", disable=not verbose):
         model.train()
-        for session_name, session_data in dataloaders['train'].items():
-            # print(session_name, session_data)
-            for batch_id, batch in enumerate(session_data):
-                # print(batch[0].shape, batch[1].shape, batch[2].shape) 
-                # behavior (N, window_size, behavior_feature), spike (N, window_size, unit_number), mask (N, window_size)
-                # take a batch
-                X_batch = batch.behavior.to(device)
-                y_batch = batch.spike.to(device)
-                mask_batch = batch.mask.to(device)
-                # forward pass
-                y_pred = model(
-                    session_name, 
-                    X_batch, 
-                    mask_batch, 
-                    is_causal=is_causal, 
-                    is_bigbird=is_bigbird,
-                    attention_window_size=attention_window_size,
-                    num_global=num_global,
-                    num_random=num_random,
-                )
-                # y_pred.shape: (14, 20, 289), y_pred[mask_batch == 1.0].shape: (260, 289)
-                loss = loss_fn(y_pred[mask_batch == 1.0], y_batch[mask_batch == 1.0]) # compute loss only on valid timesteps
-                # backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                # update weights
-                optimizer.step()
-                if use_cosine_scheduler:
-                    scheduler.step()
+        # Round-robin per-session batches: see `round_robin_session_batches`.
+        for session_name, batch in round_robin_session_batches(dataloaders['train']):
+            # behavior (N, window_size, behavior_feature)
+            # spike    (N, window_size, unit_number)
+            # mask     (N, window_size)
+            X_batch = batch.behavior.to(device)
+            y_batch = batch.spike.to(device)
+            mask_batch = batch.mask.to(device)
+            # forward pass
+            y_pred = model(
+                session_name,
+                X_batch,
+                mask_batch,
+                is_causal=is_causal,
+                is_bigbird=is_bigbird,
+                attention_window_size=attention_window_size,
+                num_global=num_global,
+                num_random=num_random,
+            )
+            loss = loss_fn(y_pred[mask_batch == 1.0], y_batch[mask_batch == 1.0])
+            # backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            # update weights
+            optimizer.step()
+            if use_cosine_scheduler:
+                scheduler.step()
 
         # evaluate accuracy at end of each epoch
         model.eval()
@@ -415,4 +410,126 @@ def bat_former_trainer(
     if save_model:
         torch.save(model.state_dict(), model_name)
     model.load_state_dict(best_weights)
+    return best_score, best_weights, val_scores
+
+
+def finetune_readout_trainer(
+    model,
+    dataloaders,
+    device,
+    target_session: str,
+    is_causal: bool = False,
+    is_bigbird: bool = False,
+    attention_window_size=3,
+    num_global=2,
+    num_random=1,
+    n_epochs=200,
+    use_cosine_scheduler: bool = False,
+    n_warmup=None,
+    lr=0.0001,
+    weight_decay=0.0,
+    loss_fn: nn.Module | None = None,
+    valid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None,
+    valid_stat='mean',
+    early_stopping_patience: int | None = None,
+    save_model: bool = False,
+    model_name: str = 'best_finetune_weights.pth',
+):
+    """
+    Fine-tune only `model.readouts[target_session]` while the rest of the model stays frozen.
+
+    Expects callers to freeze non-target params (requires_grad=False) beforehand. This trainer
+    additionally puts the whole model in .eval() every epoch, then flips ONLY the target readout
+    to .train(), which disables dropout in the transformer core and other readouts during fine-tune.
+
+    Iterates only over dataloaders['train'|'valid'][target_session].
+    Returns (best_score, best_weights, val_scores) as in bat_former_trainer.
+    """
+    model = model.to(device)
+    loss_fn = loss_fn.to(device)
+
+    target_params = list(model.readouts[target_session].parameters())
+    optimizer = optim.AdamW(target_params, lr=lr, weight_decay=weight_decay)
+    if use_cosine_scheduler:
+        if n_warmup is None:
+            n_warmup = int(0.1 * n_epochs)
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=n_warmup,
+            num_training_steps=n_epochs,
+            num_cycles=1.5,
+        )
+
+    best_score = -np.inf
+    best_weights = None
+    val_scores = []
+    epochs_without_improvement = 0
+
+    train_loader = dataloaders['train'][target_session]
+    valid_loader = dataloaders['valid'][target_session]
+
+    for epoch in tqdm.tqdm(range(n_epochs), desc=f"Finetune[{target_session}]"):
+        model.eval()
+        model.readouts[target_session].train()
+        for batch in train_loader:
+            X_batch = batch.behavior.to(device)
+            y_batch = batch.spike.to(device)
+            mask_batch = batch.mask.to(device)
+            y_pred = model(
+                target_session,
+                X_batch,
+                mask_batch,
+                is_causal=is_causal,
+                is_bigbird=is_bigbird,
+                attention_window_size=attention_window_size,
+                num_global=num_global,
+                num_random=num_random,
+            )
+            loss = loss_fn(y_pred[mask_batch == 1.0], y_batch[mask_batch == 1.0])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if use_cosine_scheduler:
+                scheduler.step()
+
+        model.eval()
+        y_val_np_list, y_pred_np_list = [], []
+        for batch in valid_loader:
+            X_val = batch.behavior.to(device)
+            y_val = batch.spike.to(device)
+            mask_val = batch.mask.to(device)
+            y_pred = model(
+                target_session,
+                X_val,
+                mask_val,
+                is_causal=is_causal,
+                is_bigbird=is_bigbird,
+                attention_window_size=attention_window_size,
+                num_global=num_global,
+                num_random=num_random,
+            )
+            y_val_np_list.append(y_val.detach()[mask_val == 1.0].cpu().numpy())
+            y_pred_np_list.append(y_pred.detach()[mask_val == 1.0].cpu().numpy())
+        y_val_np = np.vstack(y_val_np_list)
+        y_pred_np = np.vstack(y_pred_np_list)
+        temp_scores = valid_fn(y_val_np, y_pred_np)
+        if valid_stat == 'mean':
+            val_score = np.nanmean(temp_scores)
+        elif valid_stat == 'median':
+            val_score = np.nanmedian(temp_scores)
+        val_scores.append(val_score)
+        if val_score > best_score:
+            best_score = val_score
+            best_weights = copy.deepcopy(model.state_dict())
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
+                print(f"Early stopping at epoch {epoch + 1} (no improvement for {early_stopping_patience} epochs)")
+                break
+
+    if save_model:
+        torch.save(model.state_dict(), model_name)
+    if best_weights is not None:
+        model.load_state_dict(best_weights)
     return best_score, best_weights, val_scores
