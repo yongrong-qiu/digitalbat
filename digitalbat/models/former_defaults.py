@@ -17,30 +17,9 @@ DEFAULT_LR = 0.01
 DEFAULT_WEIGHT_DECAY = 0.01
 
 
-def make_model_config(behavior_dim, unit_num_dict, meta_info_dict, session_to_room=None,
-                      room_embed_mode=None, session_to_readout=None, **overrides):
-    """Return the standard ``model_config`` dict for ``Bat_Transformer``.
-
-    Pass ``session_to_room`` (``{session_name: room_label}``) to give each
-    environment its own trajectory projection (``embed_traj``); ``None`` (default)
-    keeps the single shared projection.
-
-    ``room_embed_mode`` ('segment' | 'token' | 'film' | None) instead injects a
-    learnable per-room embedding into a *shared* ``embed_traj`` (requires
-    ``session_to_room``): 'segment' adds it to every timestep, 'token' prepends it
-    as an extra transformer token, 'film' uses it to generate per-block
-    feature-wise (gamma, beta) modulation. ``None`` (default) uses no room embedding.
-
-    ``session_to_readout`` (``{session_name: readout_key}``) ties sessions that
-    share a key to one readout head (matched neurons across configurations);
-    ``None`` (default) gives every session its own readout.
-
-    ``**overrides`` replace any default config entry (e.g. an Optuna-searched
-    architecture: ``latent_dim``, ``ff_dim``, ``num_layers``, ``dropout_prob``);
-    only keys already present in the config are accepted, so a stray hyperparameter
-    name raises rather than silently building the wrong model.
-    """
-    config = dict(
+def make_model_config(behavior_dim, unit_num_dict, meta_info_dict):
+    """Return the standard ``model_config`` dict for ``Bat_Transformer``."""
+    return dict(
         input_dim=behavior_dim,
         output_dim_dict=unit_num_dict,
         use_place_as_input=False,
@@ -53,15 +32,7 @@ def make_model_config(behavior_dim, unit_num_dict, meta_info_dict, session_to_ro
         num_layers=1,
         dropout_prob=0.3,
         final_activation=ELU1(),
-        session_to_room=session_to_room,
-        room_embed_mode=room_embed_mode,
-        session_to_readout=session_to_readout,
     )
-    unknown = set(overrides) - set(config)
-    if unknown:
-        raise ValueError(f'make_model_config got unknown override(s): {sorted(unknown)}')
-    config.update(overrides)
-    return config
 
 
 def make_bat_former(behavior_dim, unit_num_dict, meta_info_dict):

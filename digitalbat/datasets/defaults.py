@@ -9,7 +9,7 @@ sessions (e.g., ``investigate_similar_trajectories``) still pass an explicit
 DEFAULT_PARENT_FOLDER = '/mnt/s5/Adam/Angelo/NP_datasets/'
 
 DEFAULT_SESSION_NAMES = [
-    # 'Dataset_3_14543_240419',
+    'Dataset_3_14543_240419',
     'Dataset_3_14543_240420',
     'Dataset_3_14543_240421',
     'Dataset_3_29959_240402',
@@ -29,42 +29,9 @@ DEFAULT_SESSION_NAMES = [
     'Dataset_3_29959_240405',
 ]
 
-# Krishna sessions with ciholas behaviour, two bats (11719, 14753).  We keep the
-# days/envs that carry usable flight recordings:
-#   11719 250812 -> solo_morning -> fs -> social_evening -> solo_evening  (4 envs, shared sort)
-#   11719 250813 -> solo_morning                                          (1 env; > 10 min recording)
-#   11719 250814 -> solo_morning, fs_s2                                   (2 envs, shared sort)
-#   14753 260122 -> fs                                                    (1 env; lab/lab2 dropped, see below)
-#   14753 260123 -> lab, fs                                               (2 envs, shared sort)
-# Within each multi-env day the units share one concat sort (identical
-# cluster_ids), so cross-environment comparisons stay strictly within a day.
-# Single-environment days (11719 250813, 14753 260122) add a readout head /
-# per-session row but no within-day cross-environment pair.
-KRISHNA_SESSION_NAMES = [
-    'Dataset_Krishna_11719_250812_solo_morning',
-    'Dataset_Krishna_11719_250812_fs',
-    'Dataset_Krishna_11719_250812_social_evening',
-    'Dataset_Krishna_11719_250812_solo_evening',
-    'Dataset_Krishna_11719_250813_solo_morning',
-    'Dataset_Krishna_11719_250814_solo_morning',
-    'Dataset_Krishna_11719_250814_fs_s2',
-    # 'Dataset_Krishna_14753_260122_fs',
-    # 'Dataset_Krishna_14753_260123_lab',
-    # 'Dataset_Krishna_14753_260123_fs'
-]
-# 260122_lab (2 flights) and 260122_lab2 (5 flights) are excluded: the lab arena
-# yields too few flight bouts to form a non-empty random valid split
-# (int(n*0.15) == 0 for n <= 6), which crashes bat_data_loader.
-
-# Full joint-fit session list: the 18 canonical Dataset 1-3 sessions plus the
-# 10 Krishna sessions (7 bat-11719, 3 bat-14753).  The analysis notebooks (preprocess-data-v0j,
-# model_comparison, decode-position-comparison) pass this explicitly so they
-# share one split; other notebooks default to DEFAULT_SESSION_NAMES.
-ALL_SESSION_NAMES = list(DEFAULT_SESSION_NAMES) + list(KRISHNA_SESSION_NAMES)
-
 
 def make_data_config(session_names=None, parent_folder=DEFAULT_PARENT_FOLDER,
-                     max_acceleration=50):
+                     max_acceleration=50.0):
     """Return the standard ``data_config`` dict for ``bat_data_loader``."""
     if session_names is None:
         session_names = list(DEFAULT_SESSION_NAMES)

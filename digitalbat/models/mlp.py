@@ -26,8 +26,7 @@ class MLP(nn.Module):
         Activation function applied after the output layer (e.g., nn.Identity()).
 
     use_fourier : bool
-        Whether to apply Fourier features to position inputs (the first three input
-        dimensions, indices 0–2).
+        Whether to apply Fourier features to position inputs (dimensions 1–3).
 
     fourier_features_dim : int
         Number of Fourier frequencies for each positional input dimension.
@@ -56,7 +55,7 @@ class MLP(nn.Module):
         # Number of Fourier features added per input dimension
         fourier_expand = 2 * fourier_features_dim if use_fourier else 0
 
-        # First three dims, indices 0-2 (positions) → add Fourier features
+        # Dimensions 1-3 (positions) → add Fourier features
         num_fourier_input_dims = 3 if use_fourier else 0
         self.total_fourier_dim = num_fourier_input_dims * fourier_expand
 
