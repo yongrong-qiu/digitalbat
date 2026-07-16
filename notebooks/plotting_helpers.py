@@ -401,18 +401,53 @@ def _star_brackets(ax, order, pvals, ref, *, show_ns=False, base=1.02, step=0.09
                     base=base + lvl * step, show_ns=show_ns, star_gap=star_gap)
 
 
+def pooled_ptable(unit_df, value_col, order, ref, id_cols, *, model_col='model',
+                  higher_is_better=True):
+    """Pooled per-unit paired Wilcoxon signed-rank of every model vs `ref`.
+
+    Pairs rows on `id_cols` (e.g. ['session','flight_id'] or ['session','unit']) so
+    each physical unit contributes one matched (model, ref) observation, then runs a
+    two-sided signed-rank across all pooled units. Returns a DataFrame (one row per
+    model) with the same columns as compare_models_fig's session table — model, vs,
+    n, median_diff, p — so it can be printed with `p_table` or turned into a
+    `{model: p}` dict for compare_models_fig's `unit_pvals`. NB: pooling every unit
+    inflates n and makes these tests anticonservative relative to the session-level
+    test; use it to star the per-unit panel, not as the primary inference.
+    """
+    wide = unit_df.pivot_table(index=id_cols, columns=model_col, values=value_col,
+                               observed=True)
+    recs = []
+    for m in order:
+        if m == ref or m not in wide or ref not in wide:
+            continue
+        pair = wide[[m, ref]].dropna()
+        if len(pair) < 3:
+            continue
+        d = (pair[ref] - pair[m]) if higher_is_better else (pair[m] - pair[ref])
+        recs.append(dict(model=m, vs=ref, n=int(len(pair)), median_diff=float(d.median()),
+                         p=float(stats.wilcoxon(pair[m], pair[ref],
+                                                alternative='two-sided').pvalue)))
+    return pd.DataFrame(recs)
+
+
 def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
                        ylabel='', unit_ylabel=None, unit_name='neuron',
                        session_col='session', model_col='model', agg='median',
                        clip=None, sess_ylim=None, palette=None, zero_line=False,
                        higher_is_better=True, figsize=None, axes=None,
-                       star_style='row', star_kw=None, show_titles=True, title_y=1.0,
+                       star_style='row', star_kw=None, unit_pvals=None, unit_id_cols=None,
+                       show_titles=True, title_y=1.0,
                        show_xticklabels=True, show_sess_ylabel=True, show_unit_ylabel=True):
     """Two-panel model comparison in the unified style.
 
     Left: per-session aggregate (`agg`) as a grey boxplot with per-session points
     coloured by bat; 3-tier stars mark session-level Wilcoxon signed-rank vs
-    `ref`. Right: the per-unit distribution (boxplot). `clip=(lo,hi)` bounds the
+    `ref`. Right: the per-unit distribution (boxplot). Pass `unit_pvals`
+    (`{model: p}`), or `unit_id_cols` (e.g. ['session','flight_id']) to compute one
+    via `pooled_ptable`, to star the right panel with a *different* test appropriate
+    to the pooled per-unit distribution shown there (per-flight / per-neuron
+    Wilcoxon); when both are omitted the right panel repeats the session-level stars.
+    `clip=(lo,hi)` bounds the
     *axes* only (e.g. FDE to [-1,1]); raw values drive the stats. `sess_ylim=(lo,hi)`
     overrides the left (session) panel's ylim (applied before the stars are placed,
     so they stay on-axis); the right panel keeps `clip`. Pass `axes=(ax_sess, ax_unit)`
@@ -451,6 +486,11 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
             recs.append(dict(model=m, vs=ref, n=len(pair), median_diff=float(d.median()),
                              p=pvals[m]))
 
+    if unit_pvals is None and unit_id_cols is not None:   # per-unit stars for the right panel
+        _upt = pooled_ptable(unit_df, value_col, order, ref, unit_id_cols,
+                             model_col=model_col, higher_is_better=higher_is_better)
+        unit_pvals = dict(zip(_upt['model'], _upt['p']))
+
     if axes is not None:
         axs, axu = axes; fig = axs.figure          # draw onto a shared canvas
     else:
@@ -478,10 +518,11 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
             ax.set_xticklabels([labels[m] for m in order], rotation=35, ha='right')
         else:
             ax.set_xticklabels([])
+        _pv = pvals if (is_sess or unit_pvals is None) else unit_pvals
         if star_style == 'bracket' and ref in order:
-            _star_brackets(ax, order, pvals, ref, **(star_kw or {}))
+            _star_brackets(ax, order, _pv, ref, **(star_kw or {}))
         else:
-            _star_row(ax, order, pvals)
+            _star_row(ax, order, _pv)
         sns.despine(ax=ax)
     if show_titles:
         axs.set_title('session ' + agg + 's', y=title_y)
