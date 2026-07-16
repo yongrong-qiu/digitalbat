@@ -1,3 +1,4 @@
+import random as _stdlib_random
 import numpy as np
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.interpolate import interp1d
@@ -16,7 +17,6 @@ import pandas as pd
 from scipy.spatial.distance import pdist, squareform
 from sklearn.feature_selection import mutual_info_regression
 from scipy.stats import pearsonr, wasserstein_distance
-import ot
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.metrics import r2_score
@@ -33,14 +33,16 @@ from typing import Tuple, Union, Callable
 def bat_palette(palette='tab10'):
     """Return a `{bat_id: rgb}` dict in canonical project order.
 
-    Bats are extracted from `DEFAULT_SESSION_NAMES` (third underscore-split
-    token).  Pass into seaborn via `palette=bat_palette()` with `hue='bat'`
-    to keep colors consistent across notebooks/figures.
+    Bats are extracted from `ALL_SESSION_NAMES` (third underscore-split token),
+    so the Krishna bat (11719) is covered alongside the Dataset 1-3 bats.  The
+    canonical Dataset 1-3 bats come first and keep their colors regardless of the
+    Krishna sessions.  Pass into seaborn via `palette=bat_palette()` with
+    `hue='bat'` to keep colors consistent across notebooks/figures.
     """
     import seaborn as sns
-    from ..datasets.defaults import DEFAULT_SESSION_NAMES
+    from ..datasets.defaults import ALL_SESSION_NAMES
     seen = []
-    for s in DEFAULT_SESSION_NAMES:
+    for s in ALL_SESSION_NAMES:
         b = s.split('_')[2]
         if b not in seen:
             seen.append(b)
@@ -2090,6 +2092,7 @@ class BatRateMapSim:
         grid_coords = np.array(np.meshgrid(np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), indexing='ij')).reshape(3, -1).T
         # Compute the pairwise Euclidean distance matrix between all 8000 bins (20x20x20)
         # This represents the actual "metric distance space" for the transport cost
+        import ot  # lazy: optional POT dependency
         M_cost = ot.dist(grid_coords, grid_coords, metric='euclidean')
         def wasserstein_metric(m1, m2):
             # If either map belongs to an inactive neuron for this cluster, return NaN
@@ -2284,6 +2287,7 @@ class BatRateMapSim:
                 if len(maps_list) > 1:
                     # Re-using your exact Wasserstein distane logic
                     grid_coords = np.array(np.meshgrid(np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), indexing='ij')).reshape(3, -1).T
+                    import ot  # lazy: optional POT dependency
                     M_cost = ot.dist(grid_coords, grid_coords, metric='euclidean')
                     def wasserstein_metric(m1, m2):
                         if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
@@ -3864,3 +3868,39 @@ def plot_bottleneck_single_neuron(session_name, all_session, detailed_session_da
 
     return None
 
+
+def round_robin_session_batches(loaders, rng=None):
+    """Yield `(session_name, batch)` from per-session DataLoaders, interleaved.
+
+    Each session contributes its own per-epoch worth of batches, but the order
+    of (session → batch) draws is uniformly random over the still-active set.
+    Compared to draining each session sequentially, this:
+      - keeps Adam's running m/v reflective of the joint multi-session
+        gradient distribution (no end-of-epoch momentum bias toward the last
+        session trained),
+      - avoids stale per-session readin parameters (`Bat_Transformer.readouts`,
+        `Bat_Transformer_Decoder.readins`, `PerceiverIOTrajectoryDecoder.neuron_embeds`),
+        since every session's parameter is re-touched throughout the epoch
+        alongside an up-to-date shared backbone.
+
+    Parameters
+    ----------
+    loaders : Mapping[str, DataLoader]
+        Per-session loaders. A one-key mapping (`{None: loader}`) degenerates
+        to plain in-order iteration of that single loader.
+    rng : random.Random | None
+        Seedable RNG for the session draws. If None, a fresh one is created
+        seeded from torch's current RNG state — so callers who set
+        `torch.manual_seed` upstream still get reproducible orderings.
+    """
+    if rng is None:
+        seed = int(torch.randint(0, 2 ** 31, (1,)).item())
+        rng = _stdlib_random.Random(seed)
+    iters = {sn: iter(loader) for sn, loader in loaders.items()}
+    active = list(iters.keys())
+    while active:
+        sn = rng.choice(active) if len(active) > 1 else active[0]
+        try:
+            yield sn, next(iters[sn])
+        except StopIteration:
+            active.remove(sn)
