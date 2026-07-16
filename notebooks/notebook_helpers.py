@@ -955,7 +955,8 @@ def select_dual_field_cells(flights, n_neurons, dt, r_lim,
 
 def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
                          title='', peaks=None, rate_cmap='viridis',
-                         spike_color='red', axes3d=None, col_title_fs=13, row_label_fs=12):
+                         spike_color='red', axes3d=None, col_title_fs=13, row_label_fs=12,
+                         row_labels=None):
     """Draw the spikes / empirical-rate / predicted-rate triptych for one neuron
     on two flight clusters, in 3D and in x-y projection.
 
@@ -1042,15 +1043,15 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
         ax.set_xlim(xlim); ax.set_ylim(ylim)
         if three_d:
             ax.set_zlim(zlim)
-            ax.set_xlabel('x'); ax.set_ylabel('y'); ax.set_zlabel('z')
+            ax.set_xlabel('x (m)'); ax.set_ylabel('y (m)'); ax.set_zlabel('z (m)')
             ax.view_init(elev=22, azim=-68)
         else:
             ax.set_aspect('equal', adjustable='box')
-            ax.set_xlabel('x')
+            ax.set_xlabel('x (m)')
 
     def _populate(axes, three_d):
         for ci, c in enumerate(clusters):
-            row_label = f'cluster {c}'
+            row_label = row_labels[ci] if row_labels is not None else f'cluster {c}'
             for col, mode in enumerate(('spikes', 'emp', 'pred')):
                 ax = axes[ci, col]
                 _draw(ax, data[c], mode, three_d)
