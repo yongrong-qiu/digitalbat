@@ -1043,6 +1043,7 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
         ax.set_xlim(xlim); ax.set_ylim(ylim)
         if three_d:
             ax.set_zlim(zlim)
+            ax.set_box_aspect([max(lim[1] - lim[0], 1e-3) for lim in (xlim, ylim, zlim)])  # 1 m equal on x/y/z
             ax.set_xlabel('x (m)'); ax.set_ylabel('y (m)'); ax.set_zlabel('z (m)')
             ax.view_init(elev=22, azim=-68)
         else:
