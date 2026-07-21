@@ -537,7 +537,8 @@ class GLM_Coupled(nn.Module):
     def __init__(self, output_dim_dict, n_bases_per_dim=16, pos_range=(-3.0, 3.0),
                  width_to_spacing_ratio=4, activation='exp', bin_width=0.1,
                  hist_basis=None, coup_basis=None, acausal_basis=None,
-                 n_lags=None, cluster_keys=None, n_bases_per_axis=None):
+                 n_lags=None, cluster_keys=None, n_bases_per_axis=None,
+                 lag_seconds=None):
         super().__init__()
         # Symmetric n_bases_per_dim per axis unless n_bases_per_axis=(nx,ny,nz) is
         # given (anisotropic place basis, e.g. fewer z bases for a shorter room).
@@ -545,6 +546,14 @@ class GLM_Coupled(nn.Module):
                                              pos_range, width_to_spacing_ratio)
         self.n_bases_per_dim = n_bases_per_dim
         self.bin_width = bin_width
+        # Optional SPATIAL time-lags: the design at each t concatenates the place
+        # basis evaluated at time-lagged positions (zero-padded at edges). Default
+        # [0.0] = position-only (unchanged). With cluster_keys this yields a
+        # per-cluster "GLM + lags" (trajectory), cheap under a coarse place basis.
+        if lag_seconds is None:
+            lag_seconds = [0.0]
+        self.spatial_lag_bins = [int(round(s / bin_width)) for s in lag_seconds]
+        readout_in = self.n_spatial * len(self.spatial_lag_bins)
 
         if activation == 'exp':
             self.final_activation = torch.exp
@@ -561,7 +570,7 @@ class GLM_Coupled(nn.Module):
         self.joint = cluster_keys is not None
         if not self.joint:
             self.readouts = nn.ModuleDict({
-                s: nn.Linear(self.n_spatial, u) for s, u in output_dim_dict.items()})
+                s: nn.Linear(readout_in, u) for s, u in output_dim_dict.items()})
             self.cluster_keys = None
         else:
             self.cluster_keys = {}
@@ -572,7 +581,7 @@ class GLM_Coupled(nn.Module):
                     keys.append(_OTHER_CLUSTER_KEY)
                 self.cluster_keys[s] = keys
                 readout_dict[s] = nn.ModuleDict({
-                    k: nn.Linear(self.n_spatial, u) for k in keys})
+                    k: nn.Linear(readout_in, u) for k in keys})
             self.readouts = nn.ModuleDict(readout_dict)
 
         # ---- Temporal filters
@@ -600,10 +609,23 @@ class GLM_Coupled(nn.Module):
         return _eval_place_basis(self, xyz)  # (N, T, K^3) or (N, T, nx*ny*nz)
 
     def _make_design(self, x, mask=None):
-        design = self._spatial_basis(x)
+        spatial = self._spatial_basis(x)
         if mask is not None:
-            design = design * mask.unsqueeze(-1)
-        return design
+            spatial = spatial * mask.unsqueeze(-1)   # zero padded bins before shifting
+        if len(self.spatial_lag_bins) == 1 and self.spatial_lag_bins[0] == 0:
+            return spatial                            # position-only (no lags)
+        N, T, K = spatial.shape
+        lagged = []
+        for lag in self.spatial_lag_bins:
+            if lag == 0:
+                lagged.append(spatial)
+            elif lag > 0:
+                pad = spatial.new_zeros(N, lag, K)
+                lagged.append(torch.cat([spatial[:, lag:, :], pad], dim=1))
+            else:
+                pad = spatial.new_zeros(N, -lag, K)
+                lagged.append(torch.cat([pad, spatial[:, :T + lag, :]], dim=1))
+        return torch.cat(lagged, dim=-1)              # (N, T, K * n_lags)
 
     def _lagged_stack(self, spike, n_lags_total):
         # spike (N,T,U) -> S (N,T,U,n_lags_total) with S[...,l] = spike[t-l]
