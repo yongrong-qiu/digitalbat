@@ -89,6 +89,15 @@ GLM_SYNTH_PATIENCE = 20
 # GLM basis config.
 HIST_N_BASIS, COUP_N_BASIS, N_LAGS, BIN_WIDTH = 6, 4, 10, 0.10
 
+# Searched anisotropic place-basis resolutions (fewer z bases; nz reduced ∝ room
+# z-extent), matching the `_acc50_zbasis17` encoder checkpoints. Selected per family
+# by the val-FDE grid search in tmp/train_glm_flight_ladder.py — coarse bases
+# generalise much better than the old fixed 16^3. Place (session-shared readout) and
+# trajectory (per-cluster readouts) have their own optimal resolution.
+GLM_PLACE_RES = (6, 6, 3)   # GLM (place) 3-D cosine basis
+GLM_TRAJ_RES = (4, 4, 2)    # GLM (trajectory / joint) per-cluster 3-D cosine basis
+GLM_CKPT_TAG = '_acc50_zbasis17'
+
 # Each row is (warp, permute, time_shuffle, name).
 SHUFFLE_CONFIGS = [
     (False, False, False, 'real'),
@@ -689,13 +698,17 @@ def make_glm_bases(bin_width):
 
 def make_glm_encoders(unit_num_dict, glm_common, glm_hist_basis, glm_coup_basis,
                       coup_only_basis, N_LAGS, ckpt_map, device, dataloaders,
-                      meta_info_dict):
+                      meta_info_dict, joint_common=None):
     """Load glm_hist_coup + glm_coup + glm_joint and build ablation dicts +
     joint clustering.  Returns everything the GLM fit-eval closures need.
 
     `ckpt_map`: {'glm_map': path, 'glm_coup': path, 'glm_joint': path}.
     `coup_only_basis`: the coupling basis for glm_coup (== glm_coup_basis).
+    `glm_common` sets the PLACE (session-shared) encoders' spatial basis;
+    `joint_common` (defaults to `glm_common`) sets the TRAJECTORY (per-cluster)
+    encoders' basis — they can use different searched resolutions.
     """
+    joint_common = joint_common if joint_common is not None else glm_common
     # --- glm_hist_coup --------------------------------------------------------
     GLM_MAP_CKPT = ckpt_map['glm_map']
     assert os.path.exists(GLM_MAP_CKPT), f'Missing GLM checkpoint {GLM_MAP_CKPT}.'
@@ -756,7 +769,7 @@ def make_glm_encoders(unit_num_dict, glm_common, glm_hist_basis, glm_coup_basis,
     GLM_JOINT_CKPT = ckpt_map['glm_joint']
     assert os.path.exists(GLM_JOINT_CKPT), f'Missing GLM checkpoint {GLM_JOINT_CKPT}.'
     glm_joint = GLM_Coupled(
-        output_dim_dict=unit_num_dict, **glm_common,
+        output_dim_dict=unit_num_dict, **joint_common,
         cluster_keys=cluster_keys_joint)                     # NO temporal filters
     _jmiss, _junexp = glm_joint.load_state_dict(
         torch.load(GLM_JOINT_CKPT, map_location=device), strict=False)
@@ -774,7 +787,7 @@ def make_glm_encoders(unit_num_dict, glm_common, glm_hist_basis, glm_coup_basis,
     HC_JOINT_CKPT = ckpt_map.get('glm_hist_coup_joint')
     if HC_JOINT_CKPT and os.path.exists(HC_JOINT_CKPT):
         glm_hist_coup_joint = GLM_Coupled(
-            output_dim_dict=unit_num_dict, **glm_common,
+            output_dim_dict=unit_num_dict, **joint_common,
             hist_basis=glm_hist_basis, coup_basis=glm_coup_basis, n_lags=N_LAGS,
             cluster_keys=cluster_keys_joint)
         _hjmiss, _hjunexp = glm_hist_coup_joint.load_state_dict(
@@ -1778,17 +1791,22 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
         out_dir, seed)
 
     # 5. GLM bases + encoders + ablations + joint clustering + loader->mode map.
+    # PLACE and TRAJECTORY GLMs use their own searched anisotropic resolution (fewer
+    # z); `n_bases_per_axis` overrides the base dict's `n_bases_per_dim`.
     glm_hist_basis, glm_coup_basis, glm_common = make_glm_bases(dt)
+    place_common = {**glm_common, 'n_bases_per_axis': GLM_PLACE_RES}
+    joint_common = {**glm_common, 'n_bases_per_axis': GLM_TRAJ_RES}
     glm = make_glm_encoders(
-        unit_num_dict, glm_common, glm_hist_basis, glm_coup_basis,
+        unit_num_dict, place_common, glm_hist_basis, glm_coup_basis,
         coup_only_basis=glm_coup_basis, N_LAGS=N_LAGS,
         ckpt_map={
-            'glm_map':   f'{out_dir}/bat_glm/bat_glm_hist_coup_position_seed_1_optuna_acc50_default17.pth',
-            'glm_coup':  f'{out_dir}/bat_glm/bat_glm_coup_position_seed_1_optuna_acc50_default17.pth',
-            'glm_joint': f'{out_dir}/bat_glm/bat_glm_joint_seed_1_optuna_acc50_default17.pth',
-            'glm_hist_coup_joint': f'{out_dir}/bat_glm/bat_glm_hist_coup_joint_seed_1_optuna_acc50_default17.pth',
+            'glm_map':   f'{out_dir}/bat_glm/bat_glm_hist_coup_position_seed_1_optuna{GLM_CKPT_TAG}.pth',
+            'glm_coup':  f'{out_dir}/bat_glm/bat_glm_coup_position_seed_1_optuna{GLM_CKPT_TAG}.pth',
+            'glm_joint': f'{out_dir}/bat_glm/bat_glm_joint_seed_1_optuna{GLM_CKPT_TAG}.pth',
+            'glm_hist_coup_joint': f'{out_dir}/bat_glm/bat_glm_hist_coup_joint_seed_1_optuna{GLM_CKPT_TAG}.pth',
         },
-        device=device, dataloaders=dataloaders, meta_info_dict=meta_info_dict)
+        device=device, dataloaders=dataloaders, meta_info_dict=meta_info_dict,
+        joint_common=joint_common)
 
     # `_loader_to_mode` maps each per-mode TRAIN DataLoader id -> its mode, so
     # the fit-eval closures can pick the matching ablated encoder / synth path.
@@ -1808,15 +1826,15 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
     glm_map_fit_eval = make_glm_map_fit_eval(
         full_encoder=glm['glm_hist_coup'], enc_by_mode=glm['glm_encoders_by_mode'],
         loader_to_mode=loader_to_mode, device=device, dt=dt,
-        nb_best=nb_best, nb_cont_best=nb_cont_best, glm_common=glm_common,
+        nb_best=nb_best, nb_cont_best=nb_cont_best, glm_common=place_common,
         synth_dir=synth_dir, synth_sampling=synth_sampling)
     glm_map_coup_fit_eval = make_glm_map_fit_eval(
         full_encoder=glm['glm_coup'], enc_by_mode=glm['glm_coup_encoders_by_mode'],
         loader_to_mode=loader_to_mode, device=device, dt=dt,
-        nb_best=nb_best, nb_cont_best=nb_cont_best, glm_common=glm_common,
+        nb_best=nb_best, nb_cont_best=nb_cont_best, glm_common=place_common,
         synth_dir=synth_dir, synth_sampling=synth_sampling, skip_synth=True)
     glm_map_joint_fit_eval = make_glm_map_joint_fit_eval(
-        glm_joint=glm['glm_joint'], glm_common=glm_common, device=device, dt=dt,
+        glm_joint=glm['glm_joint'], glm_common=joint_common, device=device, dt=dt,
         nb_best=nb_best, nb_cont_best=nb_cont_best,
         flight_cluster_joint=glm['flight_cluster_joint'],
         loader_to_mode=loader_to_mode, synth_dir=synth_dir,
@@ -1837,7 +1855,7 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
         glm_map_joint_hc_fit_eval = make_glm_map_joint_hc_fit_eval(
             glm_hc_joint=glm['glm_hist_coup_joint'],
             enc_by_mode=glm['glm_hist_coup_joint_encoders_by_mode'],
-            glm_common=glm_common, device=device, dt=dt,
+            glm_common=joint_common, device=device, dt=dt,
             nb_best=nb_best, nb_cont_best=nb_cont_best,
             flight_cluster_joint=glm['flight_cluster_joint'],
             loader_to_mode=loader_to_mode, synth_dir=synth_dir,
