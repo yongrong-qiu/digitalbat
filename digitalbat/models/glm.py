@@ -117,6 +117,75 @@ def spatial_cosine_basis(xyz, centers, width):
     return bases.flatten(-3)
 
 
+def peraxis_cosine_basis_params(n_per_axis, pos_range=(-3.0, 3.0),
+                                width_to_spacing_ratio=4):
+    """Per-axis analogue of :func:`cosine_basis_params`.
+
+    ``n_per_axis`` is an int (symmetric ``n`` per axis, identical to
+    :func:`cosine_basis_params`) or a 3-tuple ``(nx, ny, nz)``.  Returns
+    ``(centers_list, widths)`` where ``centers_list`` is a list of 3 1-D tensors
+    (one per axis) and ``widths`` a list of 3 floats.  Used for the anisotropic
+    place basis (e.g. fewer z bases when the room's z-extent is shorter)."""
+    if isinstance(n_per_axis, (int, np.integer)):
+        n_per_axis = (int(n_per_axis),) * 3
+    centers, widths = [], []
+    for n in n_per_axis:
+        c = torch.linspace(pos_range[0], pos_range[1], int(n))
+        spacing = (pos_range[1] - pos_range[0]) / (int(n) - 1)
+        centers.append(c)
+        widths.append(width_to_spacing_ratio * spacing)
+    return centers, widths
+
+
+def peraxis_spatial_cosine_basis(xyz, centers_list, widths):
+    """3D tensor-product raised-cosine basis with a SEPARATE centre grid + width per
+    axis (anisotropic).  ``centers_list`` = 3 tensors, ``widths`` = 3 floats.  Maps
+    ``(..., >=3)`` z-scored positions -> ``(..., nx*ny*nz)``.  Reduces to
+    :func:`spatial_cosine_basis` when all three axes share centres/width."""
+    b = [create_cosine_bumps_torch(xyz[..., d], centers_list[d].to(xyz.device), widths[d])
+         for d in range(3)]
+    bases = (
+        b[0].unsqueeze(-1).unsqueeze(-1)
+        * b[1].unsqueeze(-2).unsqueeze(-1)
+        * b[2].unsqueeze(-2).unsqueeze(-2)
+    )
+    return bases.flatten(-3)
+
+
+def _install_place_basis(module, n_bases_per_dim, n_bases_per_axis, pos_range,
+                         width_to_spacing_ratio):
+    """Register the (possibly anisotropic) 3D place-basis buffers on ``module`` and
+    return ``n_spatial``.
+
+    Symmetric (``n_bases_per_dim`` per axis, registering ``module.centers`` /
+    ``module.width`` exactly as before) UNLESS ``n_bases_per_axis`` (int or 3-tuple
+    ``(nx, ny, nz)``) is given, in which case per-axis centre grids are registered
+    as ``module.centers_0/1/2`` with ``module.place_widths``.  Pairs with
+    :func:`_eval_place_basis`."""
+    if n_bases_per_axis is not None:
+        centers_list, widths = peraxis_cosine_basis_params(
+            n_bases_per_axis, pos_range, width_to_spacing_ratio)
+        for d, c in enumerate(centers_list):
+            module.register_buffer(f'centers_{d}', c)
+        module.place_widths = [float(w) for w in widths]
+        module._peraxis = True
+        return int(np.prod([len(c) for c in centers_list]))
+    centers = torch.linspace(pos_range[0], pos_range[1], n_bases_per_dim)
+    spacing = (pos_range[1] - pos_range[0]) / (n_bases_per_dim - 1)
+    module.register_buffer('centers', centers)
+    module.width = width_to_spacing_ratio * spacing
+    module._peraxis = False
+    return n_bases_per_dim ** 3
+
+
+def _eval_place_basis(module, xyz):
+    """Evaluate the 3D place basis installed by :func:`_install_place_basis`."""
+    if getattr(module, '_peraxis', False):
+        cl = [getattr(module, f'centers_{d}') for d in range(3)]
+        return peraxis_spatial_cosine_basis(xyz, cl, module.place_widths)
+    return spatial_cosine_basis(xyz, module.centers, module.width)
+
+
 class GLM_3DCosineBasis(nn.Module):
     """3D tensor-product cosine basis expansion + session-wise linear GLM.
 
@@ -142,6 +211,7 @@ class GLM_3DCosineBasis(nn.Module):
         activation='exp',
         lag_seconds=None,
         bin_width=0.1,
+        n_bases_per_axis=None,
     ):
         super().__init__()
         if lag_seconds is None:
@@ -149,13 +219,12 @@ class GLM_3DCosineBasis(nn.Module):
         self.lag_bins = [int(round(s / bin_width)) for s in lag_seconds]
         n_lags = len(self.lag_bins)
 
-        centers = torch.linspace(pos_range[0], pos_range[1], n_bases_per_dim)
-        spacing = (pos_range[1] - pos_range[0]) / (n_bases_per_dim - 1)
-        self.register_buffer('centers', centers)
-        self.width = width_to_spacing_ratio * spacing
+        # Symmetric n_bases_per_dim per axis unless n_bases_per_axis=(nx,ny,nz) is
+        # given (anisotropic place basis, e.g. fewer z bases for a shorter room).
+        n_spatial = _install_place_basis(self, n_bases_per_dim, n_bases_per_axis,
+                                         pos_range, width_to_spacing_ratio)
         self.n_bases_per_dim = n_bases_per_dim
 
-        n_spatial = n_bases_per_dim ** 3
         self.glm = Bat_GLM(
             input_dim=n_spatial * n_lags,
             output_dim_dict=output_dim_dict,
@@ -168,7 +237,7 @@ class GLM_3DCosineBasis(nn.Module):
 
     def _spatial_basis(self, xyz):
         """Compute 3D tensor-product cosine basis from (N, T, >=3) positions."""
-        return spatial_cosine_basis(xyz, self.centers, self.width)
+        return _eval_place_basis(self, xyz)
 
     def _make_design(self, x, mask=None):
         # x: (N, T, behavior_dim) — first 3 dims = x, y, z (z-scored by dataloader)
@@ -468,15 +537,14 @@ class GLM_Coupled(nn.Module):
     def __init__(self, output_dim_dict, n_bases_per_dim=16, pos_range=(-3.0, 3.0),
                  width_to_spacing_ratio=4, activation='exp', bin_width=0.1,
                  hist_basis=None, coup_basis=None, acausal_basis=None,
-                 n_lags=None, cluster_keys=None):
+                 n_lags=None, cluster_keys=None, n_bases_per_axis=None):
         super().__init__()
-        centers = torch.linspace(pos_range[0], pos_range[1], n_bases_per_dim)
-        spacing = (pos_range[1] - pos_range[0]) / (n_bases_per_dim - 1)
-        self.register_buffer('centers', centers)
-        self.width = width_to_spacing_ratio * spacing
+        # Symmetric n_bases_per_dim per axis unless n_bases_per_axis=(nx,ny,nz) is
+        # given (anisotropic place basis, e.g. fewer z bases for a shorter room).
+        self.n_spatial = _install_place_basis(self, n_bases_per_dim, n_bases_per_axis,
+                                             pos_range, width_to_spacing_ratio)
         self.n_bases_per_dim = n_bases_per_dim
         self.bin_width = bin_width
-        self.n_spatial = n_bases_per_dim ** 3
 
         if activation == 'exp':
             self.final_activation = torch.exp
@@ -529,16 +597,7 @@ class GLM_Coupled(nn.Module):
                 for s, u in output_dim_dict.items()})
 
     def _spatial_basis(self, xyz):
-        centers = self.centers.to(xyz.device)
-        b_x = create_cosine_bumps_torch(xyz[..., 0], centers, self.width)
-        b_y = create_cosine_bumps_torch(xyz[..., 1], centers, self.width)
-        b_z = create_cosine_bumps_torch(xyz[..., 2], centers, self.width)
-        bases = (
-            b_x.unsqueeze(-1).unsqueeze(-1)
-            * b_y.unsqueeze(-2).unsqueeze(-1)
-            * b_z.unsqueeze(-2).unsqueeze(-2)
-        )
-        return bases.flatten(-3)  # (N, T, K^3)
+        return _eval_place_basis(self, xyz)  # (N, T, K^3) or (N, T, nx*ny*nz)
 
     def _make_design(self, x, mask=None):
         design = self._spatial_basis(x)
@@ -592,33 +651,181 @@ class GLM_Coupled(nn.Module):
             eta[sel] = ro[k](design[sel])
         return eta
 
+    def _apply_temporal(self, eta, session_name, spike, mask):
+        """Add the Pillow-style spike-history / coupling / acausal-self filter
+        contributions to the (spatial) linear predictor ``eta``. No-op when none
+        of the temporal filters are enabled. Shared by :class:`GLM_Coupled` and
+        :class:`GLM_Flight` (which differ only in the spatial drive)."""
+        if not (self.use_hist or self.use_coup or self.use_acausal):
+            return eta
+        assert spike is not None, 'history/coupling/acausal GLM requires the spike train'
+        sp = spike.float()
+        if mask is not None:
+            sp = sp * mask.unsqueeze(-1)  # no leakage from padded bins
+        if self.use_hist or self.use_coup:
+            L_h = self.hist_basis.shape[0] if self.use_hist else 0
+            L_c = self.coup_basis.shape[0] if self.use_coup else 0
+            S = self._lagged_stack(sp, max(L_h + 1, L_c))  # (N,T,U,*); S[...,0]=current
+            if self.use_hist:
+                # strictly past: lags 1..L_h
+                hf = torch.einsum('ntul,lb->ntub', S[..., 1:1 + L_h], self.hist_basis)
+                eta = eta + (hf * self.hist_weights[session_name]).sum(-1)
+            if self.use_coup:
+                # lags 0..L_c-1 (includes the simultaneous bin; diagonal masked below)
+                cf = torch.einsum('ntul,lb->ntub', S[..., :L_c], self.coup_basis)
+                N, T, U, nc = cf.shape
+                W = self.coup_weights[session_name]
+                W = W * (1.0 - torch.eye(U, device=W.device)).unsqueeze(-1)  # drop i==j
+                eta = eta + cf.reshape(N, T, U * nc) @ W.reshape(U, U * nc).t()
+        if self.use_acausal:
+            # own past+future, lag 0 excluded by construction of the basis/stack
+            A = self._acausal_stack(sp)  # (N,T,U,2*n_lags)
+            af = torch.einsum('ntul,lb->ntub', A, self.acausal_basis)
+            eta = eta + (af * self.acausal_weights[session_name]).sum(-1)
+        return eta
+
     def forward(self, session_name, x, mask=None, spike=None,
                 cluster_idx=None, **kwargs):
         design = self._make_design(x, mask)
         eta = self._spatial_drive(session_name, design, cluster_idx)
-        if self.use_hist or self.use_coup or self.use_acausal:
-            assert spike is not None, 'history/coupling/acausal GLM requires the spike train'
-            sp = spike.float()
-            if mask is not None:
-                sp = sp * mask.unsqueeze(-1)  # no leakage from padded bins
-            if self.use_hist or self.use_coup:
-                L_h = self.hist_basis.shape[0] if self.use_hist else 0
-                L_c = self.coup_basis.shape[0] if self.use_coup else 0
-                S = self._lagged_stack(sp, max(L_h + 1, L_c))  # (N,T,U,*); S[...,0]=current
-                if self.use_hist:
-                    # strictly past: lags 1..L_h
-                    hf = torch.einsum('ntul,lb->ntub', S[..., 1:1 + L_h], self.hist_basis)
-                    eta = eta + (hf * self.hist_weights[session_name]).sum(-1)
-                if self.use_coup:
-                    # lags 0..L_c-1 (includes the simultaneous bin; diagonal masked below)
-                    cf = torch.einsum('ntul,lb->ntub', S[..., :L_c], self.coup_basis)
-                    N, T, U, nc = cf.shape
-                    W = self.coup_weights[session_name]
-                    W = W * (1.0 - torch.eye(U, device=W.device)).unsqueeze(-1)  # drop i==j
-                    eta = eta + cf.reshape(N, T, U * nc) @ W.reshape(U, U * nc).t()
-            if self.use_acausal:
-                # own past+future, lag 0 excluded by construction of the basis/stack
-                A = self._acausal_stack(sp)  # (N,T,U,2*n_lags)
-                af = torch.einsum('ntul,lb->ntub', A, self.acausal_basis)
-                eta = eta + (af * self.acausal_weights[session_name]).sum(-1)
+        eta = self._apply_temporal(eta, session_name, spike, mask)
+        return self.final_activation(eta)
+
+
+class GLM_Flight(GLM_Coupled):
+    """Trajectory GLM with a 1-D "distance-along-path" basis for clustered flights.
+
+    Like :class:`GLM_Coupled` with ``cluster_keys`` (joint / trajectory conditioning),
+    but the per-cluster place-field readout is replaced by a 1-D basis arranged ALONG
+    the flight path: each timestep's normalized cumulative arc length ``s in [0, 1]``
+    (distance travelled / total path length, computed per flight in metres after
+    un-z-scoring) is expanded with ``n_flight_bases`` raised-cosine bumps and routed to
+    that cluster's readout. Unclustered ('other') flights fall back to the standard
+    anisotropic 3-D place basis (they share no common geometry, so an along-path
+    coordinate is meaningless for them).
+
+    Spike-history / coupling / acausal temporal filters (if enabled) are identical to
+    :class:`GLM_Coupled` and shared across clusters.
+
+    Parameters
+    ----------
+    behavior_stats : dict
+        ``{session_name: (mean, std)}`` position z-score stats (>=3 dims); used to
+        un-z-score xyz to metres before computing arc length.
+    cluster_keys : dict
+        ``{session_name: [cluster_id, ...]}`` of major clusters per session (as in
+        :class:`GLM_Coupled`); an ``'other'`` readout is always added.
+    n_flight_bases : int
+        Number of 1-D raised-cosine bases along the normalized path (clustered flights).
+    n_bases_per_axis : int or (nx, ny, nz)
+        Place-basis resolution for the 'other' readout when ``other_mode='spatial'``
+        (anisotropic; e.g. fewer z).
+    other_mode : {'spatial', 'flight'}
+        How unclustered ('other') flights are encoded. ``'spatial'`` (default): a
+        3-D place basis (``n_bases_per_axis``) — 'other' flights share no geometry,
+        so this is a genuine place field. ``'flight'``: 'other' flights get their OWN
+        set of 1-D arc-length bases (``n_other_flight_bases``, default
+        ``n_flight_bases``) with their own readout — an along-path model for the
+        pooled 'other' set (captures average along-flight rate modulation with far
+        fewer parameters than a 3-D field).
+    n_other_flight_bases : int or None
+        Number of 1-D bases for the 'other' readout when ``other_mode='flight'``
+        (defaults to ``n_flight_bases``).
+    """
+    def __init__(self, output_dim_dict, behavior_stats, cluster_keys,
+                 n_flight_bases=8, s_range=(0.0, 1.0), flight_width_ratio=2.0,
+                 n_bases_per_dim=16, n_bases_per_axis=None, pos_range=(-3.0, 3.0),
+                 width_to_spacing_ratio=4, activation='exp', bin_width=0.1,
+                 hist_basis=None, coup_basis=None, acausal_basis=None, n_lags=None,
+                 other_mode='spatial', n_other_flight_bases=None):
+        assert cluster_keys is not None, 'GLM_Flight is per-cluster (joint) by design'
+        assert other_mode in ('spatial', 'flight'), other_mode
+        super().__init__(output_dim_dict, n_bases_per_dim=n_bases_per_dim,
+                         pos_range=pos_range, width_to_spacing_ratio=width_to_spacing_ratio,
+                         activation=activation, bin_width=bin_width,
+                         hist_basis=hist_basis, coup_basis=coup_basis,
+                         acausal_basis=acausal_basis, n_lags=n_lags,
+                         cluster_keys=cluster_keys, n_bases_per_axis=n_bases_per_axis)
+        self.n_place = self.n_spatial            # 'other' 3-D place basis size
+        self.n_flight_bases = n_flight_bases
+        self.other_mode = other_mode
+        # 1-D arc-length basis over normalized path fraction s in [0, 1] (clustered).
+        s_centers = torch.linspace(s_range[0], s_range[1], n_flight_bases)
+        spacing = (s_range[1] - s_range[0]) / (n_flight_bases - 1)
+        self.register_buffer('s_centers', s_centers)
+        self.s_width = float(flight_width_ratio * spacing)
+        # 'other' readout input size + (for other_mode='flight') its own 1-D basis.
+        if other_mode == 'flight':
+            n_ob = int(n_other_flight_bases or n_flight_bases)
+            oc = torch.linspace(s_range[0], s_range[1], n_ob)
+            self.register_buffer('s_other_centers', oc)
+            self.s_other_width = float(flight_width_ratio * (s_range[1] - s_range[0]) / (n_ob - 1))
+            self.n_other_flight_bases = n_ob
+            other_in = n_ob
+        else:
+            other_in = self.n_place
+        # Rebuild per-(session, cluster) readouts: clustered -> 1-D (n_flight_bases);
+        # 'other' -> 3-D place (n_place) or its own 1-D basis (other_in).
+        readout_dict = {}
+        for s, u in output_dim_dict.items():
+            keys = self.cluster_keys[s]                       # includes 'other'
+            readout_dict[s] = nn.ModuleDict({
+                k: nn.Linear(other_in if k == _OTHER_CLUSTER_KEY else n_flight_bases, u)
+                for k in keys})
+        self.readouts = nn.ModuleDict(readout_dict)
+        # Per-session z-score stats -> un-z-score xyz to metres for arc length.
+        self._session_to_idx = {}
+        for i, (s, (mean, std)) in enumerate(behavior_stats.items()):
+            self._session_to_idx[s] = i
+            m = torch.as_tensor(np.asarray(mean).reshape(-1)[:3], dtype=torch.float32)
+            sd = torch.as_tensor(np.asarray(std).reshape(-1)[:3], dtype=torch.float32)
+            self.register_buffer(f'beh_mean_{i}', m)
+            self.register_buffer(f'beh_std_{i}', sd)
+
+    def _arclength(self, x, mask, session_name):
+        """Normalized cumulative distance-along-path s in [0, 1], per flight."""
+        idx = self._session_to_idx[session_name]
+        mean = getattr(self, f'beh_mean_{idx}'); std = getattr(self, f'beh_std_{idx}')
+        xyz = x[..., :3] * std + mean                          # (N,T,3) metres
+        step = torch.linalg.norm(xyz[:, 1:] - xyz[:, :-1], dim=-1)   # (N,T-1)
+        if mask is not None:
+            step = step * (mask[:, 1:] * mask[:, :-1])          # ignore padded steps
+        s = torch.zeros_like(xyz[..., 0])                       # (N,T)
+        s[:, 1:] = torch.cumsum(step, dim=1)
+        total = s.amax(dim=1, keepdim=True).clamp_min(1e-6)     # per-flight path length
+        return (s / total).clamp(0.0, 1.0)
+
+    def _flight_spatial_drive(self, session_name, x, mask, cluster_idx):
+        """Route each flight to its cluster's 1-D readout; 'other' -> 3-D place."""
+        ro = self.readouts[session_name]
+        keys = self.cluster_keys[session_name]
+        N, T, _ = x.shape
+        units = ro[keys[0]].out_features
+        eta = x.new_zeros(N, T, units)
+        if cluster_idx is None:
+            cluster_idx = torch.full((N,), -1, dtype=torch.long, device=x.device)
+        groups = {}
+        for n, c in enumerate(cluster_idx.tolist()):
+            k = str(int(c)) if str(int(c)) in ro else _OTHER_CLUSTER_KEY
+            groups.setdefault(k, []).append(n)
+        for k, idx in groups.items():
+            sel = torch.as_tensor(idx, device=x.device)
+            xs = x[sel]
+            ms = mask[sel] if mask is not None else None
+            if k == _OTHER_CLUSTER_KEY and self.other_mode == 'spatial':
+                design = self._spatial_basis(xs)                # 3-D place (anisotropic)
+            elif k == _OTHER_CLUSTER_KEY:                       # other_mode == 'flight'
+                s = self._arclength(xs, ms, session_name)       # 'other's own 1-D basis
+                design = create_cosine_bumps_torch(s, self.s_other_centers.to(x.device), self.s_other_width)
+            else:
+                s = self._arclength(xs, ms, session_name)       # (n, T) clustered 1-D
+                design = create_cosine_bumps_torch(s, self.s_centers.to(x.device), self.s_width)
+            if ms is not None:
+                design = design * ms.unsqueeze(-1)
+            eta[sel] = ro[k](design)
+        return eta
+
+    def forward(self, session_name, x, mask=None, spike=None, cluster_idx=None, **kwargs):
+        eta = self._flight_spatial_drive(session_name, x, mask, cluster_idx)
+        eta = self._apply_temporal(eta, session_name, spike, mask)
         return self.final_activation(eta)
