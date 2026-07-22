@@ -961,6 +961,48 @@ def select_dual_field_cells(flights, n_neurons, dt, r_lim,
     return candidates[:n_top]
 
 
+def add_3d_scalebar(ax, length=1.0, corner=(0, 0, 0), color='k', lw=2.5,
+                    fontsize=15, gap=0.12, unit='m', y_nudge=(0.0, 0.0, 0.0), hide_frame=True,
+                    origin_shift=(0.0, 0.0, 0.0), alpha=1.0, z_nudge=(0.0, 0.0, 0.0)):
+    """Replace a 3-D axis's frame/ticks/labels with an x/y/z scale-bar triad:
+    three orthogonal bars of physical ``length`` from a bounding-box corner
+    (0/1 per axis = low/high limit), each labelled x/y/z, plus one
+    '<length> <unit>' note. Reads the current x/y/z limits, so call after the
+    limits and box_aspect are set."""
+    import matplotlib.patheffects as pe
+    lims = (ax.get_xlim(), ax.get_ylim(), ax.get_zlim())
+    spans = np.array([l[1] - l[0] for l in lims], float)
+    o = np.array([lims[i][corner[i]] for i in range(3)], float)
+    o = o + np.array([(-1 if corner[i] else 1) * 0.05 * spans[i] for i in range(3)])
+    o = o + np.array(origin_shift, float) * spans          # shift the whole bar (e.g. down)
+    stroke = [pe.withStroke(linewidth=3, foreground='white')]
+    for i, lab in enumerate(('x', 'y', 'z')):
+        step = np.zeros(3); step[i] = (-1 if corner[i] else 1) * length
+        end = o + step
+        ax.plot(*zip(o, end), color=color, lw=lw, zorder=10, solid_capstyle='round', clip_on=False, alpha=alpha)
+        lp = end + step / length * gap * spans[i]
+        if lab == 'y':
+            lp = lp + np.array(y_nudge, float) * spans   # nudge y label up/right
+        elif lab == 'z':
+            lp = lp + np.array(z_nudge, float) * spans   # nudge z label up (clear of the bar)
+        ax.text(*lp, lab, color=color, fontsize=fontsize, ha='center', va='center',
+                fontweight='bold', zorder=11, path_effects=stroke, clip_on=False, alpha=alpha)
+    ax.text(*(o - np.array([0, 0, gap * spans[2]])), f'{length:g} {unit}', color=color,
+            fontsize=fontsize - 1, ha='center', va='top', zorder=11, path_effects=stroke, clip_on=False, alpha=alpha)
+    if hide_frame:
+        ax.set_axis_off()
+    else:                                        # keep gridlines; drop spines, ticks, labels
+        ax.set_xlabel(''); ax.set_ylabel(''); ax.set_zlabel('')
+        ax.tick_params(length=0)                 # no tick marks
+        for _a3 in (ax.xaxis, ax.yaxis, ax.zaxis):
+            _a3.set_ticklabels([])               # no tick labels (keep ticks -> keep grid)
+            if hasattr(_a3, 'line'):
+                _a3.line.set_visible(False)      # no axis line (spine)
+            _a3.pane.set_edgecolor('none')       # no pane border
+            _a3._axinfo['tick']['inward_factor'] = 0   # no tick marks (3-D)
+            _a3._axinfo['tick']['outward_factor'] = 0
+
+
 def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
                          title='', peaks=None, rate_cmap='viridis',
                          spike_color='red', axes3d=None, col_title_fs=13, row_label_fs=12,
