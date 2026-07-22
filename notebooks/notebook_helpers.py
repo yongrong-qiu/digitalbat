@@ -962,8 +962,8 @@ def select_dual_field_cells(flights, n_neurons, dt, r_lim,
 
 
 def add_3d_scalebar(ax, length=1.0, corner=(0, 0, 0), color='k', lw=2.5,
-                    fontsize=15, gap=0.12, unit='m', y_nudge=(0.0, 0.0, 0.0), hide_frame=True,
-                    origin_shift=(0.0, 0.0, 0.0), alpha=1.0, z_nudge=(0.0, 0.0, 0.0)):
+                    fontsize=15, gap=0.12, unit='m', y_nudge=(0.0, 0.0, 0.0), x_nudge=(0.0, 0.0, 0.0), hide_frame=True,
+                    origin_shift=(0.0, 0.0, 0.0), alpha=1.0, z_nudge=(0.0, 0.0, 0.0), label_weight='normal'):
     """Replace a 3-D axis's frame/ticks/labels with an x/y/z scale-bar triad:
     three orthogonal bars of physical ``length`` from a bounding-box corner
     (0/1 per axis = low/high limit), each labelled x/y/z, plus one
@@ -985,8 +985,10 @@ def add_3d_scalebar(ax, length=1.0, corner=(0, 0, 0), color='k', lw=2.5,
             lp = lp + np.array(y_nudge, float) * spans   # nudge y label up/right
         elif lab == 'z':
             lp = lp + np.array(z_nudge, float) * spans   # nudge z label up (clear of the bar)
+        elif lab == 'x':
+            lp = lp + np.array(x_nudge, float) * spans   # nudge x label toward the bar
         ax.text(*lp, lab, color=color, fontsize=fontsize, ha='center', va='center',
-                fontweight='bold', zorder=11, path_effects=stroke, clip_on=False, alpha=alpha)
+                fontweight=label_weight, zorder=11, path_effects=stroke, clip_on=False, alpha=alpha)
     ax.text(*(o - np.array([0, 0, gap * spans[2]])), f'{length:g} {unit}', color=color,
             fontsize=fontsize - 1, ha='center', va='top', zorder=11, path_effects=stroke, clip_on=False, alpha=alpha)
     if hide_frame:
