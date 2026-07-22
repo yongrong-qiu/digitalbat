@@ -184,6 +184,46 @@ def cat_boxplot(ax, data, x, y, order, palette, *, showfliers=False, **kw):
                        ax=ax, **kw)
 
 
+def tukey_trim(data, y, by, *, k=1.5):
+    """Return ``data`` with rows whose ``y`` lies outside the Tukey whisker range
+    ``[Q1 - k*IQR, Q3 + k*IQR]``, with quartiles computed **within each group**
+    defined by the ``by`` column(s).
+
+    This is the violin analogue of a boxplot's ``showfliers=False``: the surviving
+    range is exactly what the box whiskers spanned, so a violin drawn on the result
+    stops at the whiskers instead of stretching over the fliers. Display-only -
+    pass raw (untrimmed) values to any statistics.
+    """
+    by = [by] if isinstance(by, str) else list(by)
+    grp = data.groupby(by, observed=True)[y]
+    q1 = grp.transform(lambda s: s.quantile(0.25))
+    q3 = grp.transform(lambda s: s.quantile(0.75))
+    iqr = q3 - q1
+    return data[(data[y] >= q1 - k * iqr) & (data[y] <= q3 + k * iqr)]
+
+
+def cat_violin(ax, data, x, y, order, palette, *, inner='box', cut=0,
+               density_norm='width', trim_outliers=False, **kw):
+    """Categorical violinplot coloured by a ``{level: rgb}`` dict - the violin
+    analogue of :func:`cat_boxplot`, for neuron-/flight-level distributions where
+    the shape (not just the quartiles) is informative.
+
+    Uses the same internal ``hue=x`` trick so a dict palette keyed by the native
+    level values survives seaborn >= 0.13. ``cut=0`` bounds the kernel density to
+    the observed data range (important for bounded metrics such as correlation /
+    FDE); ``density_norm='width'`` gives every violin the same max width, so
+    categories with different n stay visually comparable (as boxes were).
+    ``trim_outliers=True`` drops points beyond each level's Tukey whiskers
+    (:func:`tukey_trim`) before the KDE - the violin equivalent of
+    ``showfliers=False`` (display-only; does not touch any stats).
+    """
+    if trim_outliers:
+        data = tukey_trim(data, y, x)
+    return sns.violinplot(data=data, x=x, y=y, order=order, hue=x, hue_order=order,
+                          palette=palette, legend=False, inner=inner, cut=cut,
+                          density_norm=density_norm, ax=ax, **kw)
+
+
 # ---------------------------------------------------------------------------
 # Significance brackets that DO NOT stretch the y-axis
 # ---------------------------------------------------------------------------
@@ -436,13 +476,17 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
                        clip=None, sess_ylim=None, palette=None, zero_line=False,
                        higher_is_better=True, figsize=None, axes=None,
                        star_style='row', star_kw=None, unit_pvals=None, unit_id_cols=None,
-                       show_titles=True, title_y=1.0,
+                       show_titles=True, title_y=1.0, trim_unit_outliers=True, show_unit=True,
                        show_xticklabels=True, show_sess_ylabel=True, show_unit_ylabel=True):
     """Two-panel model comparison in the unified style.
 
     Left: per-session aggregate (`agg`) as a grey boxplot with per-session points
-    coloured by bat; 3-tier stars mark session-level Wilcoxon signed-rank vs
-    `ref`. Right: the per-unit distribution (boxplot). Pass `unit_pvals`
+    swarmed and coloured by bat; 3-tier stars mark session-level Wilcoxon signed-rank
+    vs `ref`. Right (optional): the per-unit (neuron/flight) distribution as a violin
+    (points beyond each model's Tukey whiskers dropped from the KDE unless
+    `trim_unit_outliers=False`; display-only, stats use raw values). The unit panel is
+    drawn only when a unit axis is supplied — pass `axes=(ax_sess, None)` (or a single
+    Axes, or `show_unit=False` when creating the figure) for a session-only panel. Pass `unit_pvals`
     (`{model: p}`), or `unit_id_cols` (e.g. ['session','flight_id']) to compute one
     via `pooled_ptable`, to star the right panel with a *different* test appropriate
     to the pooled per-unit distribution shown there (per-flight / per-neuron
@@ -491,19 +535,29 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
                              model_col=model_col, higher_is_better=higher_is_better)
         unit_pvals = dict(zip(_upt['model'], _upt['p']))
 
-    if axes is not None:
-        axs, axu = axes; fig = axs.figure          # draw onto a shared canvas
+    if axes is not None:                              # draw onto a shared canvas; when the
+        axs, axu = axes if isinstance(axes, (tuple, list)) else (axes, None)  # unit axis is
+        fig = axs.figure                              # None (or omitted) only the session panel is drawn
     else:
         figsize = figsize or (max(8, 1.4 * len(order)) + 2, PANEL_H + 1.5)
-        fig, (axs, axu) = plt.subplots(1, 2, figsize=figsize)
+        if show_unit:
+            fig, (axs, axu) = plt.subplots(1, 2, figsize=figsize)
+        else:
+            fig, axs = plt.subplots(1, 1, figsize=figsize); axu = None
     bats_present = [b for b in palette if b in set(sess['bat'])]
-    for ax, data, is_sess in ((axs, sess, True), (axu, unit_df, False)):
-        sns.boxplot(data=data, x=model_col, y=value_col, order=order, color='0.85',
-                    width=0.6, linewidth=1.0, showfliers=False, ax=ax)
-        if is_sess:
-            sns.stripplot(data=data, x=model_col, y=value_col, order=order, hue='bat',
-                          palette=palette, hue_order=bats_present, jitter=0.18, size=6,
+    _panels = [(axs, sess, True)] + ([(axu, unit_df, False)] if axu is not None else [])
+    for ax, data, is_sess in _panels:
+        if is_sess:                                   # session aggregates (few points): box + per-bat swarm
+            sns.boxplot(data=data, x=model_col, y=value_col, order=order, color='0.85',
+                        width=0.6, linewidth=1.0, showfliers=False, ax=ax)
+            sns.swarmplot(data=data, x=model_col, y=value_col, order=order, hue='bat',
+                          palette=palette, hue_order=bats_present, size=5.5,
                           alpha=0.9, edgecolor='k', linewidth=0.3, ax=ax, legend=False)
+        else:                                         # per-unit (neuron/flight) distribution: violin for shape
+            _vd = tukey_trim(data, value_col, model_col) if trim_unit_outliers else data
+            sns.violinplot(data=_vd, x=model_col, y=value_col, order=order, color='0.85',
+                           width=0.85, linewidth=1.0, inner='box', cut=0,
+                           density_norm='width', ax=ax)
         if zero_line:
             ax.axhline(0, color='0.5', ls='--', lw=0.9, zorder=0)
         if is_sess and sess_ylim is not None:
@@ -524,9 +578,11 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
         else:
             _star_row(ax, order, _pv)
         sns.despine(ax=ax)
-    if show_titles:
-        axs.set_title('session ' + agg + 's', y=title_y)
-        axu.set_title(f'per {unit_name}', y=title_y)
+        ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(   # 0.0 -> 0, drop trailing zeros
+            lambda _v, _p: ('0' if f'{_v:g}' in ('0', '-0') else f'{_v:g}')))
+    if show_titles:                          # session-median panel title dropped by request
+        if axu is not None:
+            axu.set_title(f'per {unit_name}', y=title_y)
     if axes is None:
         fig.tight_layout()
     ptab = pd.DataFrame(recs)
