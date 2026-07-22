@@ -1903,6 +1903,7 @@ class BatSpatialInfo:
                     'xyz': self.xyz[combined_mask],
                     'pca_3d': self.pca_3d[combined_mask],
                     'spikes': self.spikes[combined_mask],
+                    'mask': combined_mask,
                 }
         # 4. High-Dimensional SI (32D Latent)
         spatial_info['global_si_latent_32d'] = self.compute_ksg_si(self.latent_32d, self.spikes)
