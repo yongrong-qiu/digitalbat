@@ -310,6 +310,14 @@ _FLIGHT_ROOM = dict(
     ]),
 )
 
+# Physical bounds of the shared indoor flight room (Datasets 1 & 3), taken from the
+# per-session Extracted_Behavior `r_lim` (identical across these sessions). The
+# analysis frame `grid_lim=3.0` (see `plot_*` helpers) is a slightly padded version.
+INDOOR_ROOM_RLIM = np.array([[-2.9, 2.9],    # x (m)
+                             [-2.6, 2.6],    # y (m)
+                             [0.0, 2.3]])    # z (m, floor -> ceiling)
+INDOOR_ROOM_DIMS = tuple(np.round(np.diff(INDOOR_ROOM_RLIM, axis=1).ravel(), 3))  # (5.8, 5.2, 2.3) m (x, y, z)
+
 DATASET_TARGETS = {
     'Dataset_1': _FLIGHT_ROOM,
     'Dataset_2': dict(
@@ -953,10 +961,54 @@ def select_dual_field_cells(flights, n_neurons, dt, r_lim,
     return candidates[:n_top]
 
 
+def add_3d_scalebar(ax, length=1.0, corner=(0, 0, 0), color='k', lw=2.5,
+                    fontsize=15, gap=0.12, unit='m', y_nudge=(0.0, 0.0, 0.0), x_nudge=(0.0, 0.0, 0.0), hide_frame=True,
+                    origin_shift=(0.0, 0.0, 0.0), alpha=1.0, z_nudge=(0.0, 0.0, 0.0), label_weight='normal'):
+    """Replace a 3-D axis's frame/ticks/labels with an x/y/z scale-bar triad:
+    three orthogonal bars of physical ``length`` from a bounding-box corner
+    (0/1 per axis = low/high limit), each labelled x/y/z, plus one
+    '<length> <unit>' note. Reads the current x/y/z limits, so call after the
+    limits and box_aspect are set."""
+    import matplotlib.patheffects as pe
+    lims = (ax.get_xlim(), ax.get_ylim(), ax.get_zlim())
+    spans = np.array([l[1] - l[0] for l in lims], float)
+    o = np.array([lims[i][corner[i]] for i in range(3)], float)
+    o = o + np.array([(-1 if corner[i] else 1) * 0.05 * spans[i] for i in range(3)])
+    o = o + np.array(origin_shift, float) * spans          # shift the whole bar (e.g. down)
+    stroke = [pe.withStroke(linewidth=3, foreground='white')]
+    for i, lab in enumerate(('x', 'y', 'z')):
+        step = np.zeros(3); step[i] = (-1 if corner[i] else 1) * length
+        end = o + step
+        ax.plot(*zip(o, end), color=color, lw=lw, zorder=10, solid_capstyle='round', clip_on=False, alpha=alpha)
+        lp = end + step / length * gap * spans[i]
+        if lab == 'y':
+            lp = lp + np.array(y_nudge, float) * spans   # nudge y label up/right
+        elif lab == 'z':
+            lp = lp + np.array(z_nudge, float) * spans   # nudge z label up (clear of the bar)
+        elif lab == 'x':
+            lp = lp + np.array(x_nudge, float) * spans   # nudge x label toward the bar
+        ax.text(*lp, lab, color=color, fontsize=fontsize, ha='center', va='center',
+                fontweight=label_weight, zorder=11, path_effects=stroke, clip_on=False, alpha=alpha)
+    ax.text(*(o - np.array([0, 0, gap * spans[2]])), f'{length:g} {unit}', color=color,
+            fontsize=fontsize - 1, ha='center', va='top', zorder=11, path_effects=stroke, clip_on=False, alpha=alpha)
+    if hide_frame:
+        ax.set_axis_off()
+    else:                                        # keep gridlines; drop spines, ticks, labels
+        ax.set_xlabel(''); ax.set_ylabel(''); ax.set_zlabel('')
+        ax.tick_params(length=0)                 # no tick marks
+        for _a3 in (ax.xaxis, ax.yaxis, ax.zaxis):
+            _a3.set_ticklabels([])               # no tick labels (keep ticks -> keep grid)
+            if hasattr(_a3, 'line'):
+                _a3.line.set_visible(False)      # no axis line (spine)
+            _a3.pane.set_edgecolor('none')       # no pane border
+            _a3._axinfo['tick']['inward_factor'] = 0   # no tick marks (3-D)
+            _a3._axinfo['tick']['outward_factor'] = 0
+
+
 def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
                          title='', peaks=None, rate_cmap='viridis',
                          spike_color='red', axes3d=None, col_title_fs=13, row_label_fs=12,
-                         row_labels=None):
+                         row_labels=None, startend='markers'):
     """Draw the spikes / empirical-rate / predicted-rate triptych for one neuron
     on two flight clusters, in 3D and in x-y projection.
 
@@ -991,18 +1043,22 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
     def _seg_vals(v):
         return 0.5 * (v[:-1] + v[1:])
 
-    def _draw(ax, fl, mode, three_d):
-        # start/end markers first so they sit behind the trajectory lines
-        for pts, mk, fc in ((np.array([f['xyz'][0] for f in fl]), '^', '#ff7f0e'),
-                            (np.array([f['xyz'][-1] for f in fl]), 's', 'deeppink')):
-            if not len(pts):
-                continue
-            if three_d:
-                ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker=mk, s=26, facecolors=fc,
-                           edgecolors='k', linewidths=0.6, depthshade=False, zorder=0)
-            else:
-                ax.scatter(pts[:, 0], pts[:, 1], marker=mk, s=26, facecolors=fc,
-                           edgecolors='k', linewidths=0.6, zorder=0)
+    START_C, END_C = '#00b050', 'deeppink'   # green start, magenta end (shared by markers/arrows)
+
+    def _draw(ax, fl, mode, three_d, annotate_se=False):
+        starts = np.array([f['xyz'][0] for f in fl])
+        ends = np.array([f['xyz'][-1] for f in fl])
+        if startend == 'markers':
+            # start/end markers first so they sit behind the trajectory lines
+            for pts, mk, fc in ((starts, '^', '#ff7f0e'), (ends, 's', END_C)):
+                if not len(pts):
+                    continue
+                if three_d:
+                    ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker=mk, s=26, facecolors=fc,
+                               edgecolors='k', linewidths=0.6, depthshade=False, zorder=0)
+                else:
+                    ax.scatter(pts[:, 0], pts[:, 1], marker=mk, s=26, facecolors=fc,
+                               edgecolors='k', linewidths=0.6, zorder=0)
         for f in fl:
             xyz = f['xyz']
             if mode == 'spikes':
@@ -1039,22 +1095,56 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
                                edgecolors='none', depthshade=False)
                 else:
                     ax.scatter(xs, ys, s=ss, c=spike_color, alpha=0.75, edgecolors='none')
-        # Mark the start (green circle) and end (blue square) of every flight.
         ax.set_xlim(xlim); ax.set_ylim(ylim)
         if three_d:
             ax.set_zlim(zlim)
+            ax.set_box_aspect([max(lim[1] - lim[0], 1e-3) for lim in (xlim, ylim, zlim)])  # 1 m equal on x/y/z
             ax.set_xlabel('x (m)'); ax.set_ylabel('y (m)'); ax.set_zlabel('z (m)')
             ax.view_init(elev=22, azim=-68)
         else:
             ax.set_aspect('equal', adjustable='box')
             ax.set_xlabel('x (m)')
+        if startend == 'arrows' and annotate_se:
+            _draw_startend_arrows(ax, starts, ends, three_d)
+
+    def _draw_startend_arrows(ax, starts, ends, three_d):
+        """Black arrow + text label at the (mean) start / end of the flights,
+        instead of a per-flight marker. Start is nudged one way and end the other
+        so their labels don't collide; when the two mean points coincide (e.g. a
+        loop that returns to its origin) a single 'start/end' label is drawn."""
+        import matplotlib.patheffects as pe
+        _stroke = [pe.withStroke(linewidth=2.5, foreground='white')]
+        span = np.array([xlim[1] - xlim[0], ylim[1] - ylim[0], zlim[1] - zlim[0]], float)
+        if not len(starts) or not len(ends):
+            return
+        cs = np.asarray(starts, float).mean(0)
+        ce = np.asarray(ends, float).mean(0)
+        if np.linalg.norm(cs - ce) < 0.6:                       # coincide (~ one target radius)
+            items = [((cs + ce) / 2, 'start/end', 0)]
+        else:
+            items = [(cs, 'start', -1), (ce, 'end', +1)]
+        for c, label, sgn in items:
+            if three_d:
+                off = np.array([sgn * 0.18 * span[0], 0.0, 0.22 * span[2]])
+                base = c + off
+                ax.quiver(base[0], base[1], base[2], -off[0], -off[1], -off[2], color='k',
+                          lw=1.6, arrow_length_ratio=0.4, zorder=6, clip_on=False)
+                ax.text(base[0], base[1], base[2], label, color='k', fontsize=row_label_fs,
+                        ha='center', va='bottom', fontweight='bold', zorder=7, path_effects=_stroke,
+                        clip_on=False)
+            else:
+                base = (c[0] + sgn * 0.28 * span[0], c[1] + 0.34 * span[1])
+                ax.annotate(label, xy=(c[0], c[1]), xytext=base, color='k', ha='center',
+                            va='bottom', fontsize=row_label_fs, fontweight='bold',
+                            path_effects=_stroke,
+                            arrowprops=dict(arrowstyle='-|>', color='k', lw=1.6))
 
     def _populate(axes, three_d):
         for ci, c in enumerate(clusters):
             row_label = row_labels[ci] if row_labels is not None else f'cluster {c}'
             for col, mode in enumerate(('spikes', 'emp', 'pred')):
                 ax = axes[ci, col]
-                _draw(ax, data[c], mode, three_d)
+                _draw(ax, data[c], mode, three_d, annotate_se=(col == 0))
                 if ci == 0:
                     ax.set_title(col_titles[col], fontsize=col_title_fs)
                 if col == 0:
@@ -1063,14 +1153,15 @@ def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
                                   rotation=90, va='center', ha='center', fontsize=row_label_fs)
                     else:
                         ax.set_ylabel(row_label, fontsize=row_label_fs)
-        legend_handles = [
-            Line2D([], [], marker='^', color='w', markerfacecolor='#ff7f0e',
-                   markeredgecolor='k', markersize=7, label='start'),
-            Line2D([], [], marker='s', color='w', markerfacecolor='deeppink',
-                   markeredgecolor='k', markersize=7, label='end'),
-        ]
-        axes[0, 0].legend(handles=legend_handles, loc='upper right', fontsize=8,
-                          framealpha=0.85)
+        if startend == 'markers':
+            legend_handles = [
+                Line2D([], [], marker='^', color='w', markerfacecolor='#ff7f0e',
+                       markeredgecolor='k', markersize=7, label='start'),
+                Line2D([], [], marker='s', color='w', markerfacecolor=END_C,
+                       markeredgecolor='k', markersize=7, label='end'),
+            ]
+            axes[0, 0].legend(handles=legend_handles, loc='upper right', fontsize=8,
+                              framealpha=0.85)
 
     sm = ScalarMappable(norm=norm, cmap=rate_cmap)
     sm.set_array([])
