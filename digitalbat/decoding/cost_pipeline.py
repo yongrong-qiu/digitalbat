@@ -129,6 +129,7 @@ MODEL_ORDER_4G = [
     'glm_map_coup',
     'glm_map_joint',
     'glm_map_joint_hc',
+    'glm_map_joint_coup',
     'transformer',
     'joint',
 ]
@@ -141,6 +142,7 @@ MODEL_LABEL_4G = {
     'glm_map_coup':           'GLM-inversion (coup, no hist)',
     'glm_map_joint':          'GLM-inversion (joint pos × traj)',
     'glm_map_joint_hc':       'GLM + hist + coup (trajectory)',
+    'glm_map_joint_coup':     'GLM + coup (trajectory)',
     'nb_continuity_cluster':  'NB (place, trajectory) + continuity',
     'svm':                    'pairwise SVM (place)',
     'svm_cluster':            'pairwise SVM (place, trajectory)',
@@ -185,6 +187,7 @@ DECODER_PRED_COLS = [
     ('glm_map_coup',          ('x_pred_2d', 'y_pred_2d'), ('x_pred_3d', 'y_pred_3d', 'z_pred_3d')),
     ('glm_map_joint',         ('x_pred_2d', 'y_pred_2d'), ('x_pred_3d', 'y_pred_3d', 'z_pred_3d')),
     ('glm_map_joint_hc',      ('x_pred_2d', 'y_pred_2d'), ('x_pred_3d', 'y_pred_3d', 'z_pred_3d')),
+    ('glm_map_joint_coup',    ('x_pred_2d', 'y_pred_2d'), ('x_pred_3d', 'y_pred_3d', 'z_pred_3d')),
     ('svm',                   ('x_pred_2d', 'y_pred_2d'), ('x_pred_3d', 'y_pred_3d', 'z_pred_3d')),
     ('svm_cluster',           ('x_pred_2d', 'y_pred_2d'), ('x_pred_3d', 'y_pred_3d', 'z_pred_3d')),
     ('naive_bayes_cluster',   ('x_pred_2d', 'y_pred_2d'), ('x_pred_3d', 'y_pred_3d', 'z_pred_3d')),
@@ -516,7 +519,10 @@ def compute_joint_flight_clusters(dataloaders, meta_info_dict, *,
         trajs, fpis = {}, {}
         for split in ('train', 'valid', 'test'):
             dset = dataloaders[split][sn].dataset
-            pos = (dset.behavior.numpy() * bs + bm)[..., :3]
+            # Slice behaviour + z-score stats to the 3 position dims BEFORE combining,
+            # so this is robust to loaders whose behaviour dim differs from the stats
+            # dim (e.g. make_joint_dataloaders' dim-3 dl_pos paired with 13-dim meta).
+            pos = dset.behavior.numpy()[..., :3] * bs[:3] + bm[:3]
             trajs[split] = _downsample_traj_joint(pos, dset.mask.numpy().astype(bool), ds=ds)
             fpis[split] = dset.flight_path_index.numpy().astype(int)
         Xtr = trajs['train']
@@ -812,12 +818,48 @@ def make_glm_encoders(unit_num_dict, glm_common, glm_hist_basis, glm_coup_basis,
             'both_shuffled':  _ablate_hc_joint(zero_hist=True, zero_coup='all'),
         }
 
+    # --- glm_coup_joint (trajectory GLM WITH coupling only, NO history) --------
+    # Per-cluster place readouts (like glm_joint) PLUS the per-session coupling
+    # filters (no spike-history term). Inverted per cluster below through the SAME
+    # hist+coup joint path — `_cluster_histcoup_encoder` branches on use_hist /
+    # use_coup, so a coup-only (use_hist=False) encoder routes through unchanged.
+    # Optional: only built when the checkpoint is supplied.
+    glm_coup_joint = None
+    glm_coup_joint_encoders_by_mode = {}
+    COUP_JOINT_CKPT = ckpt_map.get('glm_coup_joint')
+    if COUP_JOINT_CKPT and os.path.exists(COUP_JOINT_CKPT):
+        glm_coup_joint = GLM_Coupled(
+            output_dim_dict=unit_num_dict, **joint_common,
+            coup_basis=glm_coup_basis, n_lags=N_LAGS,          # NO hist_basis
+            cluster_keys=cluster_keys_joint)
+        _cjmiss, _cjunexp = glm_coup_joint.load_state_dict(
+            torch.load(COUP_JOINT_CKPT, map_location=device), strict=False)
+        assert not _cjmiss, (f'GLM_COUP_JOINT checkpoint missing required keys: '
+                             f'{_cjmiss[:5]} — clustering disagrees or a session is absent')
+        glm_coup_joint = glm_coup_joint.to(device).eval()
+
+        def _ablate_coup_joint(zero_coup='none'):
+            enc = _copy.deepcopy(glm_coup_joint)
+            if zero_coup == 'all':
+                enc.coup_basis.zero_()
+            elif zero_coup == 'lagged':
+                enc.coup_basis[1:].zero_()
+            return enc.to(device).eval()
+
+        glm_coup_joint_encoders_by_mode = {
+            'trial_shuffled': _ablate_coup_joint(zero_coup='all'),
+            'time_shuffled':  _ablate_coup_joint(zero_coup='lagged'),
+            'both_shuffled':  _ablate_coup_joint(zero_coup='all'),
+        }
+
     return dict(
         glm_hist_coup=glm_hist_coup, glm_coup=glm_coup, glm_joint=glm_joint,
         glm_encoders_by_mode=glm_encoders_by_mode,
         glm_coup_encoders_by_mode=glm_coup_encoders_by_mode,
         glm_hist_coup_joint=glm_hist_coup_joint,
         glm_hist_coup_joint_encoders_by_mode=glm_hist_coup_joint_encoders_by_mode,
+        glm_coup_joint=glm_coup_joint,
+        glm_coup_joint_encoders_by_mode=glm_coup_joint_encoders_by_mode,
         flight_cluster_joint=flight_cluster_joint,
         cluster_keys_joint=cluster_keys_joint,
     )
@@ -1804,6 +1846,7 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
             'glm_coup':  f'{out_dir}/bat_glm/bat_glm_coup_position_seed_1_optuna{GLM_CKPT_TAG}.pth',
             'glm_joint': f'{out_dir}/bat_glm/bat_glm_joint_seed_1_optuna{GLM_CKPT_TAG}.pth',
             'glm_hist_coup_joint': f'{out_dir}/bat_glm/bat_glm_hist_coup_joint_seed_1_optuna{GLM_CKPT_TAG}.pth',
+            'glm_coup_joint': f'{out_dir}/bat_glm/bat_glm_coup_joint_seed_1_optuna{GLM_CKPT_TAG}.pth',
         },
         device=device, dataloaders=dataloaders, meta_info_dict=meta_info_dict,
         joint_common=joint_common)
@@ -1864,6 +1907,22 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
             glm_map_joint_hc_fit_eval, 'glm_map_joint_hc', modes=modes,
             dataloaders=dataloaders, mode_dataloaders=mode_dataloaders,
             meta_info_dict=meta_info_dict)
+    # trajectory GLM inversion WITH coupling only (no history); reuses the hc
+    # joint fit-eval path (a coup-only encoder routes through unchanged).
+    glm_map_joint_coup_dfs = {}
+    if glm.get('glm_coup_joint') is not None:
+        glm_map_joint_coup_fit_eval = make_glm_map_joint_hc_fit_eval(
+            glm_hc_joint=glm['glm_coup_joint'],
+            enc_by_mode=glm['glm_coup_joint_encoders_by_mode'],
+            glm_common=joint_common, device=device, dt=dt,
+            nb_best=nb_best, nb_cont_best=nb_cont_best,
+            flight_cluster_joint=glm['flight_cluster_joint'],
+            loader_to_mode=loader_to_mode, synth_dir=synth_dir,
+            synth_sampling=synth_sampling)
+        glm_map_joint_coup_dfs, _, _, _ = run_per_mode_per_session(
+            glm_map_joint_coup_fit_eval, 'glm_map_joint_coup', modes=modes,
+            dataloaders=dataloaders, mode_dataloaders=mode_dataloaders,
+            meta_info_dict=meta_info_dict)
     transformer_dfs = eval_transformer_by_mode(
         decoder_models, mode_dataloaders, modes, meta_info_dict, device)
 
@@ -1885,6 +1944,7 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
             'glm_map_coup':     glm_map_coup_dfs.get(_m, pd.DataFrame()),
             'glm_map_joint':    glm_map_joint_dfs.get(_m, pd.DataFrame()),
             'glm_map_joint_hc': glm_map_joint_hc_dfs.get(_m, pd.DataFrame()),
+            'glm_map_joint_coup': glm_map_joint_coup_dfs.get(_m, pd.DataFrame()),
             'transformer':      transformer_dfs.get(_m, pd.DataFrame()),
             'joint':            joint_dfs.get(_m, pd.DataFrame()),
         }
@@ -1906,6 +1966,8 @@ def generate_ed2_decode_costs(data_config, *, device, seed, out_dir='./out',
     _model_order = ['glm_map', 'glm_map_coup', 'glm_map_joint', 'transformer']
     if glm.get('glm_hist_coup_joint') is not None:
         _model_order.append('glm_map_joint_hc')
+    if glm.get('glm_coup_joint') is not None:
+        _model_order.append('glm_map_joint_coup')
     if run_joint:
         _model_order.append('joint')
     return build_cost_tables(
