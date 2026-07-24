@@ -227,8 +227,18 @@ def cat_violin(ax, data, x, y, order, palette, *, inner='box', cut=0,
 # ---------------------------------------------------------------------------
 # Significance brackets that DO NOT stretch the y-axis
 # ---------------------------------------------------------------------------
+def _marker_for_p(p, dagger=False):
+    """3-tier stars via stars_for_p, plus an optional '†' for a marginal trend
+    (0.05 <= p < 0.10) when ``dagger=True``; '' otherwise."""
+    s = stars_for_p(p)
+    if s or not dagger or p is None or not np.isfinite(p):
+        return s
+    return '†' if 0.05 <= p < 0.10 else ''
+
+
 def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
-                fontsize=17, base=0.98, step=0.07, show_ns=False, star_gap=0.0):
+                fontsize=17, base=0.98, step=0.07, show_ns=False, star_gap=0.0,
+                dagger=False, bar_drop=0.0):
     """Draw a 3-tier-star significance bracket between categorical positions
     ``x1`` and ``x2`` **without** changing ``ax`` limits.
 
@@ -238,7 +248,7 @@ def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
     (0 = lowest). Hidden entirely when p >= .05 unless ``show_ns``. ``star_gap``
     nudges the star label vertically off the bar (negative pulls it closer).
     """
-    stars = stars_for_p(p)
+    stars = _marker_for_p(p, dagger)
     if not stars:
         if not show_ns:
             return
@@ -246,7 +256,8 @@ def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
     trans = ax.get_xaxis_transform()  # x data, y axes-fraction
     y = base - level * step
     h = 0.015
-    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], transform=trans,
+    yb = y - bar_drop                  # bar (and its verticals) can dip without moving the marker
+    ax.plot([x1, x1, x2, x2], [yb, yb + h, yb + h, yb], transform=trans,
             lw=linewidth, color=color, clip_on=False)
     ax.text((x1 + x2) / 2, y + h + star_gap, stars, transform=trans, ha='center',
             va='bottom', fontsize=fontsize, fontweight='bold', color=color,
@@ -460,7 +471,7 @@ def _star_row(ax, order, pvals, frac=0.96):
 
 
 def _star_brackets(ax, order, pvals, ref, *, show_ns=False, base=1.02, step=0.09,
-                   star_gap=0.0):
+                   star_gap=0.0, dagger=False, dagger_drop=0.0):
     """Stacked significance brackets from `ref` to every other category.
 
     One bracket per non-reference model (a line connecting the two x-positions
@@ -472,10 +483,12 @@ def _star_brackets(ax, order, pvals, ref, *, show_ns=False, base=1.02, step=0.09
     xref = order.index(ref)
     ordered = sorted((abs(x - xref), x, m) for x, m in enumerate(order) if m != ref)
     shown = [(x, m) for _, x, m in ordered
-             if show_ns or stars_for_p(pvals.get(m, np.nan))]
+             if show_ns or _marker_for_p(pvals.get(m, np.nan), dagger)]
     for lvl, (x, m) in enumerate(shown):   # narrowest first -> lowest bracket
-        sig_bracket(ax, xref, x, pvals.get(m, np.nan), level=0,
-                    base=base + lvl * step, show_ns=show_ns, star_gap=star_gap)
+        _p = pvals.get(m, np.nan)
+        _bd = dagger_drop if (dagger_drop and _marker_for_p(_p, dagger) == '†') else 0.0
+        sig_bracket(ax, xref, x, _p, level=0, base=base + lvl * step,
+                    show_ns=show_ns, star_gap=star_gap, dagger=dagger, bar_drop=_bd)
 
 
 def pooled_ptable(unit_df, value_col, order, ref, id_cols, *, model_col='model',
