@@ -360,6 +360,43 @@ def paired_lines(ax, df, value_col, cond_col, order, *, session_col='session',
     return piv
 
 
+def paired_lineplot(ax, data, x, y, order, *, session_col='session', bat_col='bat',
+                    palette=None, agg='mean', line_lw=0.8, line_alpha=0.35,
+                    marker_size=3.0, mean_color='k', mean_lw=2.6, ci=95, n_boot=2000,
+                    seed=0, set_xticklabels=True):
+    """Paired session-level line plot: one faint thin line per session (coloured by
+    bat) connecting the ordered ``x`` categories, overlaid with a thick black
+    point-plot of the across-session **mean ± 95% CI**.
+
+    This is the paired analogue of a combined box + per-bat swarm for session-level
+    comparisons (few, ``<= 17``, sessions): the connecting lines expose the
+    within-session pairing across categories that a swarm hides, while the black
+    point-plot summarises the group mean and its bootstrap CI. ``data`` is long-form
+    with (at least) ``session_col``, ``bat_col``, ``x`` and ``y``; it is aggregated
+    (``agg``) to one value per (session, category) for the lines, and the same
+    per-session values drive the mean/CI. Returns the per-session wide DataFrame
+    (index=[session, bat], columns=categories) for downstream stats.
+    """
+    if palette is None:
+        palette = bat_pal()
+    xs = np.arange(len(order))
+    wide = data.pivot_table(index=[session_col, bat_col], columns=x, values=y,
+                            aggfunc=agg, observed=True).reindex(columns=order)
+    for (sess, bat), row in wide.iterrows():
+        ax.plot(xs, row.to_numpy(dtype=float), '-o', color=palette.get(bat, '0.5'),
+                lw=line_lw, alpha=line_alpha, ms=marker_size, mew=0, zorder=2)
+    # across-session mean +/- 95% CI, thick and black, drawn on top
+    sns.pointplot(data=data, x=x, y=y, order=order, color=mean_color,
+                  estimator='mean', errorbar=('ci', ci), n_boot=n_boot, seed=seed,
+                  linewidth=mean_lw, markersize=mean_lw * 2.4, capsize=0.14,
+                  err_kws={'linewidth': mean_lw * 0.8}, zorder=10, ax=ax)
+    ax.set_xticks(xs)
+    if set_xticklabels:
+        ax.set_xticklabels(order)
+    sns.despine(ax=ax)
+    return wide
+
+
 def bat_legend(ax, palette=None, title='Bat', loc='best', **kw):
     """Add a bat colour legend (one handle per bat in canonical order)."""
     if palette is None:
@@ -544,15 +581,11 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
             fig, (axs, axu) = plt.subplots(1, 2, figsize=figsize)
         else:
             fig, axs = plt.subplots(1, 1, figsize=figsize); axu = None
-    bats_present = [b for b in palette if b in set(sess['bat'])]
     _panels = [(axs, sess, True)] + ([(axu, unit_df, False)] if axu is not None else [])
     for ax, data, is_sess in _panels:
-        if is_sess:                                   # session aggregates (few points): box + per-bat swarm
-            sns.boxplot(data=data, x=model_col, y=value_col, order=order, color='0.85',
-                        width=0.6, linewidth=1.0, showfliers=False, ax=ax)
-            sns.swarmplot(data=data, x=model_col, y=value_col, order=order, hue='bat',
-                          palette=palette, hue_order=bats_present, size=5.5,
-                          alpha=0.9, edgecolor='k', linewidth=0.3, ax=ax, legend=False)
+        if is_sess:                                   # session aggregates (few, <=17): faint per-bat lines + black mean +/- 95% CI
+            paired_lineplot(ax, data, model_col, value_col, order, session_col=session_col,
+                            bat_col='bat', palette=palette, set_xticklabels=False)
         else:                                         # per-unit (neuron/flight) distribution: violin for shape
             _vd = tukey_trim(data, value_col, model_col) if trim_unit_outliers else data
             sns.violinplot(data=_vd, x=model_col, y=value_col, order=order, color='0.85',
