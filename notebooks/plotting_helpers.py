@@ -647,7 +647,13 @@ def is_indoor(session):
 
 
 # Route = (origin, destination) endpoint classes: 0 neither, 1 reward, 2 perch.
-ROUTE_COLORS = ['0.7', 'firebrick', 'darkorange', 'forestgreen', 'steelblue']
+# Routes: three deep matte colours from the built-in ColorBrewer 'Dark2' palette
+# (teal-green[0], magenta[3], gold[5]) plus a hand-picked deep slate blue. Dark2's
+# ochre[6] read too close to its gold, and its orange[1]/purple[2]/green[4] collide
+# with the tab10 bat hues, so those are dropped. All four sit clear of every bat
+# colour (min CIELAB ΔE ≈ 23, vs bat-blue) so routes and bats never read alike where
+# they co-appear (Fig 2 RSA side-bars). 'other' stays grey. Used only in Fig 2.
+ROUTE_COLORS = ['0.7'] + [sns.color_palette('Dark2')[i] for i in (0, 3, 5)] + ['#3b4a8c']
 ROUTE_LABELS = ['other', 'rew→rew', 'rew→perch', 'perch→rew', 'perch→perch']
 
 
