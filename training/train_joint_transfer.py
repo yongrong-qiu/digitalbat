@@ -62,7 +62,8 @@ FDE_WEIGHT, ERR_REF, FDE_REF = 0.5, 0.3, 0.1
 # Epoch budgets (early stopping cuts these short). Env overrides ease smoke tests.
 _E = lambda k, d: int(os.environ.get(k, d))
 FOUND_EPOCHS, FOUND_PATIENCE = _E('TJT_FOUND_EPOCHS', 500), _E('TJT_FOUND_PATIENCE', 40)
-SCRATCH_EPOCHS, SCRATCH_PATIENCE = _E('TJT_SCRATCH_EPOCHS', 500), _E('TJT_SCRATCH_PATIENCE', 40)
+# Scratch matches the Full (cross_1000) model's budget: 1000 epochs, patience 40.
+SCRATCH_EPOCHS, SCRATCH_PATIENCE = _E('TJT_SCRATCH_EPOCHS', 1000), _E('TJT_SCRATCH_PATIENCE', 40)
 FT_EPOCHS, FT_PATIENCE = _E('TJT_FT_EPOCHS', 500), _E('TJT_FT_PATIENCE', 40)
 
 CKPT_ROOT = os.environ.get('TJT_CKPT_ROOT', '/media/alowet/ssd2/twin/transfer_joint')
@@ -277,8 +278,12 @@ def foundation_path(group, heldout):
     return f'{CKPT_ROOT}/{group}/foundation_{heldout}.pth'
 
 
-def scratch_path(target):
-    return f'{CKPT_ROOT}/scratch/scratch_{target}.pth'          # shared across CV schemes
+def scratch_path(group, heldout):
+    """Fresh, randomly-initialised base trained on the fold's *unit of analysis*
+    (its `targets`): one session (session), a bat's sessions (bat), or an
+    environment's sessions (env). Per-group -> NOT shared across schemes; only
+    'Full' is shared. Disaggregated per session at eval time."""
+    return f'{CKPT_ROOT}/{group}/scratch_{heldout}.pth'
 
 
 def adapt_path(group, heldout, target, mode):
@@ -322,16 +327,19 @@ def run_group(group, folds, save=True):
     enc_parts, dec_parts = [], []
     for fi, (heldout, targets, sources) in enumerate(folds):
         fpath = foundation_path(group, heldout)
+        spath = scratch_path(group, heldout)
         print(f'[{group}] fold {fi + 1}/{len(folds)} heldout={heldout} '
               f'({len(sources)} src, {len(targets)} tgt)', flush=True)
+        # Scratch: ONE fresh base trained on the whole unit of analysis (`targets`
+        # together), then read off per target session below. session-level folds
+        # have targets == [heldout], so this reduces to the single-session baseline.
+        train_full(targets, spath, n_epochs=SCRATCH_EPOCHS, patience=SCRATCH_PATIENCE, tag='scratch')
         train_full(sources, fpath, n_epochs=FOUND_EPOCHS, patience=FOUND_PATIENCE, tag='foundation')
         for t in targets:
-            train_full([t], scratch_path(t), n_epochs=SCRATCH_EPOCHS,
-                       patience=SCRATCH_PATIENCE, tag='scratch')
             frz, fnt = adapt_path(group, heldout, t, 'frozen'), adapt_path(group, heldout, t, 'finetune')
             train_adapt(t, sources, fpath, 'frozen', frz)
             train_adapt(t, sources, fpath, 'finetune', fnt)
-            for mode, path, sess in (('scratch', scratch_path(t), [t]),
+            for mode, path, sess in (('scratch', spath, targets),
                                      ('frozen', frz, sources + [t]),
                                      ('fine-tune', fnt, sources + [t])):
                 enc, dec = eval_one(mode, path, t, sess, group, heldout)
