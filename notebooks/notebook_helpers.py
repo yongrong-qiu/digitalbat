@@ -227,6 +227,42 @@ def freedman_lane(y, X_full, j, rng, n_perm, n_units=None):
     return t_obs, p_val, perm_t
 
 
+def ols_r2_cols(Y, X):
+    """R^2 of every column of Y (n, m) against a shared design X (n, p) — the
+    vectorized counterpart of :func:`ols_r2`, used to score whole permutation
+    blocks with a single lstsq."""
+    beta, *_ = np.linalg.lstsq(X, Y, rcond=None)
+    ss_res = ((Y - X @ beta) ** 2).sum(0)
+    ss_tot = ((Y - Y.mean(0)) ** 2).sum(0)
+    return np.where(ss_tot > 0, 1 - ss_res / np.where(ss_tot > 0, ss_tot, 1.0), np.nan)
+
+
+def freedman_lane_r2(y, X_full, j, rng, n_perm, n_units):
+    """Freedman-Lane test for column j of X_full with the SEMIPARTIAL R^2 as the
+    statistic: unique R^2 = R^2(full) - R^2(reduced), reduced = all other columns.
+
+    Identical null to :func:`freedman_lane` — the reduced-model residuals are
+    reshaped into an n_units x n_units matrix and relabeled jointly across rows and
+    columns, so the exchangeable unit is the neuron and the pair-level dependence is
+    preserved — but it scores unique R^2 rather than the coefficient t, so the P
+    attaches directly to the quantity MRM figures plot. Requires every upper-triangle
+    pair to be finite (rows of y / X_full in np.triu_indices order).
+
+    Returns (r2_obs, p_one_sided, perm_r2). One-sided because unique R^2 >= 0.
+    """
+    Z = X_full[:, [k for k in range(X_full.shape[1]) if k != j]]
+    beta_z, *_ = np.linalg.lstsq(Z, y, rcond=None)
+    yhat_z = Z @ beta_z
+    E_z = squareform(y - yhat_z)
+    iu, ju = np.triu_indices(n_units, k=1)
+    ystar = yhat_z[:, None] + np.stack(
+        [E_z[np.ix_(p, p)][iu, ju] for p in (rng.permutation(n_units) for _ in range(n_perm))], 1)
+    r2_obs = ols_r2(y, X_full) - ols_r2(y, Z)
+    perm_r2 = ols_r2_cols(ystar, X_full) - ols_r2_cols(ystar, Z)
+    p_val = (np.sum(perm_r2 >= r2_obs) + 1) / (n_perm + 1)
+    return r2_obs, float(p_val), perm_r2
+
+
 def build_nuisance(probe, depth, lateral, fr, iu, ju):
     """Nuisance columns (no intercept): same-probe indicator, within-probe
     (mean-centered) negative distance, mean-FR similarity (-|FR diff|). Distance
