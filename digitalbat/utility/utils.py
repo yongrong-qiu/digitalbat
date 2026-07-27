@@ -16,6 +16,16 @@ from matplotlib import cm
 import torch
 import pandas as pd
 from scipy.spatial.distance import pdist, squareform
+from sklearn.feature_selection import mutual_info_regression
+from scipy.stats import pearsonr, wasserstein_distance
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import KFold
+from sklearn.metrics import r2_score
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
+from scipy import stats
+from scipy.ndimage import gaussian_filter1d
+from sklearn.manifold import TSNE
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
@@ -318,7 +328,7 @@ def lowpass_filter(sig, cutoff=1.0, fs=100.0, order=4):
     b, a = butter(order, normal_cutoff, btype='low', analog=False)
     filtered = filtfilt(b, a, sig)
     return filtered
-
+    
 
 def generate_2d_rate_map(
     loc_xx: np.ndarray,  # 1D array of x-coordinates of the animal's location over time
@@ -327,11 +337,15 @@ def generate_2d_rate_map(
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
+    num_of_bins: int = None, # number of bins for the generate rate map in each spatial dimension
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
+    smooth_sigma: float = 1.0, # sigma for Gaussian smoothing
+    rate_map_nan: bool = False, # If True, keep NaN values in rate map indicating the place never been visited
 ):
     """
     Compute the 2D rate map of a neuron by binning the 2D location space and calculating 
     the firing rate (in spikes per second) as spike count divided by time spent in each spatial bin.
+    firing_rate_in_one_bin = total_spikes_in_one_bin / total_time_spent_in_one_bin
 
     Args:
         loc_xx (np.ndarray): 1D array of x-coordinates of the animal's position.
@@ -379,35 +393,141 @@ def generate_2d_rate_map(
         plt.tight_layout()
     """
 
+    # use either loc_bin_width or num_of_bins
+    assert (loc_bin_width is None) != (num_of_bins is None), \
+        "You must specify exactly one of 'loc_bin_width' or 'num_of_bins', not both or neither."
     # Define bin edges in x and y directions
     if loc_xx_lim is not None and loc_yy_lim is not None:
-        x_edges = np.arange(loc_xx_lim[0], loc_xx_lim[1] + loc_bin_width, loc_bin_width)
-        y_edges = np.arange(loc_yy_lim[0], loc_yy_lim[1] + loc_bin_width, loc_bin_width)
+        if loc_bin_width:
+            x_edges = np.arange(loc_xx_lim[0], loc_xx_lim[1] + loc_bin_width, loc_bin_width)
+            y_edges = np.arange(loc_yy_lim[0], loc_yy_lim[1] + loc_bin_width, loc_bin_width)
+        elif num_of_bins:
+            x_edges = np.linspace(loc_xx_lim[0], loc_xx_lim[1], num_of_bins)
+            y_edges = np.linspace(loc_yy_lim[0], loc_yy_lim[1], num_of_bins)
     else:
-        x_edges = np.arange(np.min(loc_xx), np.max(loc_xx) + loc_bin_width, loc_bin_width)
-        y_edges = np.arange(np.min(loc_yy), np.max(loc_yy) + loc_bin_width, loc_bin_width)
+        if loc_bin_width:
+            x_edges = np.arange(np.min(loc_xx), np.max(loc_xx) + loc_bin_width, loc_bin_width)
+            y_edges = np.arange(np.min(loc_yy), np.max(loc_yy) + loc_bin_width, loc_bin_width)
+        elif num_of_bins:
+            x_edges = np.linspace(np.min(loc_xx), np.max(loc_xx), num_of_bins)
+            y_edges = np.linspace(np.min(loc_yy), np.max(loc_yy), num_of_bins)
+
     # Compute occupancy: number of time points spent in each spatial bin
     occupancy, _, _ = np.histogram2d(loc_xx, loc_yy, bins=[x_edges, y_edges])
     # Convert occupancy count to time (in seconds)
     occupancy_time = occupancy * dt
     # Compute total spike count in each bin (weighted histogram)
     spike_map, _, _ = np.histogram2d(loc_xx, loc_yy, bins=[x_edges, y_edges], weights=unit_spike_count)
-    # Compute firing rate: spike count / occupancy time
-    with np.errstate(divide='ignore', invalid='ignore'):
-        rate_map = np.divide(spike_map, occupancy_time)
-        rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
+
+    if not rate_map_nan:
+        # Compute firing rate: spike count / occupancy time
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rate_map = np.divide(spike_map, occupancy_time)
+            rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
+    else:
+        occupancy_time[occupancy_time == 0] = np.nan # Avoid division by zero where the subject never visited
+        rate_map = spike_map/occupancy_time # rate_map with NaN values
+        occupancy_time[np.isnan(occupancy_time)] = 0
 
     # Smooth spike counts and occupancy separately, then divide.  Smoothing
     # the rate map directly leaks zero rates from unoccupied neighbor bins
     # into occupied ones and shrinks the time-averaged firing rate.
-    sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
-    spike_map_smoothed = gaussian_filter(spike_map, sigma=sigma)
-    occupancy_time_smoothed = gaussian_filter(occupancy_time, sigma=sigma)
+    # smooth_sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
+    spike_map_smoothed = gaussian_filter(spike_map, sigma=smooth_sigma)
+    occupancy_time_smoothed = gaussian_filter(occupancy_time, sigma=smooth_sigma)
     with np.errstate(divide='ignore', invalid='ignore'):
         smoothed_rate_map = np.divide(spike_map_smoothed, occupancy_time_smoothed)
         smoothed_rate_map[np.isnan(smoothed_rate_map)] = 0
 
     return x_edges, y_edges, rate_map, smoothed_rate_map
+
+
+def generate_rate_map(
+    loc: np.ndarray, # the animal's location over time, shape: (T, 2) or (T, 3)
+    unit_spike_count: np.ndarray,  # 1D array of spike counts for one neuron at each time point, shape: (T,)
+    loc_lim: np.ndarray = None, # boundary (min + max) of the space, shape: (2, 3) or (2, 2)
+    loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
+    num_of_bins: int = None, # number of bins for the generate rate map in each spatial dimension
+    dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
+    smooth_sigma: float = 1.0, # sigma for Gaussian smoothing
+    rate_map_nan: bool = False, # If True, keep NaN values in rate map indicating the place never been visited
+):
+    # use either loc_bin_width or num_of_bins
+    assert (loc_bin_width is None) != (num_of_bins is None), \
+        "You must specify exactly one of 'loc_bin_width' or 'num_of_bins', not both or neither."
+    
+    if loc.shape[1] == 2: # 2D rate map
+        # Define bin edges in x and y directions
+        if loc_lim is not None:
+            if loc_bin_width:
+                x_edges = np.arange(loc_lim[0, 0], loc_lim[1, 0] + loc_bin_width, loc_bin_width)
+                y_edges = np.arange(loc_lim[0, 1], loc_lim[1, 1] + loc_bin_width, loc_bin_width)
+            elif num_of_bins:
+                x_edges = np.linspace(loc_lim[0, 0], loc_lim[1, 0], num_of_bins)
+                y_edges = np.linspace(loc_lim[0, 1], loc_lim[1, 1], num_of_bins)
+        else:
+            if loc_bin_width:
+                x_edges = np.arange(np.min(loc[:, 0]), np.max(loc[:, 0]) + loc_bin_width, loc_bin_width)
+                y_edges = np.arange(np.min(loc[:, 1]), np.max(loc[:, 1]) + loc_bin_width, loc_bin_width)
+            elif num_of_bins:
+                x_edges = np.linspace(np.min(loc[:, 0]), np.max(loc[:, 0]), num_of_bins)
+                y_edges = np.linspace(np.min(loc[:, 1]), np.max(loc[:, 1]), num_of_bins)
+        # Compute occupancy: number of time points spent in each spatial bin
+        occupancy, _, _ = np.histogram2d(loc[:, 0], loc[:, 1], bins=[x_edges, y_edges])
+        # Convert occupancy count to time (in seconds)
+        occupancy_time = occupancy * dt
+        # Compute total spike count in each bin (weighted histogram)
+        spike_map, _, _ = np.histogram2d(loc[:, 0], loc[:, 1], bins=[x_edges, y_edges], weights=unit_spike_count)
+
+    elif loc.shape[1] ==3: # 3D rate map
+        # Define bin edges in x and y directions
+        if loc_lim is not None:
+            if loc_bin_width:
+                x_edges = np.arange(loc_lim[0, 0], loc_lim[1, 0] + loc_bin_width, loc_bin_width)
+                y_edges = np.arange(loc_lim[0, 1], loc_lim[1, 1] + loc_bin_width, loc_bin_width)
+                z_edges = np.arange(loc_lim[0, 2], loc_lim[1, 2] + loc_bin_width, loc_bin_width)
+            elif num_of_bins:
+                x_edges = np.linspace(loc_lim[0, 0], loc_lim[1, 0], num_of_bins)
+                y_edges = np.linspace(loc_lim[0, 1], loc_lim[1, 1], num_of_bins)
+                z_edges = np.linspace(loc_lim[0, 2], loc_lim[1, 2], num_of_bins)
+        else:
+            if loc_bin_width:
+                x_edges = np.arange(np.min(loc[:, 0]), np.max(loc[:, 0]) + loc_bin_width, loc_bin_width)
+                y_edges = np.arange(np.min(loc[:, 1]), np.max(loc[:, 1]) + loc_bin_width, loc_bin_width)
+                z_edges = np.arange(np.min(loc[:, 2]), np.max(loc[:, 2]) + loc_bin_width, loc_bin_width)
+            elif num_of_bins:
+                x_edges = np.linspace(np.min(loc[:, 0]), np.max(loc[:, 0]), num_of_bins)
+                y_edges = np.linspace(np.min(loc[:, 1]), np.max(loc[:, 1]), num_of_bins)
+                z_edges = np.linspace(np.min(loc[:, 2]), np.max(loc[:, 2]), num_of_bins)
+        # Compute occupancy: number of time points spent in each spatial bin
+        occupancy, _ = np.histogramdd(loc, bins=[x_edges, y_edges, z_edges])
+        # Convert occupancy count to time (in seconds)
+        occupancy_time = occupancy * dt
+        # Compute total spike count in each bin (weighted histogram)
+        spike_map, _ = np.histogramdd(loc, bins=[x_edges, y_edges, z_edges], weights=unit_spike_count)
+
+    if not rate_map_nan:
+        # Compute firing rate: spike count / occupancy time
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rate_map = np.divide(spike_map, occupancy_time)
+            rate_map[np.isnan(rate_map)] = 0  # Replace NaNs (from divide-by-zero) with 0
+    else:
+        occupancy_time[occupancy_time == 0] = np.nan # Avoid division by zero where the subject never visited
+        rate_map = spike_map/occupancy_time # rate_map with NaN values
+        occupancy_time[np.isnan(occupancy_time)] = 0
+
+    # Smooth spike counts and occupancy separately, then divide.  Smoothing
+    # the rate map directly leaks zero rates from unoccupied neighbor bins
+    # into occupied ones and shrinks the time-averaged firing rate.
+    # smooth_sigma = 1.0  # Standard deviation of Gaussian kernel (in units of spatial bins)
+    spike_map_smoothed = gaussian_filter(spike_map, sigma=smooth_sigma)
+    occupancy_time_smoothed = gaussian_filter(occupancy_time, sigma=smooth_sigma)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        smoothed_rate_map = np.divide(spike_map_smoothed, occupancy_time_smoothed)
+        smoothed_rate_map[np.isnan(smoothed_rate_map)] = 0
+
+    return ((x_edges, y_edges), rate_map, smoothed_rate_map) if loc.shape[1] == 2 else ((x_edges, y_edges, z_edges), rate_map, smoothed_rate_map)
+
 
 def plot_2d_rate_map(
     unit: int, # neuron index
@@ -1792,4 +1912,2270 @@ class OrthogonalityPermutationTest:
         plt.tight_layout()
         return fig
 
+
+def list_pad_concatenate(spike_list):
+    """
+    spike_list: a list of 2D or 3D arrays.
+    
+    - Concatenates along Axis 0 (Timepoints).
+    - Pads Axis 1 (Locations) with NaN to match the largest found in the list.
+    - Pads Axis 2 (Neurons), if it exists, to match the largest found in the list.
+    """
+    if not spike_list:
+        return np.array([])
+    # 1. Determine the dimensionality (2D or 3D)
+    # We assume all arrays in the list have the same number of dimensions
+    ndim = spike_list[0].ndim
+    # 2. Find maximums for each dimension starting from axis 1
+    # max_dims will store [max_axis_1, max_axis_2]
+    max_dims = []
+    for d in range(1, ndim):
+        max_dims.append(max(arr.shape[d] for arr in spike_list))
+    padded_list = []
+    for arr in spike_list:
+        # 3. Build a dynamic pad_width tuple
+        # Axis 0: Always (0, 0) because we are concatenating here
+        pad_config = [(0, 0)]
+        # Axis 1 and (if exists) Axis 2
+        for d in range(1, ndim):
+            padding_needed = max_dims[d-1] - arr.shape[d]
+            pad_config.append((0, padding_needed))
+        # 4. Apply padding
+        # astype(float) is required to support np.nan
+        padded_arr = np.pad(
+            arr.astype(float), 
+            pad_width=pad_config, 
+            mode='constant', 
+            constant_values=np.nan
+        )
+        padded_list.append(padded_arr)
+        
+    # 5. Concatenate along the first dimension (Axis 0)
+    return np.concatenate(padded_list, axis=0)
+
+
+def compute_angles(vel):
+    """
+    vel: numpy array of shape (T, 3) representing [vx, vy, vz]
+    Returns azimuth and elevation in degrees.
+    """
+    vx = vel[:, 0]
+    vy = vel[:, 1]
+    vz = vel[:, 2]
+
+    # 1. Compute Azimuth (Yaw)
+    # np.arctan2(y, x) handles the quadrant signs automatically
+    azimuth = np.arctan2(vy, vx)
+
+    # 2. Compute Elevation (Pitch)
+    # We need the horizontal magnitude (projection on xy-plane)
+    horizontal_mag = np.sqrt(vx**2 + vy**2)
+    elevation = np.arctan2(vz, horizontal_mag)
+
+    return np.degrees(azimuth), np.degrees(elevation)
+
+
+def generate_landmark_dicts(xyz_dict, landmark_phy, threshold=0.3):
+    reward_dict = {}
+    perch_dict = {}
+    for key, coords in xyz_dict.items():
+        # 1. Identify which dataset ID this key belongs to (e.g., 'Dataset_1')
+        dataset_id = None
+        for ds_name in landmark_phy.keys():
+            if ds_name in key:
+                dataset_id = ds_name
+                break
+        if dataset_id is None:
+            print(f"Warning: No matching dataset found in landmark_phy for key {key}")
+            continue
+        # Get the specific landmarks for this dataset
+        landmarks = landmark_phy[dataset_id]  
+        # 2. Helper function to find points within threshold of any landmark in a set
+        def get_proximity_mask(data_pts, landmark_pts):
+            # Use broadcasting: 
+            # data_pts: (N, 1, 3) minus landmark_pts: (1, M, 3)
+            # Resulting dists: (N, M)
+            dists = np.linalg.norm(data_pts[:, np.newaxis, :] - landmark_pts[np.newaxis, :, :], axis=2)
+            # Logical OR: Is the point within threshold of ANY landmark?
+            is_near = np.any(dists < threshold, axis=1)
+            return is_near
+        # 3. Process Reward Locations
+        rew_landmarks = landmarks['rew_locs']
+        reward_dict[key] = get_proximity_mask(coords, rew_landmarks)
+        # 4. Process Perch Locations
+        perch_landmarks = landmarks['perch_locs']
+        perch_dict[key] = get_proximity_mask(coords, perch_landmarks)
+    return reward_dict, perch_dict
+
+
+def extract_flight_type_saliency(
+    all_saliency, 
+    all_flight_session, 
+    all_rel_time, 
+    all_reward, 
+    all_perch, 
+    corr_dict, 
+    corr_threshold=0.2,
+):
+    """
+    Generate a dictionary: each key is a flight type such as ('Reward', 'Perch') and corresponding values are a list of 2D arrays, 
+    each array with a shape of (number_of_timepoints_within_flight, number_of_neurons), representing neuronal responses at each flight trajectory. 
+    And we also have a threshold 'corr_threshold' to use only neurons with predictive correlation values larger than the threshold.
+    """
+    # 1. Initialize the dictionary with flight types as keys
+    flight_types = [
+        ('Reward', 'Reward'), ('Reward', 'Perch'), ('Reward', 'Other'),
+        ('Perch', 'Reward'), ('Perch', 'Perch'), ('Perch', 'Other'),
+        ('Other', 'Reward'), ('Other', 'Perch'), ('Other', 'Other')
+    ]
+    result_dict = {ft: [] for ft in flight_types}
+    # 2. Identify flight segments using relative time resets (0.0 to 1.0)
+    # diff < 0 indicates the end of one flight and the start of the next
+    jumps = np.where(np.diff(all_rel_time) < 0)[0]
+    starts = np.concatenate(([0], jumps + 1))
+    ends = np.concatenate((jumps, [len(all_rel_time) - 1]))
+
+    for s, e in zip(starts, ends):
+        # 3. Determine the Flight Type for this segment
+        def get_loc_type(idx):
+            if all_reward[idx]: return 'Reward'
+            if all_perch[idx]: return 'Perch'
+            return 'Other'
+        current_ft = (get_loc_type(s), get_loc_type(e))
+        
+        # 4. Identify the Session Key
+        # Format: 'Dataset_3_14543_240419_f1' -> Key: 'Dataset_3_14543_240419'
+        full_flight_id = all_flight_session[s]
+        session_key = "_".join(full_flight_id.split("_")[:-1])
+        if session_key not in corr_dict:
+            continue
+
+        # 5. Filter Neurons by Correlation and Padding
+        # Get correlations for this specific session
+        session_corrs = corr_dict[session_key] # shape: (num_neurons_in_session,)
+        
+        # # Create a mask for neurons that:
+        # # a) Exist in this session (not NaN in the spike data)
+        # # b) Pass the correlation threshold
+        # # Note: all_true_spike[s, :] is the row for the first timepoint of the flight
+        # is_not_nan = ~np.isnan(all_true_spike[s, :len(session_corrs)])
+        # is_above_threshold = session_corrs > corr_threshold
+        # # Combined mask for the second dimension
+        # # We handle potential size mismatch if session_corrs is shorter than 317
+        # neuron_mask = np.zeros(all_true_spike.shape[1], dtype=bool)
+        # valid_len = min(len(is_above_threshold), len(is_not_nan))
+        # neuron_mask[:valid_len] = is_not_nan[:valid_len] & is_above_threshold[:valid_len]
+
+        # Create a mask for neurons that passes the correlation threshold
+        # because we know that num_neurons_in_session is not larger than all_true_spike.shape[-1]
+        neuron_mask = np.where(session_corrs > corr_threshold)[0]
+
+        # 6. Extract the slice and store
+        # Shape: (timepoints_in_segment, timepoints_in_segment, selected_neurons)
+        flight_response = all_saliency[s : e + 1, :e-s+1, neuron_mask]
+        if flight_response.shape[-1] > 0:
+            result_dict[current_ft].append(flight_response)
+
+    return result_dict
+
+
+class BatSpatialInfo:
+    """
+    For a target session, compute spatial_info in the physical space and the 3D latent space, the coordinates in
+    the physical space and the 3D latent space, spikes for each neuron and each flight function type (such as reward -> reward)
+    and each flight geometry cluster in a flight function type.
+
+    all_xyz.shape: (num_of_timepoints, 3)
+    all_true_spike.shape: (num_of_timepoints, num_of_neurons)
+    """
+    def __init__(self, session_id, all_session, all_xyz, pca_sub, all_latents, 
+                 all_true_spike, all_cluster_session, all_rel_time, all_reward, all_perch, dt=0.1):
+        self.session_id = session_id
+        self.dt = dt
+        # Mask for the specific session
+        self.session_mask = (all_session == session_id)
+        # Extract session-specific data
+        self.xyz = all_xyz[self.session_mask]
+        self.pca_3d = pca_sub[self.session_mask]
+        self.latent_32d = all_latents[self.session_mask]
+        self.clusters = all_cluster_session[self.session_mask]
+        # Extract session-specific behavioral variables
+        session_rel_time = all_rel_time[self.session_mask]
+        session_reward = all_reward[self.session_mask]
+        session_perch = all_perch[self.session_mask]
+        # Get spikes and drop neurons that are all NaN for this session
+        session_spikes = all_true_spike[self.session_mask]
+        self.valid_neuron_mask = ~np.all(np.isnan(session_spikes), axis=0)
+        self.spikes = session_spikes[:, self.valid_neuron_mask] # Shape: (T_session, N_valid)
+        self.n_time, self.n_neurons = self.spikes.shape
+        # --- Identify Flight Functional Types per time point ---
+        self.flight_types = np.empty(self.n_time, dtype=object)
+        if self.n_time > 0:
+            # Find the indices where a new flight begins (relative time drops back to 0)
+            jumps = np.where(np.diff(session_rel_time) < 0)[0]
+            # Flight starts at index 0 and every index right after a jump
+            starts = np.concatenate(([0], jumps + 1))
+            # Flight ends at each jump index, and the final flight ends at the last index of the session
+            ends = np.concatenate((jumps, [self.n_time - 1]))
+            # Assign functional type to every timepoint within each flight segment
+            for s, e in zip(starts, ends):
+                # Guard rails to make sure indices don't overflow or create empty slices
+                if s >= self.n_time or e >= self.n_time or s > e:
+                    continue
+                s_type = 'Reward' if session_reward[s] else ('Perch' if session_perch[s] else 'Other')
+                e_type = 'Reward' if session_reward[e] else ('Perch' if session_perch[e] else 'Other')
+                if s_type != 'Other' and e_type != 'Other':
+                    ft_key = (s_type, e_type)
+                else:
+                    ft_key = ('Other',)
+                self.flight_types[s:e+1] = str(ft_key)
+
+    def _get_equal_occ_bins(self, coords, n_bins_per_dim=10):
+        """Calculates bin indices for each point based on coordinate ranges."""
+        bin_indices = np.zeros_like(coords, dtype=int)
+        for d in range(3): 
+            edges = np.linspace(np.min(coords[:, d]), np.max(coords[:, d]), n_bins_per_dim + 1)
+            bin_indices[:, d] = np.digitize(coords[:, d], edges[1:-1])
+        return bin_indices[:, 0] + \
+               n_bins_per_dim * bin_indices[:, 1] + \
+               (n_bins_per_dim**2) * bin_indices[:, 2]
+
+    def compute_skaggs_si(self, coords, spikes, n_bins_per_dim=20):
+        """Computes Skaggs Spatial Information (bits/spike)."""
+        bin_ids = self._get_equal_occ_bins(coords, n_bins_per_dim)
+        n_total_bins = n_bins_per_dim**3
+        occ_counts = np.bincount(bin_ids, minlength=n_total_bins)
+        Pi = occ_counts / len(bin_ids)
+        si_per_neuron = []
+        for n in range(spikes.shape[1]):
+            r_vec = spikes[:, n]
+            mean_rate = np.mean(r_vec)
+            if mean_rate == 0:
+                si_per_neuron.append(0.0)
+                continue
+            bin_sums = np.bincount(bin_ids, weights=r_vec, minlength=n_total_bins)
+            lambda_i = np.divide(bin_sums, occ_counts, out=np.zeros_like(bin_sums), where=occ_counts > 0)
+            ratio = lambda_i / mean_rate
+            mask = (ratio > 0) & (Pi > 0)
+            info = np.sum(Pi[mask] * ratio[mask] * np.log2(ratio[mask]))
+            si_per_neuron.append(info)
+        return np.array(si_per_neuron)
+
+    def compute_ksg_si(self, high_dim_coords, spikes):
+        """High-dimensional SI using KSG estimator (Mutual Information)."""
+        mi_scores = []
+        for n in range(spikes.shape[1]):
+            score = mutual_info_regression(high_dim_coords, spikes[:, n], 
+                                           discrete_features=False, n_neighbors=3)
+            mi_scores.append(score[0] / np.log(2))
+        return np.array(mi_scores)
+
+    def get_all_spatial_info(self):
+        spatial_info = {}
+        # 1. Session SI (3D Physical vs 3D Latent)
+        spatial_info['session_si_physical'] = self.compute_skaggs_si(self.xyz, self.spikes)
+        spatial_info['session_si_latent_3d'] = self.compute_skaggs_si(self.pca_3d, self.spikes)
+        # 2. Cluster-specific SI
+        unique_clusters = np.unique(self.clusters)
+        spatial_info['clusters'] = {}
+        for cluster in unique_clusters:
+            c_mask = (self.clusters == cluster)
+            if np.sum(c_mask) < 10: continue 
+            spatial_info['clusters'][cluster] = {
+                'si_physical': self.compute_skaggs_si(self.xyz[c_mask], self.spikes[c_mask]),
+                'si_latent_3d': self.compute_skaggs_si(self.pca_3d[c_mask], self.spikes[c_mask]),
+                'xyz': self.xyz[c_mask],
+                'pca_3d': self.pca_3d[c_mask],
+                'spikes': self.spikes[c_mask],
+            }
+            
+        # 3. Hierarchical Hierachy: Flight Function Types -> Clusters
+        spatial_info['flight_function_types'] = {}
+        # Defined targets
+        target_types = [
+            ('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)
+        ]
+        for ft in target_types:
+            ft_str = str(ft)
+            ft_mask = (self.flight_types == ft_str)
+            if np.sum(ft_mask) < 10: continue
+            spatial_info['flight_function_types'][ft] = {'clusters': {}}
+            # Sub-sample clusters within this specific flight function block
+            ft_clusters = self.clusters[ft_mask]
+            unique_ft_clusters = np.unique(ft_clusters)
+            for cluster in unique_ft_clusters:
+                # Combined mask: must belong to the functional type AND the geometry cluster
+                combined_mask = (self.flight_types == ft_str) & (self.clusters == cluster)
+                if np.sum(combined_mask) < 10: continue
+                spatial_info['flight_function_types'][ft]['clusters'][cluster] = {
+                    'si_physical': self.compute_skaggs_si(self.xyz[combined_mask], self.spikes[combined_mask]),
+                    'si_latent_3d': self.compute_skaggs_si(self.pca_3d[combined_mask], self.spikes[combined_mask]),
+                    'xyz': self.xyz[combined_mask],
+                    'pca_3d': self.pca_3d[combined_mask],
+                    'spikes': self.spikes[combined_mask],
+                    'mask': combined_mask,
+                }
+        # 4. High-Dimensional SI (32D Latent)
+        spatial_info['global_si_latent_32d'] = self.compute_ksg_si(self.latent_32d, self.spikes)
+        
+        return spatial_info
+    
+    def compute_shuffled_si(self, neuron_idx, cluster_id=None, n_shuffles=1000):
+        """Calculates null distribution by circularly shifting spike trains."""
+        if cluster_id:
+            c_mask = (self.clusters == cluster_id)
+            coords = self.pca_3d[c_mask] # or self.xyz, self.pca_3d
+            spikes = self.spikes[c_mask, neuron_idx]
+        else:
+            coords = self.pca_3d
+            spikes = self.spikes[:, neuron_idx]
+            
+        n_samples = len(spikes)
+        null_distribution = []
+        # Pre-calculate bin IDs for original coordinates
+        bin_ids = self._get_equal_occ_bins(coords)
+        for _ in range(n_shuffles):
+            # Circular shift: maintain temporal structure but decouple from position
+            shift = np.random.randint(int(0.1*n_samples), int(0.9*n_samples))
+            shuffled_spikes = np.roll(spikes, shift)
+            # Calculate SI for this shuffle
+            mean_rate = np.mean(shuffled_spikes)
+            if mean_rate == 0:
+                null_distribution.append(0.0)
+                continue
+                
+            occ_counts = np.bincount(bin_ids, minlength=1000)
+            bin_sums = np.bincount(bin_ids, weights=shuffled_spikes, minlength=1000)
+            lambda_i = np.divide(bin_sums, occ_counts, out=np.zeros_like(bin_sums), where=occ_counts > 0)
+            
+            Pi = occ_counts / n_samples
+            ratio = lambda_i / mean_rate
+            mask = (ratio > 0) & (Pi > 0)
+            null_distribution.append(np.sum(Pi[mask] * ratio[mask] * np.log2(ratio[mask])))
+            
+        return np.array(null_distribution)
+    
+
+class BatRateMapSim:
+    """
+    For a target session, compute the similarities between rate maps in the physical space and the 3D latent space, 
+    using different metrics, for each neuron and each flight function type (such as reward -> reward)
+    and each flight geometry cluster in a flight function type.
+
+    all_xyz.shape: (num_of_timepoints, 3)
+    all_true_spike.shape: (num_of_timepoints, num_of_neurons)
+    """
+    def __init__(self, session_id, all_session, all_xyz, pca_sub, all_latents, 
+                 all_true_spike, all_cluster_session, all_rel_time, all_reward, all_perch, dt=0.1):
+        self.session_id = session_id
+        self.dt = dt
+        # Mask for the specific session
+        self.session_mask = (all_session == session_id)
+        # Extract session-specific coordinate limits
+        self.xyz = all_xyz[self.session_mask]
+        self.pca_3d = pca_sub[self.session_mask]
+        self.latent_32d = all_latents[self.session_mask]
+        self.clusters = all_cluster_session[self.session_mask]
+        # Global session boundary limits shared across all internal clusters
+        self.loc_xyz_lim = np.stack((np.min(self.xyz, axis=0), np.max(self.xyz, axis=0)), axis=0) # shape: (2, 3)
+        self.loc_pca_lim = np.stack((np.min(self.pca_3d, axis=0), np.max(self.pca_3d, axis=0)), axis=0)
+        # Extract behavioral variables
+        session_rel_time = all_rel_time[self.session_mask]
+        session_reward = all_reward[self.session_mask]
+        session_perch = all_perch[self.session_mask]
+        # Spikes array matching valid neurons
+        session_spikes = all_true_spike[self.session_mask]
+        self.valid_neuron_mask = ~np.all(np.isnan(session_spikes), axis=0)
+        self.spikes = session_spikes[:, self.valid_neuron_mask]
+        self.n_time, self.n_neurons = self.spikes.shape
+        # Identify Flight Functional Types per time point
+        self.flight_types = np.empty(self.n_time, dtype=object)
+        if self.n_time > 0:
+            jumps = np.where(np.diff(session_rel_time) < 0)[0]
+            starts = np.concatenate(([0], jumps + 1))
+            ends = np.concatenate((jumps, [self.n_time - 1]))
+            for s, e in zip(starts, ends):
+                if s >= self.n_time or e >= self.n_time or s > e:
+                    continue
+                s_type = 'Reward' if session_reward[s] else ('Perch' if session_perch[s] else 'Other')
+                e_type = 'Reward' if session_reward[e] else ('Perch' if session_perch[e] else 'Other')
+                ft_key = (s_type, e_type) if s_type != 'Other' and e_type != 'Other' else ('Other',)
+                self.flight_types[s:e+1] = str(ft_key)
+
+    def _compute_pairwise_similarity(self, maps_list, metric_func):
+        """Helper to calculate mean similarity of all unique pairs of maps for each neuron."""
+        n_clusters = len(maps_list)
+        if n_clusters <= 1:
+            return np.full(self.n_neurons, np.nan)
+        # Accumulator array shape: (num_pairs, n_neurons)
+        pair_scores = []
+        for i in range(n_clusters):
+            for j in range(i + 1, n_clusters):
+                map_a = maps_list[i] # Shape: (num_bins, num_bins, num_bins, n_neurons)
+                map_b = maps_list[j]
+                scores_per_neuron = np.zeros(self.n_neurons)
+                for n in range(self.n_neurons):
+                    scores_per_neuron[n] = metric_func(map_a[..., n], map_b[..., n])
+                pair_scores.append(scores_per_neuron)
+                
+        return np.mean(np.array(pair_scores), axis=0)
+
+    def _get_valid_cluster_maps(self, ft_str, space_type='physical', num_of_bins=20):
+        """Generates smoothed 3D rate maps for clusters within a functional type.
+        
+        If a neuron has no spikes within a cluster, its rate map is set to all NaNs.
+        """
+        ft_mask = (self.flight_types == ft_str)
+        unique_clusters = np.unique(self.clusters[ft_mask])
+        coords = self.xyz if space_type == 'physical' else self.pca_3d
+        lims = self.loc_xyz_lim if space_type == 'physical' else self.loc_pca_lim
+        
+        maps_list = []
+        for clu in unique_clusters:
+            combined_mask = (self.flight_types == ft_str) & (self.clusters == clu)
+            if np.sum(combined_mask) < 10:
+                continue
+            # Pre-allocate array: (Bins, Bins, Bins, Neurons)
+            cluster_maps = np.zeros((num_of_bins - 1, num_of_bins - 1, num_of_bins - 1, self.n_neurons))
+            for n in range(self.n_neurons):
+                # Check if the neuron actually spikes in this specific cluster segment
+                if np.sum(self.spikes[combined_mask, n]) == 0:
+                    cluster_maps[..., n] = np.nan  # Mark this neuron as inactive for this cluster
+                    continue
+                # Generate 3D maps using smoothed_rate_map (index 2)
+                _, _, r_map = generate_rate_map(
+                    loc=coords[combined_mask],
+                    unit_spike_count=self.spikes[combined_mask, n],
+                    loc_lim=lims,
+                    loc_bin_width=None,
+                    num_of_bins=num_of_bins,
+                    dt=self.dt
+                )
+                cluster_maps[..., n] = r_map
+                
+            maps_list.append(cluster_maps)
+        return maps_list
+
+    def get_all_corr(self):
+        """Computes average spatial Pearson correlations for visited bins."""
+        spatial_corr = {'flight_function_types': {}}
+        target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
+        
+        def pearson_metric(m1, m2):
+            # If either map belongs to an inactive neuron for this cluster, return NaN
+            if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+                return np.nan
+            visited = (m1 > 0) & (m2 > 0)
+            if np.sum(visited) < 5 or np.std(m1[visited]) == 0 or np.std(m2[visited]) == 0:
+                return np.nan
+            return pearsonr(m1[visited], m2[visited])[0]
+
+        for ft in target_types:
+            ft_str = str(ft)
+            if np.sum(self.flight_types == ft_str) == 0: continue
+            
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            
+            spatial_corr['flight_function_types'][ft] = {
+                'corr_physical': self._compute_pairwise_similarity(phys_maps, pearson_metric),
+                'corr_latent': self._compute_pairwise_similarity(lat_maps, pearson_metric)
+            }
+        return spatial_corr
+
+    def get_all_Wasserstein(self, num_of_bins=20):
+        """Computes Earth Mover's Distance similarity profiles."""
+        import ot  # optional dep (POT); imported lazily so the package imports without it
+        spatial_wass = {'flight_function_types': {}}
+        target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
+        
+        # def wasserstein_metric(m1, m2):
+        #     if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+        #         return np.nan
+        #     v1, v2 = m1.flatten(), m2.flatten()
+        #     if np.sum(v1) == 0 or np.sum(v2) == 0:
+        #         return np.nan
+        #     return wasserstein_distance(v1 / np.sum(v1), v2 / np.sum(v2))
+        
+        # Pre-compute the 3D grid coordinate locations once globally 
+        # so we don't recalculate them inside the heavy nested loops
+        grid_coords = np.array(np.meshgrid(np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), indexing='ij')).reshape(3, -1).T
+        # Compute the pairwise Euclidean distance matrix between all 8000 bins (20x20x20)
+        # This represents the actual "metric distance space" for the transport cost
+        M_cost = ot.dist(grid_coords, grid_coords, metric='euclidean')
+        def wasserstein_metric(m1, m2):
+            import ot  # optional dep (POT); imported lazily so the package imports without it
+            # If either map belongs to an inactive neuron for this cluster, return NaN
+            if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+                return np.nan
+            v1, v2 = m1.flatten(), m2.flatten()
+            # Sum of weights must be > 0 to normalize
+            if np.sum(v1) == 0 or np.sum(v2) == 0:
+                return np.nan
+            # EMD requires the mass distributions to sum to 1 (probability distributions)
+            p1 = v1 / np.sum(v1)
+            p2 = v2 / np.sum(v2)
+            # Compute the true multi-dimensional Earth Mover's Distance
+            # ot.emd2 returns the total scalar cost: sum(mass_moved * Euclidean_distance)
+            return ot.emd2(p1, p2, M_cost)
+
+        for ft in target_types:
+            ft_str = str(ft)
+            if np.sum(self.flight_types == ft_str) == 0: continue
+            
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            
+            spatial_wass['flight_function_types'][ft] = {
+                'wass_physical': self._compute_pairwise_similarity(phys_maps, wasserstein_metric),
+                'wass_latent': self._compute_pairwise_similarity(lat_maps, wasserstein_metric)
+            }
+        return spatial_wass
+
+    def get_all_Jaccard(self):
+        """Computes Jaccard Intersection-over-Union similarity on thresholded place fields."""
+        spatial_jac = {'flight_function_types': {}}
+        target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
+        
+        def jaccard_metric(m1, m2):
+            if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+                return np.nan
+            field1 = m1 > (0.2 * np.max(m1)) if np.max(m1) > 0 else np.zeros_like(m1, dtype=bool)
+            field2 = m2 > (0.2 * np.max(m2)) if np.max(m2) > 0 else np.zeros_like(m2, dtype=bool)
+            
+            intersection = np.sum(field1 & field2)
+            union = np.sum(field1 | field2)
+            return intersection / union if union > 0 else np.nan
+
+        for ft in target_types:
+            ft_str = str(ft)
+            if np.sum(self.flight_types == ft_str) == 0: continue
+            
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            
+            spatial_jac['flight_function_types'][ft] = {
+                'jaccard_physical': self._compute_pairwise_similarity(phys_maps, jaccard_metric),
+                'jaccard_latent': self._compute_pairwise_similarity(lat_maps, jaccard_metric)
+            }
+        return spatial_jac
+    
+    def get_shuffled_jaccard_baseline(self, ft_str, n_shuffles=20, num_of_bins=20):
+        """
+        Computes a shuffled baseline for Jaccard indices by circularly shifting 
+        the spike trains before rate map generation. This preserves the exact
+        behavioral occupancy distributions,
+        but destroys the spatial relationship to neural tuning.
+        """
+        ft_mask = (self.flight_types == ft_str)
+        unique_clusters = np.unique(self.clusters[ft_mask])
+        
+        # Target types to evaluate side-by-side
+        spaces = ['physical', 'latent']
+        shuffled_results = {'physical': [], 'latent': []}
+        
+        for space in spaces:
+            coords = self.xyz if space == 'physical' else self.pca_3d
+            lims = self.loc_xyz_lim if space == 'physical' else self.loc_pca_lim
+            
+            # We will collect pairwise similarities across multiple random shuffles
+            shuffle_pairs = []
+            
+            for shuffle_idx in range(n_shuffles):
+                maps_list = []
+                
+                for clu in unique_clusters:
+                    combined_mask = (self.flight_types == ft_str) & (self.clusters == clu)
+                    if np.sum(combined_mask) < 10:
+                        continue
+                    
+                    cluster_maps = np.zeros((num_of_bins - 1, num_of_bins - 1, num_of_bins - 1, self.n_neurons))
+                    
+                    for n in range(self.n_neurons):
+                        if np.sum(self.spikes[combined_mask, n]) == 0:
+                            cluster_maps[..., n] = np.nan
+                            continue
+                        
+                        # --- THE SHUFFLE ---
+                        # Circularly shift spikes by a random offset to break spatial correlation 
+                        # while keeping the temporal structure of the spikes and the exact occupancy intact.
+                        raw_spikes = self.spikes[combined_mask, n]
+                        shift_offset = np.random.randint(int(len(raw_spikes) * 0.2), int(len(raw_spikes) * 0.8))
+                        shuffled_spikes = np.roll(raw_spikes, shift_offset)
+                        
+                        # Generate rate map with intact occupancy but shuffled spikes
+                        _, _, r_map = generate_rate_map(
+                            loc=coords[combined_mask],
+                            unit_spike_count=shuffled_spikes,
+                            loc_lim=lims,
+                            loc_bin_width=None,
+                            num_of_bins=num_of_bins,
+                            dt=self.dt
+                        )
+                        cluster_maps[..., n] = r_map
+                        
+                    maps_list.append(cluster_maps)
+                
+                # Compute pairwise similarities for this shuffle iteration
+                if len(maps_list) > 1:
+                    # Re-using your exact Jaccard metric logic
+                    def jaccard_metric(m1, m2):
+                        if np.any(np.isnan(m1)) or np.any(np.isnan(m2)): return np.nan
+                        f1 = m1 > (0.2 * np.max(m1)) if np.max(m1) > 0 else np.zeros_like(m1, dtype=bool)
+                        f2 = m2 > (0.2 * np.max(m2)) if np.max(m2) > 0 else np.zeros_like(m2, dtype=bool)
+                        union = np.sum(f1 | f2)
+                        return np.sum(f1 & f2) / union if union > 0 else np.nan
+                    
+                    # Compute average across pairs for this shuffle
+                    mean_scores = self._compute_pairwise_similarity(maps_list, jaccard_metric)
+                    shuffle_pairs.append(mean_scores)
+                    
+            if len(shuffle_pairs) > 0:
+                # Average across shuffles to get a stable baseline per neuron
+                shuffled_results[space] = np.nanmean(np.array(shuffle_pairs), axis=0)
+                
+        return shuffled_results
+    
+    def get_shuffled_wass_baseline(self, ft_str, n_shuffles=20, num_of_bins=20):
+        """
+        Computes a shuffled baseline for Wasserstein distances by circularly shifting 
+        the spike trains before rate map generation. This preserves the exact
+        behavioral occupancy distributions,
+        but destroys the spatial relationship to neural tuning.
+        """
+        import ot  # optional dep (POT); imported lazily so the package imports without it
+        ft_mask = (self.flight_types == ft_str)
+        unique_clusters = np.unique(self.clusters[ft_mask])
+        
+        # Target types to evaluate side-by-side
+        spaces = ['physical', 'latent']
+        shuffled_results = {'physical': [], 'latent': []}
+        
+        for space in spaces:
+            coords = self.xyz if space == 'physical' else self.pca_3d
+            lims = self.loc_xyz_lim if space == 'physical' else self.loc_pca_lim
+            
+            # We will collect pairwise similarities across multiple random shuffles
+            shuffle_pairs = []
+            
+            for shuffle_idx in range(n_shuffles):
+                print(f'shuffle_idx: {shuffle_idx}')
+                maps_list = []
+                
+                for clu in unique_clusters:
+                    combined_mask = (self.flight_types == ft_str) & (self.clusters == clu)
+                    if np.sum(combined_mask) < 10:
+                        continue
+                    
+                    cluster_maps = np.zeros((num_of_bins - 1, num_of_bins - 1, num_of_bins - 1, self.n_neurons))
+                    
+                    for n in range(self.n_neurons):
+                        if np.sum(self.spikes[combined_mask, n]) == 0:
+                            cluster_maps[..., n] = np.nan
+                            continue
+                        
+                        # --- THE SHUFFLE ---
+                        # Circularly shift spikes by a random offset to break spatial correlation 
+                        # while keeping the temporal structure of the spikes and the exact occupancy intact.
+                        raw_spikes = self.spikes[combined_mask, n]
+                        shift_offset = np.random.randint(int(len(raw_spikes) * 0.2), int(len(raw_spikes) * 0.8))
+                        shuffled_spikes = np.roll(raw_spikes, shift_offset)
+                        
+                        # Generate rate map with intact occupancy but shuffled spikes
+                        _, _, r_map = generate_rate_map(
+                            loc=coords[combined_mask],
+                            unit_spike_count=shuffled_spikes,
+                            loc_lim=lims,
+                            loc_bin_width=None,
+                            num_of_bins=num_of_bins,
+                            dt=self.dt
+                        )
+                        cluster_maps[..., n] = r_map
+                        
+                    maps_list.append(cluster_maps)
+                
+                # Compute pairwise similarities for this shuffle iteration
+                if len(maps_list) > 1:
+                    # Re-using your exact Wasserstein distane logic
+                    grid_coords = np.array(np.meshgrid(np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), indexing='ij')).reshape(3, -1).T
+                    M_cost = ot.dist(grid_coords, grid_coords, metric='euclidean')
+                    def wasserstein_metric(m1, m2):
+                        import ot  # optional dep (POT); imported lazily so the package imports without it
+                        if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
+                            return np.nan
+                        v1, v2 = m1.flatten(), m2.flatten()
+                        if np.sum(v1) == 0 or np.sum(v2) == 0:
+                            return np.nan
+                        p1 = v1 / np.sum(v1)
+                        p2 = v2 / np.sum(v2)
+                        return ot.emd2(p1, p2, M_cost)
+                    
+                    # Compute average across pairs for this shuffle
+                    mean_scores = self._compute_pairwise_similarity(maps_list, wasserstein_metric)
+                    shuffle_pairs.append(mean_scores)
+                    
+            if len(shuffle_pairs) > 0:
+                # Average across shuffles to get a stable baseline per neuron
+                shuffled_results[space] = np.nanmean(np.array(shuffle_pairs), axis=0)
+                
+        return shuffled_results
+    
+
+
+def decode_spikes_to_latent(all_true_spike, all_latents, all_session, alphas=[0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]):
+    """
+    Projects raw session-wise spikes into the latent space using a cross-validated 
+    Ridge regression encoder with a 4-1-1 (train-val-test) split across 6 folds.
+    
+    Parameters:
+    -----------
+    all_true_spike : np.ndarray
+        Shape (8332, 266), neural spike matrix containing NaN paddings.
+    all_latents : np.ndarray
+        Shape (8332, 32), true latent representations.
+    all_session : np.ndarray
+        Shape (8332,), 1D array of session names matching each time point.
+    alphas : list
+        List of L2 regularization hyperparameters to tune.
+        
+    Returns:
+    --------
+    all_spike_in_latent : np.ndarray
+        Shape (8332, 32), out-of-sample reconstructed latents aligned with original order.
+    """
+    # Initialize the final output array matching the shape of all_latents
+    all_spike_in_latent = np.full_like(all_latents, np.nan)
+    unique_sessions = np.unique(all_session)
+    print(f"Starting latent reconstruction across {len(unique_sessions)} sessions...\n")
+    for sess in unique_sessions:
+        # Step 1: Extract session data and keep position masks
+        sess_mask = (all_session == sess)
+        X_sess_raw = all_true_spike[sess_mask] # Spikes for this session
+        Y_sess = all_latents[sess_mask]        # Target latents for this session
+        # Remove columns (neurons) that are entirely NaN values in this session
+        valid_neurons_mask = ~np.isnan(X_sess_raw).all(axis=0)
+        X_sess = X_sess_raw[:, valid_neurons_mask]
+        
+        n_samples = X_sess.shape[0]
+        # Guard rail: ensure we have enough data points to do a 6-fold split
+        if n_samples < 6:
+            print(f"Skipping session {sess}: too few samples ({n_samples}).")
+            continue
+        
+        # PREPROCESSING BLOCK (SESSION-SPECIFIC)
+        # A. Transform Spikes: Log(x+1) or Sqrt(x) to stabilize Poisson variance
+        # We'll use Log1p here as it is robust to high-count bursting transients
+        # X_sess = np.log1p(X_sess)
+        # B. Z-Score Spikes (Scale features symmetrically for Ridge L2 penalty)
+        scaler_X = StandardScaler()
+        X_sess = scaler_X.fit_transform(X_sess)
+        # C. Z-Score Latents (Ensures multi-output R2 treats all 32 dims equally)
+        scaler_Y = StandardScaler()
+        Y_sess = scaler_Y.fit_transform(Y_sess)
+
+        # Initialize an array to hold out-of-sample predictions for this specific session
+        sess_predictions = np.full_like(Y_sess, np.nan)
+        # Steps 2 & 3: 6-Fold Cross Validation with Native Shuffling
+        # Setting random_state ensures reproducibility while shuffling
+        kf = KFold(n_splits=6, shuffle=True, random_state=42)
+        folds = list(kf.split(X_sess))
+        # Track R2 per fold to log encoding performance
+        fold_r2_scores = []
+        for test_fold_idx in range(6):
+            # Extract test indices
+            _, test_idx = folds[test_fold_idx]
+            # Select the next fold in line as the validation fold (wrap around using modulo)
+            val_fold_idx = (test_fold_idx + 1) % 6
+            _, val_idx = folds[val_fold_idx]
+            # The remaining 4 folds are designated for training
+            train_indices_list = [folds[i][1] for i in range(6) if i != test_fold_idx and i != val_fold_idx]
+            train_idx = np.concatenate(train_indices_list)
+            # Split data for this fold configuration
+            X_train, Y_train = X_sess[train_idx], Y_sess[train_idx]
+            X_val, Y_val = X_sess[val_idx], Y_sess[val_idx]
+            X_test, _ = X_sess[test_idx], Y_sess[test_idx]
+            # --- Hyperparameter Tuning (L2 Alpha) on Validation Fold ---
+            best_alpha = alphas[0]
+            best_val_r2 = -np.inf
+            for alpha in alphas:
+                # Fit model on 4 folds
+                model = Ridge(alpha=alpha)
+                model.fit(X_train, Y_train)
+                # Evaluate on 1 validation fold
+                val_pred = model.predict(X_val)
+                val_r2 = r2_score(Y_val, val_pred, multioutput='variance_weighted')
+                if val_r2 > best_val_r2:
+                    best_val_r2 = val_r2
+                    best_alpha = alpha
+            
+            # --- Final Evaluation on Test Fold ---
+            # Retrain model using the optimized alpha on training data
+            final_model = Ridge(alpha=best_alpha)
+            final_model.fit(X_train, Y_train)
+            # Predict the out-of-sample test fold
+            test_pred = final_model.predict(X_test)
+            # Step 4: Write directly back to original session position indices
+            # Because kf.split gives indices relative to X_sess, this maps directly back 
+            # to the native temporal structure without manual un-shuffling.
+            sess_predictions[test_idx] = test_pred
+            
+            # Calculate testing R2 score for tracking
+            test_r2 = r2_score(Y_sess[test_idx], test_pred, multioutput='variance_weighted')
+            fold_r2_scores.append(test_r2)
+            
+        # Step 5: Assign session predictions back to global array using the position mask
+        all_spike_in_latent[sess_mask] = sess_predictions
+        
+        print(f"Session {sess} | Neurons: {X_sess.shape[1]} | Mean Test $R^2$: {np.mean(fold_r2_scores):.3f}")
+        
+    print("\nEncoding Complete! Output array matches original temporal layout.")
+    return all_spike_in_latent
+    
+
+class FlightRQAAnalyzer:
+    def __init__(self, min_len=20, max_len=100, threshold=0.05, l_min=2, v_min=2, dist_metric='euclidean'):
+        """
+        Args:
+            min_len: Minimum number of time points for a valid flight.
+            max_len: Maximum number of time points for a valid flight.
+            threshold: Threshold (e.g., 0.05 = 5% density) to dynamically set epsilon.
+            l_min: Minimum diagonal line length for Determinism (DET).
+            v_min: Minimum vertical line length for Laminarity (LAM).
+        """
+        self.min_len = min_len
+        self.max_len = max_len
+        self.threshold = threshold
+        self.l_min = l_min
+        self.v_min = v_min
+        self.dist_metric = dist_metric
+
+    def _compute_single_flight_rqa(self, latents, theiler_window=2):
+        """
+        Computes the recurrence matrix and comprehensive RQA metrics for an isolated flight,
+        properly adjusting for a specified Theiler window to remove short-term autocorrelation.
+        
+        Args:
+            latents: array of shape (T, 32)
+            theiler_window: int, number of diagonal steps to mask out (w=1 masks just the LOI)
+        """
+        T = latents.shape[0]
+        
+        # 1. Compute Pairwise Distance Matrix
+        dist_matrix = squareform(pdist(latents, metric=self.dist_metric))
+        
+        # 2. Extract upper triangle distances strictly outside the Theiler window 
+        # to ensure epsilon is dynamically fit only on non-trivial state pairs
+        nontrivial_mask = np.triu(np.ones((T, T), dtype=bool), k=theiler_window)
+        nontrivial_distances = dist_matrix[nontrivial_mask]
+        
+        if len(nontrivial_distances) == 0:
+            return None
+            
+        # Target threshold is stored in self.threshold (e.g., 0.05)
+        eps = np.percentile(nontrivial_distances, self.threshold * 100)
+        
+        # 3. Generate Binary Recurrence Plot (RP)
+        RP_raw = (dist_matrix <= eps).astype(int)
+        
+        # Apply the Theiler Window mask to create the operational RP
+        # This completely zeroes out the main diagonal and adjacent sub-diagonals
+        full_theiler_mask = np.triu(np.ones((T, T)), k=theiler_window) + np.tril(np.ones((T, T)), k=-theiler_window)
+        RP = RP_raw * full_theiler_mask
+        
+        # Total possible non-trivial points in the matrix after Theiler masking
+        possible_points = np.sum(full_theiler_mask)
+        total_recurrences = np.sum(RP)
+        
+        # Measure 1: Recurrence Rate (RR)
+        rr = total_recurrences / possible_points if possible_points > 0 else 0.0
+        
+        if total_recurrences == 0:
+            return {
+                "RP": RP, "RR": rr, "DET": 0.0, "LAM": 0.0, 
+                "L_avg": 0.0, "TT": 0.0, "DIV": 0.0, "ENTR": 0.0, "TREND": 0.0
+            }
+
+        # 4. Calculate Diagonal Lines Metrics (DET, L_avg, DIV, ENTR)
+        diag_lengths = []
+        for k in range(-T + 1, T):
+            # Enforce Theiler window restriction across sub-diagonals
+            if abs(k) < theiler_window: 
+                continue
+            diag = np.diag(RP, k=k)
+            padded = np.convolve(diag, [1, -1])
+            starts = np.where(padded == 1)[0]
+            ends = np.where(padded == -1)[0]
+            diag_lengths.extend(ends - starts)
+            
+        diag_lengths = np.array(diag_lengths)
+        det_lines = diag_lengths[diag_lengths >= self.l_min]
+        
+        # Measure 2 & 4: DET and Averaged Diagonal Line Length (L_avg)
+        det = np.sum(det_lines) / total_recurrences if len(det_lines) > 0 else 0.0
+        l_avg = np.mean(det_lines) if len(det_lines) > 0 else 0.0
+        
+        # Measure 6: Divergence (DIV)
+        l_max = np.max(diag_lengths) if len(diag_lengths) > 0 else 0
+        div = 1.0 / l_max if l_max >= self.l_min else 0.0
+        
+        # Measure 7: Shannon Entropy of Diagonal Line Lengths (ENTR)
+        if len(det_lines) > 0:
+            # Count the frequency of unique line lengths
+            _, counts = np.unique(det_lines, return_counts=True)
+            probabilities = counts / len(det_lines)
+            entr = -np.sum(probabilities * np.log(probabilities))
+        else:
+            entr = 0.0
+
+        # 5. Calculate Vertical Lines Metrics (LAM, TT)
+        vert_lengths = []
+        for col in range(T):
+            vertical = RP[:, col]
+            padded = np.convolve(vertical, [1, -1])
+            starts = np.where(padded == 1)[0]
+            ends = np.where(padded == -1)[0]
+            vert_lengths.extend(ends - starts)
+            
+        vert_lengths = np.array(vert_lengths)
+        lam_lines = vert_lengths[vert_lengths >= self.v_min]
+        
+        # Measure 3 & 5: LAM and Trapping Time (TT)
+        lam = np.sum(lam_lines) / total_recurrences if len(lam_lines) > 0 else 0.0
+        tt = np.mean(lam_lines) if len(lam_lines) > 0 else 0.0
+
+        # 6. Calculate TREND (Linear regression of local recurrence density vs. distance from LOI)
+        # Trend measures nonstationarity / structural degradation over time distances
+        # To prove that R_to_R has a fundamentally different dynamic independent of flight duration, 
+        # you must normalize the time-separation axis ($\Delta t$) to relative behavior time 
+        # (0% to 100% of flight length) before running the linear regression.
+        distances = []
+        local_densities = []
+        
+        # Iterate through sub-diagonals going outward from the Theiler limit
+        for k in range(theiler_window, T - 1):
+            # Sum upper and lower sub-diagonals at distance k
+            diag_upper = np.diag(RP, k=k)
+            diag_lower = np.diag(RP, k=-k)
+            
+            combined_recurrences = np.sum(diag_upper) + np.sum(diag_lower)
+            combined_possible = len(diag_upper) + len(diag_lower)
+            
+            if combined_possible > 0:
+                # Normalize the time distance by the absolute trajectory length T
+                distances.append(k/T)
+                local_densities.append(combined_recurrences / combined_possible)
+                
+        if len(distances) > 1:
+            # Standard linear regression slope calculation
+            slope, _ = np.polyfit(distances, local_densities, 1)
+            # trend = slope * 1000  # Multiplied by 1000 per standard RQA scientific convention
+            trend = slope  # No longer need to multiply by 1000 since scale is 0 to 1
+        else:
+            trend = 0.0
+
+        return {
+            "RP": RP,
+            "RR": rr,
+            "DET": det,
+            "LAM": lam,
+            "L_avg": l_avg,
+            "TT": tt,
+            "DIV": div,
+            "ENTR": entr,
+            "TREND": trend
+        }
+
+    def analyze(self, all_latents, all_rel_time, all_reward, all_perch, all_session):
+        """
+        Slices concatenated data and runs RQA across nested conditions:
+        Environment (indoor vs outdoor) -> Task Type (R->R, R->P, P->R).
+        """
+        # Identify individual flight boundaries
+        start_indices = np.where(all_rel_time == 0.0)[0]
+        flight_boundaries = np.append(start_indices, len(all_rel_time))
+        
+        # Map conditions to human-readable strings
+        task_mapping = {0: "R_to_R", 1: "R_to_P", 2: "P_to_R"}
+        
+        # Initialize structured nested dictionary output
+        results = {
+            "indoor": {name: [] for name in task_mapping.values()},
+            "outdoor": {name: [] for name in task_mapping.values()}
+        }
+        
+        for i in range(len(flight_boundaries) - 1):
+            idx_start = flight_boundaries[i]
+            idx_end = flight_boundaries[i+1]
+            length = idx_end - idx_start
+            
+            # Filter by trajectory duration criteria
+            if not (self.min_len <= length <= self.max_len):
+                continue
+                
+            # Parse Environment Type
+            session_name = all_session[idx_start]
+            if "Dataset_1" in session_name or "Dataset_3" in session_name:
+                env = "indoor"
+            elif "Dataset_2" in session_name:
+                env = "outdoor"
+            else:
+                continue # Unknown dataset group
+                
+            # Parse Flight Task Conditions
+            is_start_reward = all_reward[idx_start]
+            is_start_perch = all_perch[idx_start]
+            is_end_reward = all_reward[idx_end - 1]
+            is_end_perch = all_perch[idx_end - 1]
+            
+            if is_start_reward and is_end_reward:
+                cond_id = 0
+            elif is_start_reward and is_end_perch:
+                cond_id = 1
+            elif is_start_perch and is_end_reward:
+                cond_id = 2
+            else:
+                continue # Exclude non-target trajectories (e.g., perch->perch)
+                
+            task_str = task_mapping[cond_id]
+            flight_latents = all_latents[idx_start:idx_end, :]
+            # If use all_true_spike (shape: 8332 by 266): 
+            # Select all rows, but only columns (neurons) that are NOT completely NaN
+            flight_latents = flight_latents[:, ~np.isnan(flight_latents).all(axis=0)]
+            
+            # Run RQA
+            rqa_output = self._compute_single_flight_rqa(flight_latents)
+            
+            if rqa_output is not None:
+                # Store the results metadata along with metrics
+                results[env][task_str].append({
+                    "flight_idx": i,
+                    "global_indices": (idx_start, idx_end),
+                    "trajectory_len": length,
+                    "RP": rqa_output["RP"],
+                    "DET": rqa_output["DET"],
+                    "LAM": rqa_output["LAM"],
+                    "L_avg": rqa_output["L_avg"],
+                    "TT": rqa_output["TT"],
+                    "DIV": rqa_output["DIV"],
+                    "ENTR": rqa_output["ENTR"],
+                    "TREND": rqa_output["TREND"],
+                })
+                
+        return results
+    
+    def plot_rp(self, results, env='indoor', ncols = 5, seed = 10):
+        task_keys = list(results[env].keys())
+        nrows = len(task_keys)
+        fig, ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(10, 6))
+        for ii in range(nrows):
+            np.random.seed(seed + ii)
+            inds = np.random.choice(len(results[env][task_keys[ii]]), ncols, replace=False)
+            for jj in range(ncols):
+                # rqa_dataset['indoor']['reward_to_reward'][0]['RP']
+                ax[ii, jj].matshow(results[env][task_keys[ii]][inds[jj]]['RP'], cmap='gray_r')
+                ax[ii, jj].grid(True)
+            ax[ii, 0].set_ylabel(f'{task_keys[ii]}')
+        ax[0, 0].set_title(env)
+        plt.tight_layout()
+        
+        return None
+    
+    def plot_rqa_distributions(self, results):
+        """
+        Generates a 2x3 subplot figure comparing the distributions of DET, LAM, and DIV
+        with automated pairwise significance testing annotated on each plot.
+        """
+        from scipy.stats import mannwhitneyu
+        from itertools import combinations
+
+        # 1. Flatten the nested results dictionary into a tidy pandas DataFrame
+        data_list = []
+        for env, tasks in results.items():
+            for task_str, flights in tasks.items():
+                for flight in flights:
+                    data_list.append({
+                        "Environment": env.capitalize(),
+                        "Flight Type": task_str.replace("_", " ").title(),
+                        "DET": flight["DET"],
+                        "LAM": flight["LAM"],
+                        "L_avg": flight["L_avg"],
+                        "TT": flight["TT"],
+                        "DIV": flight["DIV"],
+                        "ENTR": flight["ENTR"],
+                        "TREND": flight["TREND"],
+                    })
+        
+        df = pd.DataFrame(data_list)
+        if df.empty:
+            print("No data available to plot.")
+            return
+
+        # 2. Set up layout
+        environments = ["Indoor", "Outdoor"]
+        # We ignore L_avg, TT, DIV, ENTR which are influenced by the flight length.
+        metrics = ["DET", "LAM", "TREND"]
+        titles = ["DET", "LAM", "TREND"]
+        palettes = {"Indoor": "Blues", "Outdoor": "Oranges"}
+        fig, axes = plt.subplots(len(environments), len(metrics), figsize=(10, 6), sharex=True)
+        
+        # Helper function to convert p-values to your exact star mapping
+        def get_star_string(p):
+            if p < 0.0001: return '*****'
+            elif p < 0.001: return '***'
+            elif p < 0.01:  return '**'
+            elif p < 0.05:  return '*'
+            return None
+
+        # 3. Loop through rows and columns
+        for row_idx, env_name in enumerate(environments):
+            df_env = df[df["Environment"] == env_name]
+            
+            for col_idx, metric in enumerate(metrics):
+                ax = axes[row_idx, col_idx]
+                
+                if df_env.empty:
+                    continue
+
+                # Ensure order of categories matches across plots
+                flight_types = sorted(df_env["Flight Type"].unique())[::-1]
+                
+                sns.boxenplot(
+                    data=df_env,
+                    x="Flight Type",
+                    y=metric,
+                    order=flight_types,
+                    hue="Flight Type",
+                    legend=False,
+                    palette=palettes[env_name],
+                    ax=ax
+                )
+                
+                # --- STATISTICAL ANNOTATION LOGIC ---
+                # Find the maximum y-value currently in the data to place annotations dynamically
+                y_max_base = df_env[metric].max()
+                y_range = y_max_base - df_env[metric].min()
+                if np.isnan(y_range) or y_range == 0: y_range = 1.0
+                
+                # Generate all unique pairs of categories
+                pairs = list(combinations(flight_types, 2))
+                annotation_count = 0
+                
+                for pair in pairs:
+                    # Isolate data arrays for the two categories
+                    group1 = df_env[df_env["Flight Type"] == pair[0]][metric].dropna().values
+                    group2 = df_env[df_env["Flight Type"] == pair[1]][metric].dropna().values
+                    
+                    # We need at least 3 samples per group to run a meaningful comparison
+                    if len(group1) < 3 or len(group2) < 3:
+                        continue
+                        
+                    # Perform Mann-Whitney U test
+                    stat, p_val = mannwhitneyu(group1, group2, alternative='two-sided')
+                    star_str = get_star_string(p_val)
+                    
+                    if star_str: # Only plot if statistically significant
+                        # Find indices to know where to draw lines horizontally
+                        idx1 = flight_types.index(pair[0])
+                        idx2 = flight_types.index(pair[1])
+                        
+                        # Dynamically step up the height of each bar to prevent overlapping lines
+                        y_line = y_max_base + (0.08 * y_range) + (annotation_count * 0.12 * y_range)
+                        h = 0.02 * y_range # Tick height
+                        
+                        # Draw the bracket line
+                        ax.plot([idx1, idx1, idx2, idx2], [y_line-h, y_line, y_line, y_line-h], lw=1.5, c='k')
+                        # Draw the star text centered over the line
+                        ax.text((idx1 + idx2) * 0.5, y_line + (0.005 * y_range), star_str, ha='center', va='bottom', 
+                            color='k', fontsize=12, fontweight='bold')
+                        
+                        annotation_count += 1
+                
+                # Adjust Y-limits to fit the annotations without clipping
+                if annotation_count > 0:
+                    ax.set_ylim(bottom=df_env[metric].min() - (0.05 * y_range), 
+                                top=y_max_base + (annotation_count * 0.15 * y_range))
+                
+                # Aesthetics
+                if row_idx == 0:
+                    ax.set_title(titles[col_idx], fontsize=14, pad=15)
+                
+                # ax.set_ylabel(f"{metric} ({env_name})", fontsize=12, fontweight='bold')
+                if col_idx == 0:
+                    ax.set_ylabel(env_name)
+                else:
+                    ax.set_ylabel("")
+
+                
+                if row_idx == 1:
+                    ax.set_xlabel("")
+                    ax.tick_params(axis='x', rotation=45)
+                else:
+                    ax.set_xlabel("")
+                    
+                ax.grid(axis='y', linestyle='--', alpha=0.3)
+
+        plt.tight_layout()
+        return None
+    
+
+class FlightDMD:
+    def __init__(self, use_stacking=False, h=None, dt=0.1):
+        """
+        Initializes the DMD analyzer.
+        
+        Parameters:
+        -----------
+        use_stacking : bool
+            Whether to use the shift-stacking method.
+        h : int or None
+            Stacking depth parameter (ignored if use_stacking is False).
+            If use_stacking, when h is not set, it would be automatically set.
+        dt : float
+            Sampling time interval in seconds (default is 0.1s).
+        """
+        self.use_stacking = use_stacking
+        self.h = h if use_stacking else 1
+        self.dt = dt
+        
+        # Placeholders for results
+        self.eigenvalues = None
+        self.dmd_modes = None
+        self.z = None
+        self.reconstructed_data = None
+        self.rec_error = None
+        self.frequencies = None
+        self.power = None
+        self.data = None
+        self.n_features = None
+        self.m_timepoints = None
+
+    def _build_matrices(self, data):
+        """
+        Constructs snapshot matrices X and X' from the raw input data (shape: n_features x m_timepoints).
+        Implements shift-stacking if enabled.
+        """
+        n, m = data.shape
+        self.data = data
+        self.n_features = n
+        self.m_timepoints = m
+        
+        if not self.use_stacking:
+            X = data[:, :-1]
+            X_prime = data[:, 1:]
+        else:
+            # Construct augmented data matrix X_aug as described in Section 2.2
+            if self.h is None:
+                self.h = int(2 * m / n) + 1
+            m_aug = m - self.h + 1
+            X_aug_whole = np.zeros((self.h * n, m_aug))
+            for i in range(self.h):
+                X_aug_whole[i*n:(i+1)*n, :] = data[:, i:i+m_aug]
+                
+            X = X_aug_whole[:, :-1]
+            X_prime = X_aug_whole[:, 1:]
+            
+        return X, X_prime
+
+    def fit(self, data):
+        """
+        Computes DMD modes, eigenvalues, energy scaling, power spectrum, 
+        and reconstruction based on Brunton et al. 2015 DMD.
+        
+        Parameters:
+        -----------
+        data : numpy.ndarray
+            Input matrix of shape (n, m), where n is features and m is time steps.
+        """
+        # Step 1: Matrix building and SVD
+        X, X_prime = self._build_matrices(data)
+        U, Sigma, VT = np.linalg.svd(X, full_matrices=False)
+        V = VT.conj().T
+        
+        # Step 2: Define low-rank companion matrix A_tilde
+        Sigma_mat = np.diag(Sigma)
+        Sigma_inv = np.diag(1.0 / Sigma)
+        A_tilde = U.conj().T @ X_prime @ V @ Sigma_inv
+        
+        # Step 3+: Energy-scaled Eigendecomposition
+        # Compute A_hat = Sigma^(-1/2) * A_tilde * Sigma^(1/2)
+        Sigma_half = np.diag(np.sqrt(Sigma))
+        Sigma_half_inv = np.diag(1.0 / np.sqrt(Sigma))
+        A_hat = Sigma_half_inv @ A_tilde @ Sigma_half
+        
+        # Eigendecomposition of A_hat
+        lambdas, W_hat = np.linalg.eig(A_hat)
+        self.eigenvalues = lambdas
+        
+        # Reconstruct scaled W matrices to retain energy constraints
+        W = Sigma_half @ W_hat
+        
+        # Step 4: Compute exact DMD modes (Equation 4)
+        self.dmd_modes = X_prime @ V @ Sigma_inv @ W
+        
+        # Step 5: Compute initial weight vector z (Equation 5)
+        # x1 = Phi * z -> z = pseudoinverse(Phi) * x1
+        x1 = X[:, 0]
+        self.z = np.linalg.pinv(self.dmd_modes) @ x1
+        
+        # --- Time Reconstruction ---
+        # Omega = log(Lambda)/dt
+        omega = np.log(self.eigenvalues + 1e-12) / self.dt
+
+        # Real part of omega dictates growth/decay. Clamp positive growth to 0 to prevent overflow.
+        real_omega = np.real(omega)
+        imag_omega = np.imag(omega)
+        clamped_real = np.minimum(real_omega, 0.0) # Prevents exponential explosion
+        omega = clamped_real + 1j * imag_omega
+        
+        # Reconstruct the augmented time series matrix using Equation 5
+        # X_hat(t) = Phi * exp(Omega * t) * z
+        t_steps = X.shape[1] + 1
+        X_hat_aug = np.zeros((self.dmd_modes.shape[0], t_steps), dtype=complex)
+        
+        for k in range(t_steps):
+            t = k * self.dt
+            X_hat_aug[:, k] = self.dmd_modes @ (np.exp(omega * t) * self.z)
+            
+        # Extract the original system size coordinates from the stacked/unstacked matrix
+        # Per paper: include the first n elements if it is a shift-stacked matrix
+        self.reconstructed_data = np.real(X_hat_aug[:self.n_features, :])
+        
+        # Calculate Frobenius norm reconstruction error (Figure 3 formula)
+        # Slice the original data to match the reconstructed time horizon
+        time_horizon = self.reconstructed_data.shape[1]
+        self.rec_error = np.linalg.norm(data[:, :time_horizon] - self.reconstructed_data, 
+            'fro') / np.linalg.norm(data[:, :time_horizon], 'fro')
+        
+        # --- Power Spectrum Parameters (Equation 6 & 7) ---
+        # Frequency in Hz (cycles per second)
+        self.frequencies = np.abs(np.imag(omega)) / (2 * np.pi)
+        
+        # Extract first n spatial dimensions of the modes for power calculations
+        truncated_modes = self.dmd_modes[:self.n_features, :]
+        self.power = np.zeros(len(lambdas))
+        for i in range(len(lambdas)):
+            self.power[i] = np.linalg.norm(truncated_modes[:, i])**2
+
+    def plot_reconstruction(self):
+        """Generates a diagnostic overview plot matching Figure 2 concepts."""
+        if self.reconstructed_data is None:
+            raise ValueError("Model must be fitted to data before plotting.")
+            
+        fig, axes = plt.subplots(4, 1, figsize=(8, 6), sharex=True)
+        
+        # Plot raw coordinates over time indices
+        time_bins = self.reconstructed_data.shape[1]
+        data = self.data[:, :time_bins] # due to shift_stacking, it drops its last h-1 time points
+        # vmin = np.min(np.concatenate((data, self.reconstructed_data)))
+        # vmax = np.max(np.concatenate((data, self.reconstructed_data)))
+        im0 = axes[0].imshow(data, aspect='auto', cmap='viridis')
+        axes[0].set_title('Raw Data')
+        axes[0].set_ylabel("Amplitude")
+        fig.colorbar(im0, ax=axes[0], orientation='vertical')
+        # Plot full reconstruction grid map
+        im1 = axes[1].imshow(self.reconstructed_data, aspect='auto', cmap='viridis')
+        axes[1].set_title("Reconstructed Data")
+        fig.colorbar(im1, ax=axes[1], orientation='vertical')
+        # Plot the absolute difference
+        im2 = axes[2].imshow(np.abs(data - self.reconstructed_data), 
+            aspect='auto', cmap='gray_r')
+        axes[2].set_title("Absolute difference")
+        fig.colorbar(im2, ax=axes[2], orientation='vertical')
+        
+        # Real part of the top spatial modes
+        im3 = axes[3].imshow(np.real(self.dmd_modes[:self.n_features, :min(20, len(self.eigenvalues))]), 
+                             aspect='auto', cmap='coolwarm')
+        axes[3].set_title("Real Part of DMD Modes")
+        fig.colorbar(im3, ax=axes[3], orientation='vertical')
+        
+        plt.xlabel("Time Bins")
+        plt.tight_layout()
+        return None
+
+    def plot_power_spectrum(self):
+        """Generates dynamic mode distributions and discrete spectrum matching Figure 4."""
+        if self.eigenvalues is None:
+            raise ValueError("Model must be fitted to data before plotting.")
+            
+        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+        
+        # Subplot A: Unit Circle Domain
+        theta = np.linspace(0, 2*np.pi, 100)
+        axes[0].plot(np.cos(theta), np.sin(theta), color='gray', linestyle='--')
+        
+        # Scatter eigenvalues scaled by log-power amplitudes
+        scatter_size = 20 + 200 * (self.power / np.max(self.power))
+        sc = axes[0].scatter(np.real(self.eigenvalues), np.imag(self.eigenvalues), 
+                             s=scatter_size, c=self.frequencies, cmap='viridis', edgecolors='k', zorder=3)
+        
+        axes[0].set_xlabel("$Real(\lambda)$")
+        axes[0].set_ylabel("$Imag(\lambda)$")
+        axes[0].set_title("DMD Eigenvalues")
+        axes[0].grid(True, linestyle=':')
+        axes[0].set_aspect('equal')
+        
+        # Subplot B: Power vs Frequency Spectrum
+        axes[1].stem(self.frequencies, self.power, basefmt=" ")
+        axes[1].set_xlabel("Frequency (Hz)")
+        axes[1].set_ylabel("Mode Power")
+        axes[1].set_title("DMD Power Spectrum")
+        axes[1].grid(True, linestyle=':')
+        
+        fig.colorbar(sc, ax=axes[0], label='Frequency (Hz)')
+        plt.tight_layout()
+        return None
+
+class FlightDMDAnalyzer:
+    def __init__(self, min_len=20, max_len=100, use_stacking=False, h=None ):
+        """
+        Args:
+            min_len: Minimum number of time points for a valid flight.
+            max_len: Maximum number of time points for a valid flight.
+        """
+        self.min_len = min_len
+        self.max_len = max_len
+        self.use_stacking = use_stacking
+        self.h = h
+
+    def analyze(self, all_latents, all_rel_time, all_reward, all_perch, all_session):
+        """
+        Slices concatenated data and runs DMD across nested conditions:
+        Environment (indoor vs outdoor) -> Task Type (R->R, R->P, P->R).
+        """
+        # Identify individual flight boundaries
+        start_indices = np.where(all_rel_time == 0.0)[0]
+        flight_boundaries = np.append(start_indices, len(all_rel_time))
+        
+        # Map conditions to human-readable strings
+        task_mapping = {0: "R_to_R", 1: "R_to_P", 2: "P_to_R"}
+        
+        # Initialize structured nested dictionary output
+        results = {
+            "indoor": {name: [] for name in task_mapping.values()},
+            "outdoor": {name: [] for name in task_mapping.values()}
+        }
+        
+        for i in range(len(flight_boundaries) - 1):
+            idx_start = flight_boundaries[i]
+            idx_end = flight_boundaries[i+1]
+            length = idx_end - idx_start
+            
+            # Filter by trajectory duration criteria
+            if not (self.min_len <= length <= self.max_len):
+                continue
+                
+            # Parse Environment Type
+            session_name = all_session[idx_start]
+            if "Dataset_1" in session_name or "Dataset_3" in session_name:
+                env = "indoor"
+            elif "Dataset_2" in session_name:
+                env = "outdoor"
+            else:
+                continue # Unknown dataset group
+                
+            # Parse Flight Task Conditions
+            is_start_reward = all_reward[idx_start]
+            is_start_perch = all_perch[idx_start]
+            is_end_reward = all_reward[idx_end - 1]
+            is_end_perch = all_perch[idx_end - 1]
+            
+            if is_start_reward and is_end_reward:
+                cond_id = 0
+            elif is_start_reward and is_end_perch:
+                cond_id = 1
+            elif is_start_perch and is_end_reward:
+                cond_id = 2
+            else:
+                continue # Exclude non-target trajectories (e.g., perch->perch)
+                
+            task_str = task_mapping[cond_id]
+            flight_latents = all_latents[idx_start:idx_end, :]
+            # If use all_true_spike (shape: 8332 by 266): 
+            # Select all rows, but only columns (neurons) that are NOT completely NaN
+            flight_latents = flight_latents[:, ~np.isnan(flight_latents).all(axis=0)] # shape: (num_time_points, num_features)
+            flight_latents = flight_latents.T # DMD works for the data with a shape of (num_feature, num_time_points)
+            
+            # Run DMD
+            flight_dmd = FlightDMD(use_stacking=self.use_stacking, h=self.h)
+            flight_dmd.fit(flight_latents)
+            if flight_dmd.eigenvalues is not None:
+                # Store the results metadata along with metrics
+                results[env][task_str].append({
+                    "flight_idx": i,
+                    "global_indices": (idx_start, idx_end),
+                    "trajectory_len": length,
+                    "raw_data": flight_dmd.data,
+                    "reconstructed_data": flight_dmd.reconstructed_data,
+                    "eigenvalues": flight_dmd.eigenvalues,
+                    "dmd_modes":flight_dmd.dmd_modes,
+                    "frequencies": flight_dmd.frequencies,
+                    "mode_power": flight_dmd.power,
+                    "rec_error": flight_dmd.rec_error,
+                })
+                
+        return results
+
+
+class FlightDMDPostAnalysis:
+    def __init__(self, dmd_dataset, env='indoor'):
+        """
+        Initializes the cross-flight analyzer for a specific environment.
+        
+        Parameters:
+        -----------
+        dmd_dataset : dict, from FlightDMDAnalyzer()
+            The nested data structure containing flight DMD metrics
+        env : str
+            'indoor' or 'outdoor'
+        """
+        if env not in dmd_dataset:
+            raise ValueError(f"Environment '{env}' not found in the dataset.")
+            
+        self.env = env
+        self.env_data = dmd_dataset[env]
+        self.tasks = list(self.env_data.keys()) # ["R_to_R", "R_to_P", "P_to_R"]
+        
+    def plot_error_distributions(self):
+        """1. Plots a histogram/KDE of reconstruction errors across flight types."""
+        plt.figure(figsize=(5, 3))
+        
+        for task in self.tasks:
+            errors = [flight['rec_error'] for flight in self.env_data[task]]
+            sns.histplot(errors, kde=True, element="step", stat="density", 
+                         label=task, alpha=0.4, bins=15)
+                         
+        plt.title(f"Reconstruction Error ({self.env.capitalize()})")
+        plt.xlabel("Frobenius Norm")
+        plt.ylabel("Density")
+        plt.legend(title="Flight Type")
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.tight_layout()
+        return None
+
+    def analyze_spatial_subspaces(self, top_mode_index=0):
+        """
+        2. Computes and plots subspace alignment (similarity matrix) 
+        between the dominant spatial modes across all flights with task labels.
+        """
+        all_modes = []
+        labels = []
+        
+        for task in self.tasks:
+            for flight in self.env_data[task]:
+                modes = flight['dmd_modes']
+                power = flight['mode_power']
+                top_indices = np.argsort(power)[::-1][top_mode_index]
+                
+                primary_mode = np.real(modes[:, top_indices])
+                primary_mode /= (np.linalg.norm(primary_mode) + 1e-12)
+                
+                all_modes.append(primary_mode)
+                labels.append(task)
+                
+        all_modes = np.array(all_modes)
+        similarity_matrix = np.abs(all_modes @ all_modes.T)
+        
+        sort_idx = np.argsort(labels)
+        sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
+        sorted_labels = [labels[i] for i in sort_idx]
+        
+        plt.figure(figsize=(7, 6))
+        ax = sns.heatmap(sorted_matrix, cmap='viridis', xticklabels=False, yticklabels=False,
+                         cbar_kws={'label': 'Cosine Similarity'})
+        
+        # Calculate block boundaries and midpoints for placing labels
+        unique_labels, counts = np.unique(sorted_labels, return_counts=True)
+        
+        current_idx = 0
+        tick_positions = []
+        for label, count in zip(unique_labels, counts):
+            # Line boundary
+            current_idx += count
+            plt.axhline(current_idx, color='white', linewidth=1.5)
+            plt.axvline(current_idx, color='white', linewidth=1.5)
+            # Find center of block for label placement
+            tick_positions.append(current_idx - (count / 2))
+            
+        # Apply the centered task names to the y-axis and x-axis
+        ax.set_yticks(tick_positions)
+        ax.set_yticklabels(unique_labels, rotation=0, fontsize=10, fontweight='bold')
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(unique_labels, rotation=45, fontsize=10, fontweight='bold')
+        
+        plt.title(f"Spatial Subspace Alignment Map ({self.env.capitalize()})", pad=15, fontsize=12)
+        plt.tight_layout()
+        return None
+    
+    def analyze_temporal_subspaces(self, data_type='latent'):
+        """
+        Computes and plots the temporal subspace alignment map (similarity_matrix) based on the 
+        cosine similarity of power-weighted complex eigenvalue distributions.
+
+        Parameters:
+        -----------
+        data_type : str
+            'latent' or 'neuronal'. If 'neuronal', the 0 Hz static baseline 
+            component is completely zeroed out to expose hidden rhythms.
+        """
+        temporal_profiles = []
+        labels = []
+        
+        # Define a high-resolution grid over the complex plane to capture subtle frequency shifts
+        # Expanded slightly beyond 1.2 to fully capture the slow-decaying baseline dynamics
+        real_bins = np.linspace(-1.2, 1.2, 20)
+        imag_bins = np.linspace(-1.2, 1.2, 20)
+        
+        for task in self.tasks:
+            for flight in self.env_data[task]:
+                lambdas = flight['eigenvalues']
+                power = flight['mode_power']
+                
+                # Create a 2D density distribution weighted explicitly by mode power
+                # This ensures highly energetic rhythms dominate the temporal signature
+                H, x_edges, y_edges = np.histogram2d(
+                    np.real(lambdas), 
+                    np.imag(lambdas), 
+                    bins=[real_bins, imag_bins], 
+                    weights=power,
+                )
+
+                # IF NEURONAL: Suppress the 0.0 Hz imaginary axis line entirely
+                if data_type == 'neuronal':
+                    # Find the bin index matching Imaginary = 0.0
+                    # y_edges corresponds to the imaginary axis bins
+                    imag_centers = (y_edges[:-1] + y_edges[1:]) / 2.0
+                    zero_imag_idx = np.argmin(np.abs(imag_centers))
+                    
+                    # Zero out the entire real-axis row where imaginary frequency is 0
+                    H[:, zero_imag_idx] = 0.0
+                
+                # Flatten the 2D spectral map into a 1D temporal feature vector
+                feat = H.flatten()
+                
+                # Normalize the vector to unit norm
+                feat /= (np.linalg.norm(feat) + 1e-12)
+                
+                temporal_profiles.append(feat)
+                labels.append(task)
+                
+        temporal_profiles = np.array(temporal_profiles) # Shape: (n_flights, n_bins)
+        
+        # Compute pairwise temporal profile cosine similarity
+        similarity_matrix = temporal_profiles @ temporal_profiles.T
+        
+        # Here we use distance matrix, and then sort by task blocks to group matching flight conditions
+        sort_idx = np.argsort(labels)
+        sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
+        sorted_labels = [labels[i] for i in sort_idx]
+        
+        # Plot the resulting Temporal Alignment Heatmap
+        plt.figure(figsize=(7, 6))
+        ax = sns.heatmap(sorted_matrix, cmap='magma', xticklabels=False, yticklabels=False,
+                         cbar_kws={'label': 'Cosine Similarity'})
+        
+        # Add visual block borders
+        unique_labels, counts = np.unique(sorted_labels, return_counts=True)
+        current_idx = 0
+        tick_positions = []
+        for label, count in zip(unique_labels, counts):
+            current_idx += count
+            plt.axhline(current_idx, color='white', linewidth=1.5)
+            plt.axvline(current_idx, color='white', linewidth=1.5)
+            tick_positions.append(current_idx - (count / 2))
+            
+        ax.set_yticks(tick_positions)
+        ax.set_yticklabels(unique_labels, rotation=0, fontsize=10, fontweight='bold')
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(unique_labels, rotation=45, fontsize=10, fontweight='bold')
+        
+        plt.title(f"Temporal Subspace Alignment ({self.env.capitalize()})", pad=15, fontsize=12)
+        plt.tight_layout()
+        return None
+
+    def plot_spectral_density_profiles(self, max_freq=5.0, sigma=0.1):
+        """
+        3. Smooths, normalizes, and averages discrete spectra into 
+        continuous continuous spectral density curves per flight type.
+        """
+        plt.figure(figsize=(4, 4))
+        freq_grid = np.linspace(0, max_freq, 200)
+        
+        for task in self.tasks:
+            task_curves = []
+            for flight in self.env_data[task]:
+                freqs = flight['frequencies']
+                powers = flight['mode_power']
+                
+                # Project discrete power points onto a continuous evaluation grid
+                curve = np.zeros_like(freq_grid)
+                for f, p in zip(freqs, powers):
+                    if f <= max_freq:
+                        # Find closest bin index on grid
+                        idx = np.argmin(np.abs(freq_grid - f))
+                        curve[idx] += p
+                        
+                # Smooth the discrete delta spikes into continuous density curves
+                smoothed_curve = gaussian_filter1d(curve, sigma=sigma / (freq_grid[1] - freq_grid[0]))
+                
+                # Normalize total area under curve to 1.0 to standardize power scales
+                total_power = np.sum(smoothed_curve)
+                if total_power > 0:
+                    smoothed_curve /= total_power
+                task_curves.append(smoothed_curve)
+                
+            task_curves = np.array(task_curves)
+            mean_profile = np.mean(task_curves, axis=0)
+            sem_profile = np.std(task_curves, axis=0) / np.sqrt(len(task_curves))
+            
+            line = plt.plot(freq_grid, mean_profile, label=task, lw=2)
+            plt.fill_between(freq_grid, mean_profile - sem_profile, mean_profile + sem_profile, 
+                             alpha=0.15, color=line[0].get_color())
+                             
+        plt.title(f"Average Continuous Spectral Density ({self.env.capitalize()})")
+        plt.xlabel("Frequency (Hz)")
+        plt.ylabel("Normalized Power Density")
+        plt.legend(title="Flight Type")
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.tight_layout()
+        return None
+
+    def analyze_eigenvalue_fingerprints(self):
+        """
+        4. Bins the complex eigenvalue plane to generate feature vectors, 
+        then projects them using t-SNE to see if dynamics cluster by task type.
+        """
+        feature_vectors = []
+        task_labels = []
+        
+        # Set up a fixed 2D grid matrix across the complex plane domain
+        real_bins = np.linspace(-1.2, 1.2, 10)
+        imag_bins = np.linspace(-1.2, 1.2, 10)
+        
+        for task in self.tasks:
+            for flight in self.env_data[task]:
+                lambdas = flight['eigenvalues']
+                
+                # Create a 2D density histogram of where eigenvalues fall in the complex plane
+                weights = np.ones(len(lambdas))/len(lambdas)
+                H, _, _ = np.histogram2d(np.real(lambdas), np.imag(lambdas), bins=[real_bins, imag_bins], weights=weights)
+                
+                # Flatten the 2D grid into a 1D feature array for this flight trial
+                feature_vectors.append(H.flatten())
+                task_labels.append(task)
+                
+        feature_vectors = np.array(feature_vectors)
+        
+        # Apply t-SNE dimensionality reduction to cluster complex constellations
+        # perplexity = min(15, max(5, len(feature_vectors) // 3))
+        # tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, init='pca')
+        pca = PCA(n_components=2)
+        embeddings = pca.fit_transform(feature_vectors)
+        
+        plt.figure(figsize=(5, 4))
+        sns.scatterplot(x=embeddings[:, 0], y=embeddings[:, 1], hue=task_labels, 
+                        palette='Set1', s=70, edgecolor='k', alpha=0.8)
+                        
+        plt.title(f"Eigenvalue 'Fingerprints' ({self.env.capitalize()})")
+        plt.xlabel("Dimension 1")
+        plt.ylabel("Dimension 2")
+        plt.legend()
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.tight_layout()
+        return None
+
+
+class FlightSharedStates():
+    def __init__(self, all_latents, all_rel_time, all_reward, all_perch, all_session, 
+                 MIN_LEN=20, MAX_LEN=100):
+        """
+        Parses concatenated data arrays, separates them into individual flight trials, 
+        filters by length, and groups them by environment and functional type.
+        """
+        self.all_latents = all_latents
+        self.all_rel_time = all_rel_time
+        
+        # Dictionary structure: env -> function_type -> list of flight dicts
+        # Environments: 'indoor' (Dataset_1/3), 'outdoor' (Dataset_2)
+        # Function types: 0 (R->R), 1 (R->P), 2 (P->R), 3 (P->P), 4 (Others)
+        self.grouped_flights = {
+            'indoor': {0: [], 1: [], 2: [], 3: [], 4: []},
+            'outdoor': {0: [], 1: [], 2: [], 3: [], 4: []}
+        }
+        
+        self._parse_and_group_flights(all_reward, all_perch, all_session, MIN_LEN, MAX_LEN)
+
+    def _parse_and_group_flights(self, all_reward, all_perch, all_session, MIN_LEN, MAX_LEN):
+        # Identify start boundaries where relative time resets to 0.0
+        start_indices = np.where(self.all_rel_time == 0.0)[0]
+        flight_boundaries = np.append(start_indices, len(self.all_rel_time))
+        
+        for i in range(len(flight_boundaries) - 1):
+            idx_start = flight_boundaries[i]
+            idx_end = flight_boundaries[i+1]
+            
+            # 1. Filter by Flight Trajectory Length
+            length = idx_end - idx_start
+            if not (MIN_LEN <= length <= MAX_LEN):
+                continue
+                
+            # 2. Determine Environment Type
+            session_name = all_session[idx_start]
+            if "Dataset_1" in session_name or "Dataset_3" in session_name:
+                env = 'indoor'
+            elif "Dataset_2" in session_name:
+                env = 'outdoor'
+            else:
+                continue # Skip unrecognized datasets
+                
+            # 3. Classify Flight Function Type
+            is_start_reward = all_reward[idx_start]
+            is_start_perch = all_perch[idx_start]
+            is_end_reward = all_reward[idx_end - 1]
+            is_end_perch = all_perch[idx_end - 1]
+            
+            if is_start_reward and is_end_reward:
+                cond = 0  # R -> R
+            elif is_start_reward and is_end_perch:
+                cond = 1  # R -> P
+            elif is_start_perch and is_end_reward:
+                cond = 2  # P -> R
+            elif is_start_perch and is_end_perch:
+                cond = 3  # P -> P
+            else:
+                cond = 4 # Others
+                
+            # Pack flight data along with its global time indices
+            flight_dict = {
+                'latent': self.all_latents[idx_start:idx_end, :],
+                'global_indices': np.arange(idx_start, idx_end)
+            }
+            
+            self.grouped_flights[env][cond].append(flight_dict)
+            
+        # Print summary statistics upon initialization
+        for env in ['indoor', 'outdoor']:
+            print(f"--- {env.capitalize()} Environment ---")
+            print(f"  Type 0 (R->R): {len(self.grouped_flights[env][0])} flights")
+            print(f"  Type 1 (R->P): {len(self.grouped_flights[env][1])} flights")
+            print(f"  Type 2 (P->R): {len(self.grouped_flights[env][2])} flights")
+            print(f"  Type 3 (P->P): {len(self.grouped_flights[env][3])} flights")
+            print(f"  Type 4 (Others): {len(self.grouped_flights[env][4])} flights")
+
+    def find_shared_states(self, env='indoor', type_A=1, type_B=2, metric='cosine', thresh='min', num_pairs=500, seed=42):
+        """
+        Systematically random-samples pairs of flights from two function types, 
+        computes their cross-distance, and extracts all global indices where the 
+        pairwise distance falls below the specified percentile threshold.
+        """
+        from scipy.spatial.distance import cdist
+        print(f'\nEnvironment: {env}: Type {type_A} vs. Type {type_B}')
+
+        np.random.seed(seed)
+        
+        flights_A = self.grouped_flights[env][type_A]
+        flights_B = self.grouped_flights[env][type_B]
+        
+        if len(flights_A) == 0 or len(flights_B) == 0:
+            raise ValueError(f"One or both selected flight types contain 0 trajectories in the '{env}' environment.")
+            
+        pooled_global_indices = []
+        all_thresholded_distances = []
+        
+        for _ in range(num_pairs):
+            # Randomly select one flight from each type
+            fA = np.random.choice(flights_A)
+            fB = np.random.choice(flights_B)
+            
+            # Compute pairwise 32D distance matrix (Shape: Len_A x Len_B) using specified metric
+            dist_matrix = cdist(fA['latent'], fB['latent'], metric=metric)
+
+            if thresh == 'min':
+                eps = np.min(dist_matrix)
+            else:
+                # Dynamically calculate the cutoff value for the bottom X% of distances for this pair
+                eps = np.percentile(dist_matrix, thresh * 100)
+            
+            # Find all matrix coordinate pairs matching the threshold criteria
+            idx_A_coords, idx_B_coords = np.where(dist_matrix <= eps)
+            
+            # Extract the actual distance values for tracking/diagnostics
+            matching_distances = dist_matrix[idx_A_coords, idx_B_coords]
+            all_thresholded_distances.extend(matching_distances)
+            
+            # Map the local flight time indices back to their absolute indices in all_latents
+            global_idx_A = fA['global_indices'][idx_A_coords]
+            global_idx_B = fB['global_indices'][idx_B_coords]
+            
+            pooled_global_indices.extend(global_idx_A)
+            pooled_global_indices.extend(global_idx_B)
+            
+        # Deduplicate indices since overlapping pairs or adjacent time points can occur frequently
+        unique_shared_indices = np.unique(pooled_global_indices)
+
+        # Extract the latent vectors for just your discovered bottleneck points
+        bottleneck_latents = self.all_latents[unique_shared_indices]
+        # Compute the average distance between ALL discovered bottleneck points
+        internal_distances = pdist(bottleneck_latents, metric=metric)
+        np.random.seed(seed + 10)
+        internal_distances = np.random.choice(internal_distances, num_pairs, replace=False)
+
+        # NULL distances: randomly select pairs of points from flights_A and flights_B
+        # Pre-pool all latent points from flights_A and flights_B to efficiently sample null pairs
+        pooled_latents_A = np.vstack([f['latent'] for f in flights_A])
+        pooled_latents_B = np.vstack([f['latent'] for f in flights_B])
+        np.random.seed(seed + 100)
+        idx_1 = np.random.choice(len(pooled_latents_A), num_pairs, replace=True)
+        idx_2 = np.random.choice(len(pooled_latents_B), num_pairs, replace=True)
+        # Compute baseline background distances
+        null_distances = [cdist(pooled_latents_A[i:i+1], pooled_latents_B[j:j+1], metric=metric)[0,0] for i, j in zip(idx_1, idx_2)]
+        
+        results = {
+            'shared_indices': unique_shared_indices,
+            'pair_thresholded_distances': np.array(all_thresholded_distances),
+            'mean_thresholded_distance': np.mean(all_thresholded_distances) if all_thresholded_distances else None,
+            'total_points_collected': len(unique_shared_indices),
+            'internal_distances': np.array(internal_distances),
+            'pair_null_distances': np.array(null_distances),
+        }
+        
+        return results
+    
+
+class SharedStatesSingleNeuron:
+    def __init__(self, all_true_spike, all_session, bottleneck_indices, grouped_flights, env='indoor', flight_types=[1, 2]):
+        """
+        Parameters:
+        -----------
+        all_true_spike : np.ndarray
+            Shape (Total_Time_Points, Max_Neurons), contains raw spike counts/rates with NaN padding.
+        all_session : np.ndarray
+            Shape (Total_Time_Points,), string array of session identifiers for each time point.
+        bottleneck_indices : np.ndarray or list
+            The global unique shared indices discovered from your low-dim PC analysis.
+        grouped_flights : dict
+            The nested dictionary (FlightSharedStates.grouped_flights) containing flight trajectories.
+        env : str
+            The specific environment to isolate (e.g., 'indoor').
+        flight_types : list of int
+            The functional types of flights to include [0 (R->R), 1 (R->P), 2 (P->R), 3 (P->P), 4 (Others)].
+        """
+        self.all_true_spike = all_true_spike
+        self.all_session = all_session
+        self.bottleneck_set = set(bottleneck_indices)
+        
+        # 1. Retain individual flight structures grouped by flight function types
+        self.selected_flights = []
+        selected_flight_indices = []
+        
+        for f_type in flight_types:
+            flights = grouped_flights[env].get(f_type, [])
+            for flight in flights:
+                self.selected_flights.append(flight)
+                selected_flight_indices.extend(flight['global_indices'])
+                
+        # Convert to a set for O(1) lookups during pooled baseline processing
+        self.selected_flight_set = set(selected_flight_indices)
+        
+        # 2. Determine active sessions based on the global indices of chosen flights
+        self.active_sessions = np.unique(all_session[list(self.selected_flight_set)])
+
+    def analyze_session_neurons(self, session_name, p_threshold=0.05):
+        """
+        # Old:
+        # Finds neurons within a session that pass the statistical modulation t-test 
+        # AND strictly satisfy the trial-by-trial bottleneck participation rule.
+
+        Iterate through each distinct flight belonging to the session and verifies 
+        if the neuron spikes at least once (>=1) within the bottleneck zone on every 
+        single flight to qualify as an anchor cell, and is completely silent (==0) within 
+        the bottleneck zone on every single flight to qualify as a suppressed cell.
+        """
+        # Get all global indices for this session
+        session_global_indices = np.where(self.all_session == session_name)[0]
+        session_global_set = set(session_global_indices)
+        
+        # Filter down to the flights that belong strictly to THIS session
+        session_flights = []
+        for flight in self.selected_flights:
+            # Check the first index to verify session membership
+            if flight['global_indices'][0] in session_global_set:
+                session_flights.append(flight)
+                
+        if len(session_flights) == 0:
+            return pd.DataFrame()
+            
+        # Isolate pooled session indices inside vs outside the hub for the background t-test
+        session_flight_indices = [idx for idx in session_global_indices if idx in self.selected_flight_set]
+        inside_indices = [idx for idx in session_flight_indices if idx in self.bottleneck_set]
+        outside_indices = [idx for idx in session_flight_indices if idx not in self.bottleneck_set]
+        
+        if len(inside_indices) < 3 or len(outside_indices) < 3:
+            return pd.DataFrame()
+            
+        # Extract pooled session spikes
+        spikes_inside = self.all_true_spike[inside_indices, :]
+        spikes_outside = self.all_true_spike[outside_indices, :]
+        
+        # Filter out NaN columns (neurons not recorded in this session)
+        valid_neuron_mask = ~np.all(np.isnan(spikes_inside), axis=0)
+        valid_neuron_indices = np.where(valid_neuron_mask)[0]
+        
+        session_results = []
+        
+        for neuron_idx in valid_neuron_indices:
+            rates_inside = spikes_inside[:, neuron_idx]
+            rates_outside = spikes_outside[:, neuron_idx]
+            
+            rates_inside = rates_inside[~np.isnan(rates_inside)]
+            rates_outside = rates_outside[~np.isnan(rates_outside)]
+            
+            if len(rates_inside) < 3 or len(rates_outside) < 3:
+                continue
+                
+            # Perform baseline Welch's t-test for modulation direction
+            t_stat, p_val = stats.ttest_ind(rates_inside, rates_outside, equal_var=False)
+            mean_inside = np.mean(rates_inside)
+            mean_outside = np.mean(rates_outside)
+            
+            # Initialize flight-by-flight tracking flags
+            fired_in_all_bottlenecks = True
+            silenced_in_all_bottlenecks = True
+            valid_flight_count = 0
+            
+            # Evaluate the strict trial-by-trial rule over each individual flight
+            for flight in session_flights:
+                g_indices = flight['global_indices']
+                # Isolate the bottleneck entries specific to this single flight
+                flight_b_indices = [idx for idx in g_indices if idx in self.bottleneck_set]
+                
+                if len(flight_b_indices) == 0:
+                    continue # Skip flights that do not enter the hub coordinates
+                    
+                valid_flight_count += 1
+                flight_b_spikes = self.all_true_spike[flight_b_indices, neuron_idx]
+                
+                # Check metrics for this flight's bottleneck pass
+                total_spikes_in_hub = np.nansum(flight_b_spikes)
+                
+                if total_spikes_in_hub < 1.0:
+                    fired_in_all_bottlenecks = False # Broke the anchor rule
+                if total_spikes_in_hub > 0.0:
+                    silenced_in_all_bottlenecks = False # Broke the suppressed rule
+
+            # If no flights actually intersected the hub, it cannot be classified
+            if valid_flight_count == 0:
+                fired_in_all_bottlenecks = False
+                silenced_in_all_bottlenecks = False
+
+            # # Enforce the dual constraints: statistical modulation AND 100% flight compliance
+            # is_anchor = (p_val < p_threshold) and (mean_inside > mean_outside) and fired_in_all_bottlenecks
+            # is_suppressed = (p_val < p_threshold) and (mean_inside < mean_outside) and silenced_in_all_bottlenecks
+            # 100% flight compliance
+            is_anchor = bool(fired_in_all_bottlenecks)
+            is_suppressed = bool(silenced_in_all_bottlenecks)
+            
+            session_results.append({
+                'neuron_idx_global': neuron_idx,
+                'mean_inside_hub': mean_inside,
+                'mean_outside_hub': mean_outside,
+                'fold_change': mean_inside / (mean_outside + 1e-5),
+                'p_value': p_val,
+                'is_anchor': is_anchor, # is_anchor
+                'is_suppressed': is_suppressed, # is_suppressed
+            })
+            
+        return pd.DataFrame(session_results)
+
+    def run_meta_analysis(self, p_threshold=0.05):
+        """
+        Loops through active sessions containing the filtered flights and pools results.
+        """
+        summary_data = []
+        all_session_dfs = {}
+        
+        for session in self.active_sessions:
+            df_session = self.analyze_session_neurons(session, p_threshold=p_threshold)
+            
+            if df_session.empty:
+                continue
+                
+            all_session_dfs[session] = df_session
+            
+            total_valid_cells = len(df_session)
+            total_anchors = df_session['is_anchor'].astype(int).sum()
+            total_suppressed = df_session['is_suppressed'].astype(int).sum()
+            
+            summary_data.append({
+                'session': session,
+                'total_recorded_neurons': total_valid_cells,
+                'anchor_cells_count': total_anchors,
+                'suppressed_cells_count': total_suppressed,
+                'percentage_anchors': (total_anchors / total_valid_cells) * 100
+            })
+            
+        return pd.DataFrame(summary_data), all_session_dfs
+
+
+def plot_bottleneck_single_neuron(session_name, all_session, detailed_session_data, grouped_flights, 
+                                     all_true_spike, bottleneck_indices, env='indoor', 
+                                     flight_types=[1, 2], num_tuning_curves=10):
+    """
+    Generates figures demonstrating single-neuron reliability at the bottleneck.
+    
+    1. A Sorted Raster Heatmap: Shows a sequential cascade of all valid neurons during a single flight,
+       ordered by their peak firing time relative to the bottleneck.
+    2. Cross-Flight Tuning Curves: Tracks individual anchor cells across multiple flights of 
+       opposing types (Type 1 vs Type 2) to demonstrate directional invariance.
+    """
+    # ----------------------------------------------------
+    # 0. Setup and Data Extraction
+    # ----------------------------------------------------
+    session_cells = detailed_session_data[session_name]
+    anchor_cell_info = session_cells[session_cells['is_anchor']]
+    anchor_global_indices = anchor_cell_info['neuron_idx_global'].values
+    
+    if len(anchor_global_indices) == 0:
+        print(f"No anchor cells found in session {session_name} to visualize.")
+        return
+
+    # Gather all flights for this session from the chosen environment and types
+    session_flights = []
+    b_set = set(bottleneck_indices)
+    
+    for f_type in flight_types:
+        for flight in grouped_flights[env].get(f_type, []):
+            first_g_idx = flight['global_indices'][0]
+            # CRITICAL FILTER: Ensure the flight belongs to THIS session
+            if all_session[first_g_idx] == session_name:
+                session_flights.append(flight)
+
+    # ----------------------------------------------------
+    # 1. Figure 1: The Sorted Raster Heatmap (Single Flight)
+    # ----------------------------------------------------
+    # Find up to 3 valid flights that pass through the bottleneck volume
+    valid_flights = []
+    for flight in session_flights:
+        overlap = [idx for idx in flight['global_indices'] if idx in b_set]
+        if len(overlap) >= 3:
+            valid_flights.append(flight)
+        if len(valid_flights) == 3:
+            break
+    if len(valid_flights) > 0:
+        ncols = 3 if len(valid_flights) >= 3 else len(valid_flights)
+        fig, axes = plt.subplots(1, ncols, figsize=(4 * ncols, 5), sharey=True)
+        if len(valid_flights) == 1:
+            axes = [axes] # Ensure iterable array for consistency
+            
+        for idx, ax in enumerate(axes):
+            g_indices = valid_flights[idx]['global_indices']
+            flight_spikes = all_true_spike[g_indices, :]
+            valid_cols = np.where(~np.all(np.isnan(flight_spikes), axis=0))[0]
+            flight_spikes = flight_spikes[:, valid_cols]
+            
+            # Map valid columns to their global neuron identities for anchor matching
+            global_cell_ids = valid_cols 
+            
+            in_bottleneck = np.array([idx_g in b_set for idx_g in g_indices])
+            bottleneck_entry_idx = np.where(in_bottleneck)[0][0] if np.any(in_bottleneck) else len(g_indices)//2
+            bottleneck_exit_idx = np.where(in_bottleneck)[0][-1] if np.any(in_bottleneck) else len(g_indices)//2
+            
+            norm_spikes = []
+            peak_times = []
+            for c in range(flight_spikes.shape[1]):
+                # curve = pd.Series(flight_spikes[:, c]).rolling(window=3, min_periods=1, center=True).mean().values
+                curve = flight_spikes[:, c]
+                c_min, c_max = np.min(curve), np.max(curve)
+                curve_norm = (curve - c_min) / (c_max - c_min + 1e-5)
+                norm_spikes.append(curve_norm)
+                peak_times.append(np.argmax(curve_norm))
+                
+            norm_spikes = np.array(norm_spikes)
+            sort_order = np.argsort(peak_times)
+            sorted_raster = norm_spikes[sort_order, :]
+            
+            # Find where the session's anchor cells ended up in this specific sorted layout
+            sorted_global_ids = global_cell_ids[sort_order]
+            is_anchor_sorted = np.isin(sorted_global_ids, anchor_global_indices)
+            anchor_row_positions = np.where(is_anchor_sorted)[0]
+            
+            # Plot Heatmap
+            sns.heatmap(sorted_raster, cmap='viridis', cbar=(idx == len(valid_flights)-1), 
+                        cbar_kws={'label': 'Normalized responses'} if idx == len(valid_flights)-1 else {},
+                        xticklabels=5, yticklabels=False, ax=ax)
+            
+            # Draw bottleneck trigger and align x-axis ticks to 0
+            ax.axvline(x=bottleneck_entry_idx, color='white', linestyle='--', linewidth=2, label='Bottleneck')
+            ax.axvline(x=bottleneck_exit_idx, color='white', linestyle='--', linewidth=2)
+            # xticks = ax.get_xticks()
+            # ax.set_xticks(xticks)
+            # ax.set_xticklabels((xticks - bottleneck_entry_idx).astype(int))
+            
+            # Mark anchor cells on the y-axis with red horizontal tickers
+            for row in anchor_row_positions:
+                ax.text(-0.5, row + 0.5, '▶', color='red', ha='right', va='center', fontsize=8)
+                
+            ax.set_title(f"Flight #{idx+1}")
+            ax.set_xlabel("Time Bins")
+            if idx == 0:
+                ax.set_ylabel("Sorted Neurons (▶ = Anchor)", labelpad=20)
+                
+        plt.suptitle(f"Population Cascades; Session: {session_name}", y=1.01)
+        plt.tight_layout()
+
+    # ----------------------------------------------------
+    # 2. Figure 2: Cross-Flight Directional Invariance
+    # ----------------------------------------------------
+    # Let's take the top anchor cells with the largest fold change
+    best_anchor_global_idxs = anchor_cell_info.sort_values(by='fold_change', ascending=False)['neuron_idx_global'].values
+    
+    # Separately plot profiles for Type 1 and Type 2 flights to verify alignment
+    colors = {flight_types[0]: '#1f77b4', flight_types[1]: '#ff7f0e'}
+    labels = {flight_types[0]: 'R -> P', flight_types[1]: 'P -> R'}
+    # Create a set of starting indices for fast, error-free membership checking
+    session_flight_starts = {f['global_indices'][0] for f in session_flights}
+
+    ncols = 3
+    fig, axes = plt.subplots(ncols=ncols, figsize=(4*ncols, 3))
+    for ii in range(ncols):
+        for f_type in flight_types:
+            # type_flights = [f for f in grouped_flights[env].get(f_type, []) if f in session_flights]
+            # Check matching starting index instead of comparing the raw dictionary objects
+            type_flights = [f for f in grouped_flights[env].get(f_type, []) 
+                            if f['global_indices'][0] in session_flight_starts]
+            # Limit to requested number of curves for readability
+            curves_plotted = 0
+            
+            for flight in type_flights:
+                g_indices = flight['global_indices']
+                in_b = np.array([idx in b_set for idx in g_indices])
+                
+                if not np.any(in_b):
+                    continue
+                    
+                b_entry = np.where(in_b)[0][0]  # bottleneck (intersection hub, shared states) entry
+                # Construct a relative time alignment window (-15 bins to +15 bins around entry)
+                rel_time = np.arange(len(g_indices)) - b_entry
+                neuron_activity = all_true_spike[g_indices, best_anchor_global_idxs[ii]]
+                
+                # Smooth curve
+                # smoothed_activity = pd.Series(neuron_activity).rolling(window=3, min_periods=1, center=True).mean().values
+                
+                # Plot individual flight line centered at 0
+                axes[ii].plot(rel_time, neuron_activity, color=colors[f_type], alpha=0.3, 
+                        label=labels[f_type] if curves_plotted == 0 else "")
+                curves_plotted += 1
+                if curves_plotted >= num_tuning_curves:
+                    break
+        axes[ii].axvline(x=0, color='red', linestyle=':', linewidth=2)
+        axes[ii].set_xlim(-10, 15)
+        axes[ii].set_title(f"Cell #{best_anchor_global_idxs[ii]}")
+        axes[ii].grid(True, alpha=0.2)
+    axes[0].set_xlabel("Time Bins (Relative to Bottleneck Entry)")
+    axes[0].set_ylabel("Spike Counts")
+    axes[0].legend(loc='upper left')
+    
+    plt.suptitle(f"Anchor Cells Across Trajectories;Session: {session_name}", y=1.01)
+    plt.tight_layout()
+
+    return None
 

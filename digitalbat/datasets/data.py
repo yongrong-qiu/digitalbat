@@ -61,6 +61,7 @@ class Data_Prep_for_Raw():
         bin_width=0.010, # 10 ms = 0.01 seconds, so the new sampling frequency is 100 Hz
         flight_cluster_alpha=0.8, # alpha for flight clustering
         split_flights_for_train: str = 'manual', # the way to split flight paths for train + valid + test; either 'manual' or 'random'
+        seed_split_flights_4train: int = 166, # the seed for randomly splitting flights for train, val, test
         type_train_num=1,  # for splitting flight clustering data
         type_valid_num=1,  # for splitting flight clustering data
         special_id_count_thresh=3,  # for splitting flight clustering data
@@ -119,6 +120,7 @@ class Data_Prep_for_Raw():
         self.all_spike_clustered = None  # a list of arrays, each array contains neuronal activity for each trajectory
         self.max_len_of_flight_trajectory = None # maximum length of all flight trajectories in this session
         self.split_flights_for_train = split_flights_for_train
+        self.seed_split_flights_4train = seed_split_flights_4train
         self.flight_type_test_indomain = None
         self.flight_type_test_ood = None
 
@@ -669,7 +671,7 @@ class Data_Prep_for_Raw():
             # len(all_behavior_clustered): 37, all_behavior_clustered[0].shape: (3, 59)
             # len(all_behavior_type):    37,    all_behavior_type: [1, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21]
             # len(all_spike_clustered):    37,    all_spike_clustered[0].shape: (289, 59)
-            np.random.seed(166)
+            np.random.seed(self.seed_split_flights_4train)
             inds = np.random.choice(len(self.all_behavior_type), len(self.all_behavior_type), replace=False)
             train_num, valid_num = int(len(inds) * 0.7), int(len(inds) * 0.15)
             test_num = len(inds) - train_num - valid_num
@@ -1214,6 +1216,7 @@ def bat_data_loader(
     spike_count_flag = True,
     bin_width = 0.10, # 0.10, in seconds
     split_flights_for_train = 'manual', # the way to split flight paths for train + valid + test; either 'manual' or 'random'
+    seed_split_flights_4train = 166, 
     type_train_num=1,  # for splitting flight clustering data
     type_valid_num=1,  # for splitting flight clustering data
     special_id_count_thresh=3,  # for splitting flight clustering data
@@ -1268,6 +1271,7 @@ def bat_data_loader(
             spike_count_flag = spike_count_flag,
             bin_width = bin_width, 
             split_flights_for_train = split_flights_for_train, 
+            seed_split_flights_4train = seed_split_flights_4train,
             type_train_num = type_train_num,
             type_valid_num = type_valid_num,
             special_id_count_thresh = special_id_count_thresh,
