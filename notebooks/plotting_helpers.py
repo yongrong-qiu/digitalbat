@@ -227,8 +227,18 @@ def cat_violin(ax, data, x, y, order, palette, *, inner='box', cut=0,
 # ---------------------------------------------------------------------------
 # Significance brackets that DO NOT stretch the y-axis
 # ---------------------------------------------------------------------------
+def _marker_for_p(p, dagger=False):
+    """3-tier stars via stars_for_p, plus an optional '†' for a marginal trend
+    (0.05 <= p < 0.10) when ``dagger=True``; '' otherwise."""
+    s = stars_for_p(p)
+    if s or not dagger or p is None or not np.isfinite(p):
+        return s
+    return '†' if 0.05 <= p < 0.10 else ''
+
+
 def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
-                fontsize=17, base=0.98, step=0.07, show_ns=False, star_gap=0.0):
+                fontsize=17, base=0.98, step=0.07, show_ns=False, star_gap=0.0,
+                dagger=False, bar_drop=0.0):
     """Draw a 3-tier-star significance bracket between categorical positions
     ``x1`` and ``x2`` **without** changing ``ax`` limits.
 
@@ -238,7 +248,7 @@ def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
     (0 = lowest). Hidden entirely when p >= .05 unless ``show_ns``. ``star_gap``
     nudges the star label vertically off the bar (negative pulls it closer).
     """
-    stars = stars_for_p(p)
+    stars = _marker_for_p(p, dagger)
     if not stars:
         if not show_ns:
             return
@@ -246,7 +256,8 @@ def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
     trans = ax.get_xaxis_transform()  # x data, y axes-fraction
     y = base - level * step
     h = 0.015
-    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], transform=trans,
+    yb = y - bar_drop                  # bar (and its verticals) can dip without moving the marker
+    ax.plot([x1, x1, x2, x2], [yb, yb + h, yb + h, yb], transform=trans,
             lw=linewidth, color=color, clip_on=False)
     ax.text((x1 + x2) / 2, y + h + star_gap, stars, transform=trans, ha='center',
             va='bottom', fontsize=fontsize, fontweight='bold', color=color,
@@ -360,6 +371,43 @@ def paired_lines(ax, df, value_col, cond_col, order, *, session_col='session',
     return piv
 
 
+def paired_lineplot(ax, data, x, y, order, *, session_col='session', bat_col='bat',
+                    palette=None, agg='mean', line_lw=0.8, line_alpha=0.35,
+                    marker_size=3.0, mean_color='k', mean_lw=2.6, ci=95, n_boot=2000,
+                    seed=0, set_xticklabels=True):
+    """Paired session-level line plot: one faint thin line per session (coloured by
+    bat) connecting the ordered ``x`` categories, overlaid with a thick black
+    point-plot of the across-session **mean ± 95% CI**.
+
+    This is the paired analogue of a combined box + per-bat swarm for session-level
+    comparisons (few, ``<= 17``, sessions): the connecting lines expose the
+    within-session pairing across categories that a swarm hides, while the black
+    point-plot summarises the group mean and its bootstrap CI. ``data`` is long-form
+    with (at least) ``session_col``, ``bat_col``, ``x`` and ``y``; it is aggregated
+    (``agg``) to one value per (session, category) for the lines, and the same
+    per-session values drive the mean/CI. Returns the per-session wide DataFrame
+    (index=[session, bat], columns=categories) for downstream stats.
+    """
+    if palette is None:
+        palette = bat_pal()
+    xs = np.arange(len(order))
+    wide = data.pivot_table(index=[session_col, bat_col], columns=x, values=y,
+                            aggfunc=agg, observed=True).reindex(columns=order)
+    for (sess, bat), row in wide.iterrows():
+        ax.plot(xs, row.to_numpy(dtype=float), '-o', color=palette.get(bat, '0.5'),
+                lw=line_lw, alpha=line_alpha, ms=marker_size, mew=0, zorder=2)
+    # across-session mean +/- 95% CI, thick and black, drawn on top
+    sns.pointplot(data=data, x=x, y=y, order=order, color=mean_color,
+                  estimator='mean', errorbar=('ci', ci), n_boot=n_boot, seed=seed,
+                  linewidth=mean_lw, markersize=mean_lw * 2.4, capsize=0.14,
+                  err_kws={'linewidth': mean_lw * 0.8}, zorder=10, ax=ax)
+    ax.set_xticks(xs)
+    if set_xticklabels:
+        ax.set_xticklabels(order)
+    sns.despine(ax=ax)
+    return wide
+
+
 def bat_legend(ax, palette=None, title='Bat', loc='best', **kw):
     """Add a bat colour legend (one handle per bat in canonical order)."""
     if palette is None:
@@ -423,7 +471,7 @@ def _star_row(ax, order, pvals, frac=0.96):
 
 
 def _star_brackets(ax, order, pvals, ref, *, show_ns=False, base=1.02, step=0.09,
-                   star_gap=0.0):
+                   star_gap=0.0, dagger=False, dagger_drop=0.0):
     """Stacked significance brackets from `ref` to every other category.
 
     One bracket per non-reference model (a line connecting the two x-positions
@@ -435,10 +483,12 @@ def _star_brackets(ax, order, pvals, ref, *, show_ns=False, base=1.02, step=0.09
     xref = order.index(ref)
     ordered = sorted((abs(x - xref), x, m) for x, m in enumerate(order) if m != ref)
     shown = [(x, m) for _, x, m in ordered
-             if show_ns or stars_for_p(pvals.get(m, np.nan))]
+             if show_ns or _marker_for_p(pvals.get(m, np.nan), dagger)]
     for lvl, (x, m) in enumerate(shown):   # narrowest first -> lowest bracket
-        sig_bracket(ax, xref, x, pvals.get(m, np.nan), level=0,
-                    base=base + lvl * step, show_ns=show_ns, star_gap=star_gap)
+        _p = pvals.get(m, np.nan)
+        _bd = dagger_drop if (dagger_drop and _marker_for_p(_p, dagger) == '†') else 0.0
+        sig_bracket(ax, xref, x, _p, level=0, base=base + lvl * step,
+                    show_ns=show_ns, star_gap=star_gap, dagger=dagger, bar_drop=_bd)
 
 
 def pooled_ptable(unit_df, value_col, order, ref, id_cols, *, model_col='model',
@@ -544,15 +594,11 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
             fig, (axs, axu) = plt.subplots(1, 2, figsize=figsize)
         else:
             fig, axs = plt.subplots(1, 1, figsize=figsize); axu = None
-    bats_present = [b for b in palette if b in set(sess['bat'])]
     _panels = [(axs, sess, True)] + ([(axu, unit_df, False)] if axu is not None else [])
     for ax, data, is_sess in _panels:
-        if is_sess:                                   # session aggregates (few points): box + per-bat swarm
-            sns.boxplot(data=data, x=model_col, y=value_col, order=order, color='0.85',
-                        width=0.6, linewidth=1.0, showfliers=False, ax=ax)
-            sns.swarmplot(data=data, x=model_col, y=value_col, order=order, hue='bat',
-                          palette=palette, hue_order=bats_present, size=5.5,
-                          alpha=0.9, edgecolor='k', linewidth=0.3, ax=ax, legend=False)
+        if is_sess:                                   # session aggregates (few, <=17): faint per-bat lines + black mean +/- 95% CI
+            paired_lineplot(ax, data, model_col, value_col, order, session_col=session_col,
+                            bat_col='bat', palette=palette, set_xticklabels=False)
         else:                                         # per-unit (neuron/flight) distribution: violin for shape
             _vd = tukey_trim(data, value_col, model_col) if trim_unit_outliers else data
             sns.violinplot(data=_vd, x=model_col, y=value_col, order=order, color='0.85',
@@ -601,7 +647,13 @@ def is_indoor(session):
 
 
 # Route = (origin, destination) endpoint classes: 0 neither, 1 reward, 2 perch.
-ROUTE_COLORS = ['0.7', 'firebrick', 'darkorange', 'forestgreen', 'steelblue']
+# Routes: three deep matte colours from the built-in ColorBrewer 'Dark2' palette
+# (teal-green[0], magenta[3], gold[5]) plus a hand-picked deep slate blue. Dark2's
+# ochre[6] read too close to its gold, and its orange[1]/purple[2]/green[4] collide
+# with the tab10 bat hues, so those are dropped. All four sit clear of every bat
+# colour (min CIELAB ΔE ≈ 23, vs bat-blue) so routes and bats never read alike where
+# they co-appear (Fig 2 RSA side-bars). 'other' stays grey. Used only in Fig 2.
+ROUTE_COLORS = ['0.7'] + [sns.color_palette('Dark2')[i] for i in (0, 3, 5)] + ['#3b4a8c']
 ROUTE_LABELS = ['other', 'rew→rew', 'rew→perch', 'perch→rew', 'perch→perch']
 
 
