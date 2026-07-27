@@ -2423,8 +2423,8 @@ class BatRateMapSim:
             ft_str = str(ft)
             if np.sum(self.flight_types == ft_str) == 0: continue
             
-            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
-            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical', num_of_bins=num_of_bins)
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent', num_of_bins=num_of_bins)
             
             spatial_wass['flight_function_types'][ft] = {
                 'wass_physical': self._compute_pairwise_similarity(phys_maps, wasserstein_metric),
@@ -2432,7 +2432,7 @@ class BatRateMapSim:
             }
         return spatial_wass
 
-    def get_all_Jaccard(self):
+    def get_all_Jaccard(self, num_of_bins=20):
         """Computes Jaccard Intersection-over-Union similarity on thresholded place fields."""
         spatial_jac = {'flight_function_types': {}}
         target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
@@ -2451,8 +2451,8 @@ class BatRateMapSim:
             ft_str = str(ft)
             if np.sum(self.flight_types == ft_str) == 0: continue
             
-            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
-            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical', num_of_bins=num_of_bins)
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent', num_of_bins=num_of_bins)
             
             spatial_jac['flight_function_types'][ft] = {
                 'jaccard_physical': self._compute_pairwise_similarity(phys_maps, jaccard_metric),
@@ -3346,8 +3346,10 @@ class FlightDMDAnalyzer:
         start_indices = np.where(all_rel_time == 0.0)[0]
         flight_boundaries = np.append(start_indices, len(all_rel_time))
         
-        # Map conditions to human-readable strings
-        task_mapping = {0: "R_to_R", 1: "R_to_P", 2: "P_to_R"}
+        # Map conditions to human-readable strings. All five endpoint combinations are
+        # kept (perch->perch and unclassified 'Other' included) so the flight set can match
+        # the RSA figures; filter downstream if only the three main routes are wanted.
+        task_mapping = {0: "R_to_R", 1: "R_to_P", 2: "P_to_R", 3: "P_to_P", 4: "Other"}
         
         # Initialize structured nested dictionary output
         results = {
@@ -3385,8 +3387,10 @@ class FlightDMDAnalyzer:
                 cond_id = 1
             elif is_start_perch and is_end_reward:
                 cond_id = 2
+            elif is_start_perch and is_end_perch:
+                cond_id = 3
             else:
-                continue # Exclude non-target trajectories (e.g., perch->perch)
+                cond_id = 4  # neither endpoint near a reward or a perch
                 
             task_str = task_mapping[cond_id]
             flight_latents = all_latents[idx_start:idx_end, :]
@@ -3406,6 +3410,7 @@ class FlightDMDAnalyzer:
                     "trajectory_len": length,
                     "raw_data": flight_dmd.data,
                     "reconstructed_data": flight_dmd.reconstructed_data,
+                    "h": flight_dmd.h,
                     "eigenvalues": flight_dmd.eigenvalues,
                     "dmd_modes":flight_dmd.dmd_modes,
                     "frequencies": flight_dmd.frequencies,
@@ -3452,10 +3457,43 @@ class FlightDMDPostAnalysis:
         plt.tight_layout()
         return None
 
-    def analyze_spatial_subspaces(self, top_mode_index=0):
+    @staticmethod
+    def _rank_modes(eigenvalues, power, oscillatory_only=True, tol=1e-9):
+        """Mode indices ranked by power after collapsing complex-conjugate pairs.
+
+        A real oscillation appears TWICE in the eigendecomposition, as (lambda, conj(lambda)),
+        with identical power and an identical real part -- so ranking on the raw power index can
+        hand back the same spatial pattern twice (it did so for 88/207 flights here). One member
+        of each pair is kept. With ``oscillatory_only`` (default) purely real eigenvalues are
+        dropped too, since those are the stationary / non-oscillatory background; index 0 is then
+        the strongest genuine oscillation. Falls back to the raw power ranking if a flight has no
+        oscillatory mode at all.
         """
-        2. Computes and plots subspace alignment (similarity matrix) 
-        between the dominant spatial modes across all flights with task labels.
+        lam = np.asarray(eigenvalues)
+        order, taken = [], np.zeros(len(lam), bool)
+        for i in np.argsort(power)[::-1]:
+            if taken[i]:
+                continue
+            if oscillatory_only and abs(lam[i].imag) <= tol:
+                continue
+            taken[i] = True
+            if abs(lam[i].imag) > tol:                       # consume the conjugate twin
+                j = int(np.argmin(np.abs(lam - np.conj(lam[i]))))
+                if j != i and abs(lam[j] - np.conj(lam[i])) < 1e-6:
+                    taken[j] = True
+            order.append(int(i))
+        return order or [int(i) for i in np.argsort(power)[::-1]]
+
+    def spatial_subspace_matrix(self, top_mode_index=0, oscillatory_only=True):
+        """Flight-by-flight alignment of the dominant spatial DMD **mode**.
+
+        Each flight contributes one mode (real part, unit-normed), chosen by
+        :meth:`_rank_modes`: power ranking over conjugate-collapsed, oscillatory modes, so
+        ``top_mode_index=0`` is the strongest genuine oscillation rather than the stationary
+        background. The statistic is |cos| between every pair, a similarity in [0, 1].
+        Returns ``(similarity_matrix, labels)`` in the natural (unsorted) flight order,
+        with ``labels[i]`` the route of flight i. Pair with
+        :func:`within_across_route_similarity` to test for route structure.
         """
         all_modes = []
         labels = []
@@ -3464,17 +3502,33 @@ class FlightDMDPostAnalysis:
             for flight in self.env_data[task]:
                 modes = flight['dmd_modes']
                 power = flight['mode_power']
-                top_indices = np.argsort(power)[::-1][top_mode_index]
+                lam = flight['eigenvalues']
+                # Shift-stacking makes the mode vector h*n long, and an auto-selected h varies
+                # from flight to flight; keep only the leading un-stacked state block so every
+                # flight contributes the same n_features-long vector (this is also the block
+                # `mode_power` is measured on).
+                n_feat = flight['raw_data'].shape[0]
+                ranked = self._rank_modes(lam, power, oscillatory_only)
+                top_indices = ranked[min(top_mode_index, len(ranked) - 1)]
                 
-                primary_mode = np.real(modes[:, top_indices])
+                primary_mode = np.real(modes[:n_feat, top_indices])
                 primary_mode /= (np.linalg.norm(primary_mode) + 1e-12)
                 
                 all_modes.append(primary_mode)
                 labels.append(task)
                 
         all_modes = np.array(all_modes)
-        similarity_matrix = np.abs(all_modes @ all_modes.T)
-        
+        return np.abs(all_modes @ all_modes.T), np.asarray(labels)
+
+    def analyze_spatial_subspaces(self, top_mode_index=0, oscillatory_only=True):
+        """
+        2. Computes and plots subspace alignment (similarity matrix)
+        between the dominant spatial modes across all flights with task labels.
+
+        Returns ``(similarity_matrix, labels)`` (unsorted) so the caller can quantify it.
+        """
+        similarity_matrix, labels = self.spatial_subspace_matrix(top_mode_index, oscillatory_only)
+
         sort_idx = np.argsort(labels)
         sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
         sorted_labels = [labels[i] for i in sort_idx]
@@ -3504,17 +3558,21 @@ class FlightDMDPostAnalysis:
         
         plt.title(f"Spatial Subspace Alignment Map ({self.env.capitalize()})", pad=15, fontsize=12)
         plt.tight_layout()
-        return None
+        return similarity_matrix, labels
     
-    def analyze_temporal_subspaces(self, data_type='latent'):
-        """
-        Computes and plots the temporal subspace alignment map (similarity_matrix) based on the 
-        cosine similarity of power-weighted complex eigenvalue distributions.
+    def temporal_subspace_matrix(self, data_type='latent'):
+        """Flight-by-flight alignment of the **eigenvalue** distribution.
 
-        Parameters:
-        -----------
+        Each flight's eigenvalues are binned on the complex plane weighted by mode power,
+        flattened and unit-normed; the statistic is the cosine between every pair. Returns
+        ``(similarity_matrix, labels)`` in the natural (unsorted) flight order. This is the
+        temporal/spectral counterpart of :meth:`spatial_subspace_matrix`, which instead
+        compares the geometry of the dominant mode.
+
+        Parameters
+        ----------
         data_type : str
-            'latent' or 'neuronal'. If 'neuronal', the 0 Hz static baseline 
+            'latent' or 'neuronal'. If 'neuronal', the 0 Hz static baseline
             component is completely zeroed out to expose hidden rhythms.
         """
         temporal_profiles = []
@@ -3561,8 +3619,17 @@ class FlightDMDPostAnalysis:
         temporal_profiles = np.array(temporal_profiles) # Shape: (n_flights, n_bins)
         
         # Compute pairwise temporal profile cosine similarity
-        similarity_matrix = temporal_profiles @ temporal_profiles.T
-        
+        return temporal_profiles @ temporal_profiles.T, np.asarray(labels)
+
+    def analyze_temporal_subspaces(self, data_type='latent'):
+        """
+        Computes and plots the temporal subspace alignment map (similarity_matrix) based on the
+        cosine similarity of power-weighted complex eigenvalue distributions.
+
+        Returns ``(similarity_matrix, labels)`` (unsorted) so the caller can quantify it.
+        """
+        similarity_matrix, labels = self.temporal_subspace_matrix(data_type)
+
         # Here we use distance matrix, and then sort by task blocks to group matching flight conditions
         sort_idx = np.argsort(labels)
         sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
@@ -3590,7 +3657,7 @@ class FlightDMDPostAnalysis:
         
         plt.title(f"Temporal Subspace Alignment ({self.env.capitalize()})", pad=15, fontsize=12)
         plt.tight_layout()
-        return None
+        return similarity_matrix, labels
 
     def plot_spectral_density_profiles(self, max_freq=5.0, sigma=0.1):
         """
@@ -3682,6 +3749,42 @@ class FlightDMDPostAnalysis:
         plt.grid(True, linestyle=':', alpha=0.6)
         plt.tight_layout()
         return None
+
+
+def within_across_route_similarity(similarity_matrix, labels):
+    """Per-flight within-route vs across-route mean similarity from an RSA matrix.
+
+    Takes any flight-by-flight similarity matrix (e.g. from
+    :meth:`FlightDMDPostAnalysis.spatial_subspace_matrix` or
+    :meth:`FlightDMDPostAnalysis.temporal_subspace_matrix`) together with the per-flight
+    route labels, and reduces it to one row per flight: the mean similarity to the OTHER
+    flights of its own route (``within``) versus to flights of every other route
+    (``across``), and their difference (``delta``). The self-comparison on the diagonal is
+    excluded, so ``within`` is never inflated by a flight matching itself.
+
+    ``delta > 0`` means the dynamics are more alike within a route than across routes.
+    Test it against zero with a one-sample signed-rank test over flights, or compare
+    ``within`` against ``across`` with the paired test -- the two are equivalent.
+
+    Returns a DataFrame with columns ``flight, route, within, across, delta``.
+    """
+    labels = np.asarray(labels)
+    S = np.array(similarity_matrix, dtype=float, copy=True)
+    if S.ndim != 2 or S.shape[0] != S.shape[1] or S.shape[0] != len(labels):
+        raise ValueError(f'similarity_matrix {S.shape} incompatible with {len(labels)} labels')
+    np.fill_diagonal(S, np.nan)                       # drop the self-comparison
+    same = labels[:, None] == labels[None, :]
+    rows = []
+    for i in range(len(labels)):
+        w, a = S[i][same[i]], S[i][~same[i]]
+        rows.append(dict(
+            flight=i, route=labels[i],
+            within=float(np.nanmean(w)) if np.isfinite(w).any() else np.nan,
+            across=float(np.nanmean(a)) if np.isfinite(a).any() else np.nan))
+    out = pd.DataFrame(rows)
+    out['delta'] = out['within'] - out['across']
+    return out
+
 
 
 class FlightSharedStates():
