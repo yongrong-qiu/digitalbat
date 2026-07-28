@@ -458,14 +458,39 @@ def compute_target_proximity(positions, session_name=None,
     if perch_locs is None:
         perch_locs = PERCH_LOCS
     pos = np.asarray(positions)
-    dist_rew = np.min(np.linalg.norm(pos[:, None, :] - rew_locs[None, :, :], axis=-1), axis=1)
-    dist_perch = np.min(np.linalg.norm(pos[:, None, :] - perch_locs[None, :, :], axis=-1), axis=1)
+    d_rew = np.linalg.norm(pos[:, None, :] - rew_locs[None, :, :], axis=-1)
+    d_perch = np.linalg.norm(pos[:, None, :] - perch_locs[None, :, :], axis=-1)
+    dist_rew, dist_perch = d_rew.min(1), d_perch.min(1)
     return dict(
         dist_rew=dist_rew,
         dist_perch=dist_perch,
         at_rew=dist_rew < dist_thresh,
         at_perch=dist_perch < dist_thresh,
+        # WHICH target, not just how far: index into rew_locs / perch_locs of the
+        # nearest one (e.g. feeder 1 vs feeder 2 in the two-feeder indoor room).
+        rew_idx=d_rew.argmin(1),
+        perch_idx=d_perch.argmin(1),
     )
+
+
+def feeder_index(positions, session_name=None, rew_locs=None,
+                 dist_thresh=DIST_THRESH):
+    """Which reward feeder each of ``positions`` (N, 3) is at.
+
+    Returns an int array of row indices into that session's ``rew_locs`` (the
+    nearest feeder), with ``-1`` wherever the position is further than
+    ``dist_thresh`` from every feeder. Complements
+    :func:`plotting_helpers.endpoint_class`, which only says *reward vs perch*:
+    the indoor room (Datasets 1 & 3) has two feeders, and this separates them.
+    """
+    prox = compute_target_proximity(positions, session_name=session_name,
+                                    rew_locs=rew_locs, dist_thresh=dist_thresh)
+    return np.where(prox['at_rew'], prox['rew_idx'], -1)
+
+
+def n_feeders(session_name):
+    """Number of reward feeders in the room `session_name` was recorded in."""
+    return len(get_target_locs(session_name)[0])
 
 
 def plot_spatial_field(df, value_col='err_3d', value_label='3-D error (m)',
