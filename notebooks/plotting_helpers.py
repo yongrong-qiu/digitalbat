@@ -396,8 +396,17 @@ def paired_lineplot(ax, data, x, y, order, *, session_col='session', bat_col='ba
     for (sess, bat), row in wide.iterrows():
         ax.plot(xs, row.to_numpy(dtype=float), '-o', color=palette.get(bat, '0.5'),
                 lw=line_lw, alpha=line_alpha, ms=marker_size, mew=0, zorder=2)
-    # across-session mean +/- 95% CI, thick and black, drawn on top
-    sns.pointplot(data=data, x=x, y=y, order=order, color=mean_color,
+    # across-session mean +/- 95% CI, thick and black, drawn on top. It runs on the SESSION
+    # values just plotted as lines (`wide` melted back to long), not on `data`: handing the raw
+    # rows to pointplot made the overlay a mean over ROWS -- pooled across sessions and weighted
+    # by each session's row count, and computed with `mean` where the lines used `agg` -- so the
+    # black marker could sit outside the cloud of lines it was supposed to summarise (and a
+    # single non-finite row could carry it to infinity). This is what the docstring above always
+    # claimed; it was the code that disagreed.
+    sess_long = (wide.reset_index()
+                 .melt(id_vars=[session_col, bat_col], value_vars=list(order),
+                       var_name=x, value_name=y).dropna(subset=[y]))
+    sns.pointplot(data=sess_long, x=x, y=y, order=order, color=mean_color,
                   estimator='mean', errorbar=('ci', ci), n_boot=n_boot, seed=seed,
                   linewidth=mean_lw, markersize=mean_lw * 2.4, capsize=0.14,
                   err_kws={'linewidth': mean_lw * 0.8}, zorder=10, ax=ax)
@@ -845,17 +854,23 @@ def capitalize_labels(fig):
     return fig
 
 
-def save_fig(fig, name, *, subdir='figures', capitalize=True):
-    """Save `fig` as PDF and PNG under ``notebooks/out/<subdir>/{pdf,png}/``.
+def save_fig(fig, name, *, subdir='figures', capitalize=True, exts=('pdf', 'png')):
+    """Save `fig` under ``notebooks/out/<subdir>/<ext>/`` for each of `exts`.
 
     With ``capitalize`` (default), first letters of titles / axis labels / legend
     text / categorical tick labels are upper-cased via :func:`capitalize_labels`.
+
+    Add ``'svg'`` to `exts` for figures that have to survive a round trip through
+    Inkscape. Any artist drawn with alpha < 1 and ``rasterized=True`` becomes an RGBA
+    image in the PDF, which matplotlib writes as an image plus a separate soft mask
+    (``/SMask``); Inkscape misrenders those. SVG carries the same raster with a plain
+    opacity attribute instead, so it imports cleanly.
     """
     from pathlib import Path
     if capitalize:
         capitalize_labels(fig)
     base = FIG_DIR or Path('out') / subdir
-    for ext in ('pdf', 'png'):
+    for ext in exts:
         d = base / ext
         d.mkdir(parents=True, exist_ok=True)
         fig.savefig(d / f'{name}.{ext}', dpi=300, bbox_inches='tight')
