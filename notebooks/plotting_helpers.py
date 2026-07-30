@@ -122,10 +122,23 @@ SESSION_CMAP = 'husl'           # recording sessions
 FLIGHT_CLUSTER_CMAP = 'tab20b'  # flight / trajectory clusters
 
 # Environments: canonical names -> colour. Superset of the indoor/outdoor split
-# and the 3-config room map (lab / dataset_2 / krishna_fs) used across notebooks.
+# and the 3-config room map (lab / dataset_2 / krishna_fs) used across notebooks;
+# the two namings share colours because they are the same rooms (lab = indoor,
+# dataset_2 = outdoor).
+#
+# Chosen 2026-07-30 to clear every other categorical palette in the paper. The old
+# set could not: its indoor blue #3b6ea5 sat CIELAB dE 6.6 from bat-blue #1f77b4,
+# its krishna green 10.6 from route rew->rew, and its outdoor orange 20.7 from the
+# negative-motif orange - so ED Fig 4, which draws motif colour and environment on
+# one canvas, had no non-clashing env hue at all. The replacement was picked by a
+# grid search in LCh over what is left once the motif pair, all six bat colours and
+# the five route colours are excluded: cyan-teal / olive / rose, min dE 31.2 / 37.1
+# / 33.2 to the nearest taken colour (nearest are bat-blue, bat-green, bat-brown),
+# >= 62 apart from each other, and >= 71 apart under a Vienot deuteranope
+# simulation. Olive for the outdoor room is also a small semantic win.
 ENV_PALETTE = {
-    'indoor': '#3b6ea5', 'outdoor': '#d1874b',
-    'lab': '#3b6ea5', 'dataset_2': '#6a51a3', 'krishna_fs': '#41ae76',
+    'indoor': '#1f9fb5', 'outdoor': '#7d8a33',
+    'lab': '#1f9fb5', 'dataset_2': '#7d8a33', 'krishna_fs': '#d98aa8',
 }
 
 
