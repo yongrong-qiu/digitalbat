@@ -450,6 +450,28 @@ def fmt_p(p):
     return 'P < 0.001' if p < 0.001 else f'P = {p:.3f}'
 
 
+def holm(pvals):
+    """Holm-Bonferroni step-down adjusted p-values for one family of tests.
+
+    ``pvals`` is a sequence or a ``{key: p}`` mapping; the return has the same
+    shape with every raw p replaced by its adjusted value, so comparing the
+    result to 0.05 controls the family-wise error rate at 0.05. Adjusted values
+    are capped at 1.0 and made monotone in the sorted order (the running max),
+    which is what makes the step-down procedure valid. Non-finite entries pass
+    through as NaN and do not count towards the family size.
+    """
+    is_map = isinstance(pvals, dict)
+    items = list(pvals.items()) if is_map else list(enumerate(pvals))
+    real = sorted([(k, float(p)) for k, p in items
+                   if p is not None and np.isfinite(p)], key=lambda kv: kv[1])
+    m, run, adj = len(real), 0.0, {}
+    for i, (k, p) in enumerate(real):
+        run = max(run, (m - i) * p)
+        adj[k] = min(run, 1.0)
+    out = {k: adj.get(k, np.nan) for k, _ in items}
+    return out if is_map else [out[k] for k, _ in items]
+
+
 def p_table(records, sort_col=None):
     """Assemble a p-value table from a list of dicts and print it in full.
 
