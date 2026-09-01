@@ -16,9 +16,13 @@ import numpy as np
 import pandas as pd
 import torch
 
-sys.path.append(os.path.expanduser('~/Documents/code/digitalbat'))
-os.chdir(os.path.expanduser('~/Documents/code/digitalbat/notebooks'))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+os.chdir(os.path.join(REPO, 'notebooks'))
 
+sys.path.insert(0, os.path.join(REPO, 'notebooks'))
+import machine_paths as _mp                      # notebooks/ is cwd after chdir above
+_P = _mp.setup(verbose=False)
 from digitalbat.datasets.defaults import DEFAULT_SESSION_NAMES, make_data_config
 from digitalbat.datasets.kinematics import make_joint_dataloaders
 from digitalbat.models.joint import JointMaskedTransformer, JointEncoderAdapter
@@ -42,7 +46,7 @@ def session_room(s):
     return 'lab'
 SESSION_TO_ROOM = {s: session_room(s) for s in JOINT_SESSIONS}
 
-_jdc = make_data_config(session_names=JOINT_SESSIONS)
+_jdc = make_data_config(session_names=JOINT_SESSIONS, parent_folder=_P.data_root)
 joint_dataloaders, _kin, joint_unit_num_dict, joint_meta = make_joint_dataloaders(_jdc)
 JOINT_BEHAVIOR_DIM = 3
 print(f'joint Twin scaling: {len(joint_unit_num_dict)} sessions, '

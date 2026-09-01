@@ -24,6 +24,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 os.chdir(os.path.join(REPO, 'notebooks'))
 
+sys.path.insert(0, os.path.join(REPO, 'notebooks'))
+import machine_paths as _mp                      # notebooks/ is cwd after chdir above
+_P = _mp.setup(verbose=False)
 from digitalbat.datasets.defaults import DEFAULT_SESSION_NAMES, make_data_config
 from digitalbat.datasets.kinematics import make_joint_dataloaders
 from digitalbat.models.joint import (JointMaskedTransformer, JointEncoderAdapter, encode_eval_records,
@@ -164,7 +167,7 @@ def main():
     enc_parts, fr_parts, rc_parts = [], [], []
     for W in windows:
         print(f'[ctx] window_size={W}: loading tiled joint dataloaders ...', flush=True)
-        dc = make_data_config(session_names=list(DEFAULT_SESSION_NAMES))
+        dc = make_data_config(session_names=list(DEFAULT_SESSION_NAMES), parent_folder=_P.data_root)
         dc.update(window_size=W, stride_train=W, stride_test=W)
         dl, _dk, unit, meta = make_joint_dataloaders(dc)
         sessions = list(unit)

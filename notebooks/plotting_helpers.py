@@ -278,6 +278,221 @@ def sig_bracket(ax, x1, x2, p, *, level=0, color='k', linewidth=1.2,
 
 
 # ---------------------------------------------------------------------------
+# Restyle kit (ported from figure_restyle_code/bat_style.py)
+# ---------------------------------------------------------------------------
+# Shared visual language for the restyled panels (Fig 1 C/E/F/I, Fig 3 H-M,
+# Fig 4G, ED Figs 1-3): ink/grey palette, hairline brackets, wrapped horizontal
+# category labels, raincloud session panels, strip panels and KDE nulls. The
+# GEOMETRY follows the mockups exactly; font/marker sizes are parameters at the
+# notebook's canvas scale (the kit's 6.5-7.5 pt sizes assume final print-size
+# canvases, which these figures are not). Bats keep the paper's canonical
+# palette wherever dots are bat-coloured.
+INK = '#1B1B27'        # mean / emphasis (near-black, warmer than pure black)
+INK_SOFT = '#55555F'   # brackets, stars, secondary annotations
+GRID_GREY = '#B5B5BD'  # zero/reference lines
+NULL_GREY = '#D4D4DA'  # null-distribution fill
+KDE_FILL, KDE_EDGE = '#DCDCE2', '#B9B9C2'   # smooth-null density fill/edge
+BAND_A = 0.14          # alpha of the 95% CI band
+GRAY_FILLS = [('#DEDEE2', '#B9B9C2'), ('#C9C9CF', '#97979F')]   # baseline (fill, edge)
+ACCENT_E, ACCENT_F = '#6C5FC7', '#B9B2E4'   # Twin purple (edge, fill)
+AZIMUTH_C, GOALHEAD_C = '#7263AC', '#8C6D4F'  # Fig 3H/3I observed-statistic colors
+
+
+def wrap_label(l):
+    """Break a long category label at its most central space — horizontal
+    two-line labels replace the rotated ticks of the originals."""
+    if '\n' in l or len(l) <= 8:
+        return l
+    if ' (' in l:
+        return l.replace(' (', '\n(')
+    sp = [i for i, ch in enumerate(l) if ch == ' ']
+    if not sp:
+        return l
+    mid = min(sp, key=lambda i: abs(i - len(l) / 2))
+    return l[:mid] + '\n' + l[mid + 1:]
+
+
+def zero_line(ax, y=0.0, lw=1.0):
+    ax.axhline(y, ls=(0, (4, 3)), lw=lw, color=GRID_GREY, zorder=1)
+
+
+def hairline_bracket(ax, x1, x2, p, *, level=0, base=0.98, step=0.07,
+                     fontsize=15, star_gap=0.0, show_ns=False, dagger=False,
+                     bar_drop=0.0, color=INK_SOFT, linewidth=1.1):
+    """`sig_bracket` in the kit's hairline voice: a thin INK_SOFT line with short
+    DOWNWARD end drops and an unbolded star tight above. Same blended transform
+    (x data, y axes-fraction) and p-tier logic, so it is a drop-in replacement."""
+    stars = _marker_for_p(p, dagger)
+    if not stars:
+        if not show_ns:
+            return
+        stars = 'n.s.'
+    trans = ax.get_xaxis_transform()
+    y = base - level * step - bar_drop
+    h = 0.015
+    ax.plot([x1, x1, x2, x2], [y - h, y, y, y - h], transform=trans,
+            lw=linewidth, color=color, solid_capstyle='butt', clip_on=False)
+    ax.text((x1 + x2) / 2, y + star_gap, stars, transform=trans, ha='center',
+            va='bottom', fontsize=fontsize, color=color, clip_on=False)
+
+
+def raincloud(ax, wide, order, *, accent_idx=-1, log=False, seed=0,
+              mean_stat='mean', dot_ms=8.0, mean_lw=5.0, edge_lw=2.0,
+              positions=None, colors=None, width=0.34, mean_color=None):
+    """Half-violin (right) + jittered per-session dots (left) + thick ink mean
+    bar — the kit's raincloud at notebook scale. Baselines in greys, the model
+    of interest in accent purple; dots carry the condition's edge colour (the
+    kit drops per-bat dot colours here — the cloud, not the bat, is the story).
+
+    ``wide`` is a (session[, bat]) x condition DataFrame; ``order`` picks and
+    orders the columns. ``log=True`` runs the KDE in log10 space (use for
+    log-scaled y such as Fréchet distance) and sets the y-scale.
+
+    ``positions`` places the clouds at explicit x positions (e.g. a sweep axis or
+    a dodged pair) instead of 0..n-1 — the caller then owns the ticks and xlim.
+    ``colors`` is an optional per-condition list of (edge, fill) pairs overriding
+    the grey/accent scheme; ``width`` scales the whole cloud (violin reach,
+    jitter, mean bar) about its position; ``mean_color`` recolours the mean bar
+    (default INK).
+    """
+    from scipy.stats import gaussian_kde
+    rng = np.random.default_rng(seed)
+    n_c = len(order)
+    accent_idx = accent_idx % n_c
+    xs = list(positions) if positions is not None else list(range(n_c))
+    gi = 0
+    for j, m in enumerate(order):
+        vals = (wide[m] if m in wide else pd.Series(dtype=float)).to_numpy(dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if colors is not None:
+            edge, fill = colors[j]
+        elif j == accent_idx:
+            edge, fill = ACCENT_E, ACCENT_F
+        else:
+            fill, edge = GRAY_FILLS[min(gi, 1)]
+            gi += 1
+        xj = xs[j]
+        tv = np.log10(vals) if log else vals
+        if len(tv) >= 3 and tv.std() > 0:
+            kde = gaussian_kde(tv, bw_method=0.55)
+            pad = 0.35 * tv.std()
+            g = np.linspace(tv.min() - pad, tv.max() + pad * 1.6, 200)
+            dens = kde(g)
+            dens = dens / dens.max() * width
+            y = 10 ** g if log else g
+            ax.fill_betweenx(y, xj, xj + dens, color=fill, alpha=0.8, lw=0, zorder=2)
+            ax.plot(xj + dens, y, lw=edge_lw, color=edge, zorder=3,
+                    solid_capstyle='round')
+            ax.plot([xj, xj], [y[0], y[-1]], lw=edge_lw * 0.6, color=edge, zorder=3)
+        jit = rng.uniform(-0.59 * width, -0.15 * width, len(vals))
+        ax.plot(xj + jit, vals, 'o', ms=dot_ms, color=edge, alpha=0.85, zorder=4,
+                markeredgewidth=0)
+        if len(vals):
+            m_ = np.mean(vals) if mean_stat == 'mean' else np.median(vals)
+            ax.plot([xj - 0.7 * width, xj + 0.09 * width], [m_, m_], lw=mean_lw,
+                    color=mean_color or INK, zorder=5, solid_capstyle='round')
+    if positions is None:
+        ax.set_xticks(range(n_c))
+        ax.set_xlim(-0.55, n_c - 0.55 + 0.42)
+    if log:
+        ax.set_yscale('log')
+    return ax
+
+
+def strip_panel(ax, groups, labels, bat_ids, *, stars=None, violin=True, seed=1,
+                updown=None, fs_tick=15, fs_star=18, fs_note=11, dot_s=90,
+                mean_lw=3.0, mean_ms=10):
+    """Jittered per-session dots (bat colours, white ring) over an optional soft
+    grey violin, with an ink mean ± 95% CI interval (no caps) beside each group —
+    the kit's strip panel (Fig 3 L/M family).
+
+    ``groups`` is a list of 1-D arrays (session aggregates); ``bat_ids`` the
+    matching per-point bat ids; ``stars`` per-group significance strings ('' to
+    skip); ``updown`` an optional (up_text, down_text) pair of compact italic
+    corner notes replacing the bulky double-headed y arrow.
+    """
+    rng = np.random.default_rng(seed)
+    x = np.arange(len(groups))
+    groups = [np.asarray(g, dtype=float) for g in groups]
+    if violin:
+        _gv = [g[np.isfinite(g)] for g in groups]
+        _keep = [len(g) >= 2 and g.std() > 0 for g in _gv]
+        if any(_keep):
+            vp = ax.violinplot([g for g, k in zip(_gv, _keep) if k],
+                               positions=x[np.asarray(_keep)], widths=0.62,
+                               showextrema=False)
+            for b in vp['bodies']:
+                b.set_facecolor(NULL_GREY)
+                b.set_alpha(0.45)
+                b.set_lw(0)
+    pal = bat_pal()
+    for j, g in enumerate(groups):
+        ok = np.isfinite(g)
+        jit = rng.uniform(-0.13, 0.13, size=int(ok.sum()))
+        cols = [pal.get(b, '0.5') for b, k in zip(bat_ids[j], ok) if k]
+        ax.scatter(x[j] + jit, g[ok], s=dot_s, c=cols, zorder=4,
+                   edgecolors='white', linewidths=1.0)
+        if ok.sum():
+            lo, _, hi = bootstrap_ci(g[ok], statistic=np.mean, n_boot=4000)
+            ax.plot([x[j] + 0.30] * 2, [lo, hi], lw=mean_lw, color=INK,
+                    solid_capstyle='round', zorder=5)
+            ax.plot(x[j] + 0.30, np.mean(g[ok]), 'o', ms=mean_ms, color=INK,
+                    markeredgecolor='white', markeredgewidth=1.2, zorder=6)
+    if stars:
+        for j, s in enumerate(stars):
+            g = groups[j][np.isfinite(groups[j])]
+            if s and len(g):
+                yr = ax.get_ylim()
+                ax.text(x[j], g.max() + 0.05 * (yr[1] - yr[0]), s, ha='center',
+                        va='bottom', fontsize=fs_star, color=INK_SOFT)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=fs_tick)
+    ax.set_xlim(-0.6, len(groups) - 0.4 + 0.3)
+    zero_line(ax)
+    if updown:                      # compact replacement for the double-headed arrow
+        up, down = updown
+        ax.annotate(up, xy=(0.99, 0.985), xycoords='axes fraction', ha='right',
+                    va='top', fontsize=fs_note, color=INK_SOFT, style='italic')
+        ax.annotate(down, xy=(0.99, 0.015), xycoords='axes fraction', ha='right',
+                    va='bottom', fontsize=fs_note, color=INK_SOFT, style='italic')
+    return ax
+
+
+def null_kde_panel(ax, null, observed, color, p, *, xlabel='', fs_star=18,
+                   fs_label=15, fs_tick=13, lw_obs=2.8, dagger=True):
+    """Permutation-null panel in the kit's voice: a smooth grey null density
+    (KDE, no bars) with the observed statistic as a coloured line + ▼ marker and
+    the 3-tier significance above it. The y-axis is dropped (the density scale
+    is meaningless); set a 'Null density' ylabel on the leftmost panel only."""
+    from scipy.stats import gaussian_kde
+    null = np.asarray(null, dtype=float)
+    null = null[np.isfinite(null)]
+    k = gaussian_kde(null)
+    pad = 0.35 * (null.max() - null.min() or 1.0)
+    x = np.linspace(null.min() - pad, null.max() + pad, 400)
+    y = k(x)
+    ax.fill_between(x, 0, y, color=KDE_FILL, lw=0, zorder=2)
+    ax.plot(x, y, lw=1.4, color=KDE_EDGE, zorder=3)
+    ax.axvline(observed, lw=lw_obs, color=color, zorder=4, solid_capstyle='round')
+    ax.set_ylim(0, None)
+    ym = ax.get_ylim()[1]
+    ax.plot(observed, ym * 1.02, marker='v', ms=7, color=color, clip_on=False,
+            zorder=5)
+    sig = _marker_for_p(p, dagger) or 'n.s.'
+    ax.text(observed, ym * 1.10, sig, ha='center', va='bottom', fontsize=fs_star,
+            color=color, clip_on=False)
+    lo = min(x.min(), observed - 0.04 * (x.max() - x.min()))
+    hi = max(x.max(), observed + 0.10 * (x.max() - x.min()))
+    ax.set_xlim(lo, hi)
+    ax.set_xlabel(xlabel, fontsize=fs_label)
+    ax.set_yticks([])
+    ax.spines['left'].set_visible(False)
+    ax.tick_params(labelsize=fs_tick)
+    sns.despine(ax=ax, left=True)
+    return ax
+
+
+# ---------------------------------------------------------------------------
 # Confidence intervals
 # ---------------------------------------------------------------------------
 def bootstrap_ci(values, *, statistic=np.median, n_boot=10000, ci=95, seed=0):
@@ -515,7 +730,8 @@ def _star_row(ax, order, pvals, frac=0.96):
 
 
 def _star_brackets(ax, order, pvals, ref, *, show_ns=False, base=1.02, step=0.09,
-                   star_gap=0.0, dagger=False, dagger_drop=0.0):
+                   star_gap=0.0, dagger=False, dagger_drop=0.0, hairline=False,
+                   fontsize=None):
     """Stacked significance brackets from `ref` to every other category.
 
     One bracket per non-reference model (a line connecting the two x-positions
@@ -523,16 +739,19 @@ def _star_brackets(ax, order, pvals, ref, *, show_ns=False, base=1.02, step=0.09
     widest on top. Drawn in the axes-fraction transform used by ``sig_bracket``;
     with ``base`` >= 1 they float just above the panel frame (clear of the box
     whiskers). Only the brackets that actually render are stacked, so hiding
-    ``n.s.`` (``show_ns=False``, the default) leaves no gaps."""
+    ``n.s.`` (``show_ns=False``, the default) leaves no gaps. ``hairline=True``
+    draws them with :func:`hairline_bracket` (thin, INK_SOFT, unbolded stars)."""
     xref = order.index(ref)
     ordered = sorted((abs(x - xref), x, m) for x, m in enumerate(order) if m != ref)
     shown = [(x, m) for _, x, m in ordered
              if show_ns or _marker_for_p(pvals.get(m, np.nan), dagger)]
+    _draw = hairline_bracket if hairline else sig_bracket
+    _fs = {} if fontsize is None else dict(fontsize=fontsize)
     for lvl, (x, m) in enumerate(shown):   # narrowest first -> lowest bracket
         _p = pvals.get(m, np.nan)
         _bd = dagger_drop if (dagger_drop and _marker_for_p(_p, dagger) == '†') else 0.0
-        sig_bracket(ax, xref, x, _p, level=0, base=base + lvl * step,
-                    show_ns=show_ns, star_gap=star_gap, dagger=dagger, bar_drop=_bd)
+        _draw(ax, xref, x, _p, level=0, base=base + lvl * step,
+              show_ns=show_ns, star_gap=star_gap, dagger=dagger, bar_drop=_bd, **_fs)
 
 
 def pooled_ptable(unit_df, value_col, order, ref, id_cols, *, model_col='model',
@@ -571,12 +790,18 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
                        higher_is_better=True, figsize=None, axes=None,
                        star_style='row', star_kw=None, unit_pvals=None, unit_id_cols=None,
                        show_titles=True, title_y=1.0, trim_unit_outliers=True, show_unit=True,
-                       show_xticklabels=True, show_sess_ylabel=True, show_unit_ylabel=True):
+                       show_xticklabels=True, show_sess_ylabel=True, show_unit_ylabel=True,
+                       style='raincloud', accent=None, log_y=False):
     """Two-panel model comparison in the unified style.
 
-    Left: per-session aggregate (`agg`) as a grey boxplot with per-session points
-    swarmed and coloured by bat; 3-tier stars mark session-level Wilcoxon signed-rank
-    vs `ref`. Right (optional): the per-unit (neuron/flight) distribution as a violin
+    Left: per-session aggregate (`agg`) — by default (``style='raincloud'``) as
+    the restyle kit's raincloud (grey half-violins + session dots + ink mean bar,
+    the model of interest in accent purple, hairline brackets, horizontal wrapped
+    labels when they fit); ``style='lines'`` restores the older per-bat
+    paired-line panel. ``accent`` names (or indexes) the accented model — default
+    the reference `ref`. ``log_y=True`` makes the raincloud KDE run in log10
+    space (pass it wherever the panel is log-scaled, e.g. Fréchet distance).
+    3-tier stars mark session-level Wilcoxon signed-rank vs `ref`. Right (optional): the per-unit (neuron/flight) distribution as a violin
     (points beyond each model's Tukey whiskers dropped from the KDE unless
     `trim_unit_outliers=False`; display-only, stats use raw values). The unit panel is
     drawn only when a unit axis is supplied — pass `axes=(ax_sess, None)` (or a single
@@ -638,9 +863,16 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
             fig, (axs, axu) = plt.subplots(1, 2, figsize=figsize)
         else:
             fig, axs = plt.subplots(1, 1, figsize=figsize); axu = None
+    _acc = ref if accent is None else accent
+    _acc_i = (order.index(_acc) if isinstance(_acc, str) and _acc in order
+              else int(_acc) % len(order) if not isinstance(_acc, str)
+              else len(order) - 1)
+    _rain = style == 'raincloud'
     _panels = [(axs, sess, True)] + ([(axu, unit_df, False)] if axu is not None else [])
     for ax, data, is_sess in _panels:
-        if is_sess:                                   # session aggregates (few, <=17): faint per-bat lines + black mean +/- 95% CI
+        if is_sess and _rain:                         # session aggregates: restyle-kit raincloud
+            raincloud(ax, wide, order, accent_idx=_acc_i, log=log_y)
+        elif is_sess:                                 # legacy: faint per-bat lines + black mean +/- 95% CI
             paired_lineplot(ax, data, model_col, value_col, order, session_col=session_col,
                             bat_col='bat', palette=palette, set_xticklabels=False)
         else:                                         # per-unit (neuron/flight) distribution: violin for shape
@@ -648,7 +880,9 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
             sns.violinplot(data=_vd, x=model_col, y=value_col, order=order, color='0.85',
                            width=0.85, linewidth=1.0, inner='box', cut=0,
                            density_norm='width', ax=ax)
-        if zero_line:
+        if zero_line and is_sess and _rain:
+            globals()['zero_line'](ax)
+        elif zero_line:
             ax.axhline(0, color='0.5', ls='--', lw=0.9, zorder=0)
         if is_sess and sess_ylim is not None:
             ax.set_ylim(*sess_ylim)
@@ -659,12 +893,24 @@ def compare_models_fig(unit_df, value_col, order, ref, *, labels=None,
         ax.set_ylabel((ylabel if is_sess else (unit_ylabel or ylabel)) if show_yl else '')
         ax.set_xticks(range(len(order)))
         if show_xticklabels:
-            ax.set_xticklabels([labels[m] for m in order], rotation=35, ha='right')
+            _labs = [labels[m] for m in order]
+            _wl = [wrap_label(l) for l in _labs]
+            if (is_sess and _rain and len(order) <= 4
+                    and max(len(s) for l in _wl for s in l.split('\n')) <= 9):
+                # short labels: wrapped horizontal
+                ax.set_xticklabels(_wl, rotation=0, ha='center')
+            elif is_sess and _rain:                     # long labels: rotate out of collision
+                ax.set_xticklabels(_labs, rotation=45, ha='right')
+            else:
+                ax.set_xticklabels(_labs, rotation=35, ha='right')
+            if is_sess and _rain:                       # accent the model of interest
+                ax.get_xticklabels()[_acc_i].set_color(ACCENT_E)
         else:
             ax.set_xticklabels([])
         _pv = pvals if (is_sess or unit_pvals is None) else unit_pvals
         if star_style == 'bracket' and ref in order:
-            _star_brackets(ax, order, _pv, ref, **(star_kw or {}))
+            _star_brackets(ax, order, _pv, ref, hairline=(is_sess and _rain),
+                           **(star_kw or {}))
         else:
             _star_row(ax, order, _pv)
         sns.despine(ax=ax)

@@ -33,6 +33,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 os.chdir(os.path.join(REPO, 'notebooks'))
 
+sys.path.insert(0, os.path.join(REPO, 'notebooks'))
+import machine_paths as _mp                      # notebooks/ is cwd after chdir above
+_P = _mp.setup(verbose=False)
 from digitalbat.datasets.defaults import DEFAULT_SESSION_NAMES, make_data_config
 from digitalbat.datasets.kinematics import make_joint_dataloaders
 from digitalbat.models.joint import (JointMaskedTransformer, JointEncoderAdapter,
@@ -83,7 +86,7 @@ def joint_session_room(s):
 # Data (loaded once, 17-session joint universe)
 # ---------------------------------------------------------------------------
 print(f'device={DEVICE} | loading joint dataloaders ...', flush=True)
-DATA_CONFIG = make_data_config(session_names=list(DEFAULT_SESSION_NAMES))
+DATA_CONFIG = make_data_config(session_names=list(DEFAULT_SESSION_NAMES), parent_folder=_P.data_root)
 DL, _DL_KIN, UNIT, META = make_joint_dataloaders(DATA_CONFIG)
 SESSIONS = list(UNIT)
 ROOM = {s: joint_session_room(s) for s in SESSIONS}

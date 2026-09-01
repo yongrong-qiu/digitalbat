@@ -66,6 +66,9 @@ os.chdir(os.path.join(REPO, 'notebooks'))
 
 import optuna
 
+sys.path.insert(0, os.path.join(REPO, 'notebooks'))
+import machine_paths as _mp                      # notebooks/ is cwd after chdir above
+_P = _mp.setup(verbose=False)
 from digitalbat.datasets.defaults import DEFAULT_SESSION_NAMES, make_data_config
 from digitalbat.datasets.kinematics import make_joint_dataloaders
 from digitalbat.models.joint import (JointMaskedTransformer, JointEncoderAdapter,
@@ -128,7 +131,7 @@ def context_x(W):
 
 def load_window(W):
     """Tiled joint dataloaders for window size W ('full' -> whole flights, window_size=None)."""
-    dc = make_data_config(session_names=list(DEFAULT_SESSION_NAMES))
+    dc = make_data_config(session_names=list(DEFAULT_SESSION_NAMES), parent_folder=_P.data_root)
     if W != 'full':
         dc.update(window_size=W, stride_train=W, stride_test=W)
     dl, _kin, unit, meta = make_joint_dataloaders(dc)
