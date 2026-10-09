@@ -56,6 +56,8 @@ digitalbat/
 │   ├── *.ipynb                 #   analysis notebooks (see "Other notebooks")
 │   └── out/                    #   caches, checkpoints and exported figures (git-ignored*)
 ├── training/                   # standalone, resumable training drivers (ED Fig. 3, transfer)
+├── pyproject.toml              # package metadata, dependencies and optional extras
+├── requirements.txt            # exact versions used for the paper
 ├── CLAUDE.md                   # architecture notes and API cheat-sheet
 └── LICENSE
 ```
@@ -70,19 +72,42 @@ unified-CEBRA checkpoint (`out/cebra/…pt`) and the Twin Optuna study
 
 ### 1. Environment
 
-There is no `setup.py` or requirements file, and the package is not installed. The
-notebooks put the repo root on `sys.path` themselves (via `machine_paths.setup()`).
-These packages are needed:
+Dependencies are declared in [`pyproject.toml`](pyproject.toml). Install PyTorch first
+if you need a particular CUDA build (see [pytorch.org](https://pytorch.org/get-started/locally/)),
+then install the repo in editable mode from the repo root:
 
-| Purpose | Packages |
-|---|---|
-| Core | `python ≥ 3.10`, `torch`, `numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`, `seaborn`, `tqdm`, `joblib` |
-| `figures.ipynb` extras | `optuna`, `cebra`, `POT` (imported as `ot`), `statsmodels` |
-| Package extras (some modules) | `numba`, `shap`, `transformers` |
-| `latent_motifs.ipynb` only | `dynamax`, `jax` |
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu126   # optional: pick your CUDA build
+pip install -e ".[figures]"
+pip install --no-deps cebra==0.6.1     # needed by figures.ipynb; see note below
+```
 
-The paper's analyses used Python 3.13 with NumPy 2.4, SciPy 1.18, pandas 2.2,
-scikit-learn 1.6, PyTorch 2.7 and Optuna 4.8.
+`cebra` is installed separately because its metadata pins `numpy<2` on Windows, which
+would downgrade NumPy. It runs fine on NumPy 2.4, and the `figures` extra already
+installs its other dependencies.
+
+| Extra | Adds | Needed for |
+|---|---|---|
+| *(none)* | `torch`, `numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`, `seaborn`, `tqdm`, `h5py`, `numba`, `transformers` | the `digitalbat` package and the `training/` drivers |
+| `figures` | `optuna`, `POT` (imported as `ot`), `statsmodels`, `joblib`, `jupyterlab`, `ipykernel`, plus `cebra` (installed separately, above) | `figures.ipynb` |
+| `interpret` | `shap` | `digitalbat.utility.interpreter` |
+| `motifs` | `dynamax`, `jax` | `latent_motifs.ipynb` |
+| `notebooks` | `plotly`, `umap-learn`, `ipympl`, `ripser`, `persim`, `rastermap`, `diptest` | the exploratory notebooks |
+| `all` | all of the above | |
+
+Python ≥ 3.10 is required. To reproduce the paper's environment exactly (Python 3.13,
+PyTorch 2.7.1 + CUDA 12.6, NumPy 2.4, SciPy 1.18, pandas 2.2, scikit-learn 1.6,
+Optuna 4.8), use the pinned [`requirements.txt`](requirements.txt), which covers the
+core package and `figures.ipynb`:
+
+```bash
+pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+pip install -r requirements.txt
+pip install --no-deps cebra==0.6.1
+```
+
+Installing the package is optional for the notebooks: they put the repo root on
+`sys.path` themselves (via `machine_paths.setup()`).
 
 A CUDA GPU is used if one is available (`device = 'cuda' if torch.cuda.is_available()`).
 Re-running the notebook from cached checkpoints works on CPU. Retraining models from
@@ -275,7 +300,6 @@ ablations and exploration.
 | `perturbations.ipynb` | Context splicing, temporal receptive field, train-time context length | ED Fig. 3A (related) |
 | `pv_decode.ipynb` | Perceiver-IO decoder of whole trajectories from one population vector | — |
 | `neurons_across_envs.ipynb` | Same units across environments (Krishna sessions): readout similarity vs. rate-map correlation | — |
-| `swr.ipynb`, `explore_swr.ipynb` | Sharp-wave-ripple timing around flights and SWR detection | — |
 | `population_raster.ipynb` | Population raster and position traces | Schematic material |
 | `grosmark.ipynb`, `grosmark_smoke.ipynb` | Rat CA1 linear-track comparison dataset (Grosmark & Buzsáki 2016, CRCNS hc-11) | — |
 | `synthetic-rate-maps.ipynb` | Sanity check of the synthetic place-cell spike generator | ED Fig. 2 (related) |

@@ -1,0 +1,35 @@
+# Exact versions used for the paper's analyses (Python 3.13, Windows, CUDA 12.6).
+# For a looser install with optional extras, use pyproject.toml instead:
+#   pip install -e ".[figures]"
+#
+# Install the CUDA build of PyTorch first, e.g.
+#   pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+# then:
+#   pip install -r requirements.txt
+#   pip install --no-deps cebra==0.6.1
+
+# Core (the digitalbat package)
+torch==2.7.1
+numpy==2.4.6
+pandas==2.2.3
+scipy==1.18.0
+scikit-learn==1.6.1
+matplotlib==3.11.1
+seaborn==0.13.2
+tqdm==4.70.0
+h5py==3.16.0
+numba==0.67.0
+transformers==5.16.1
+
+# figures.ipynb
+optuna==4.8.0
+literate-dataclasses==0.0.6   # cebra dependency
+requests==2.34.2              # cebra dependency
+# cebra==0.6.1 declares numpy<2 on Windows but runs fine on NumPy 2.4, so it is not
+# listed here. Install it afterwards without its dependency pins:
+#   pip install --no-deps cebra==0.6.1
+POT==0.9.7.post1
+statsmodels==0.15.0
+joblib==1.5.3
+jupyterlab==4.6.3
+ipykernel==7.3.0
