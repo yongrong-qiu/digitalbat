@@ -1,4 +1,15 @@
 tmp/
+notebooks/out/
+out/
+data/
+
+# Claude Code agent-local config and worktrees
+.claude/
+
+# Backup files
+*.bak
+*.bak[0-9]
+*.bak_*
 
 # PyTorch
 *.pth

@@ -1,4 +1,5 @@
 import random as _stdlib_random
+
 import numpy as np
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.interpolate import interp1d
@@ -28,6 +29,43 @@ from sklearn.manifold import TSNE
 
 from numpy.typing import ArrayLike
 from typing import Tuple, Union, Callable
+
+
+def round_robin_session_batches(loaders, rng=None):
+    """Yield `(session_name, batch)` from per-session DataLoaders, interleaved.
+
+    Each session contributes its own per-epoch worth of batches, but the order
+    of (session → batch) draws is uniformly random over the still-active set.
+    Compared to draining each session sequentially, this:
+      - keeps Adam's running m/v reflective of the joint multi-session
+        gradient distribution (no end-of-epoch momentum bias toward the last
+        session trained),
+      - avoids stale per-session readin parameters (`Bat_Transformer.readouts`,
+        `Bat_Transformer_Decoder.readins`, `PerceiverIOTrajectoryDecoder.neuron_embeds`),
+        since every session's parameter is re-touched throughout the epoch
+        alongside an up-to-date shared backbone.
+
+    Parameters
+    ----------
+    loaders : Mapping[str, DataLoader]
+        Per-session loaders. A one-key mapping (`{None: loader}`) degenerates
+        to plain in-order iteration of that single loader.
+    rng : random.Random | None
+        Seedable RNG for the session draws. If None, a fresh one is created
+        seeded from torch's current RNG state — so callers who set
+        `torch.manual_seed` upstream still get reproducible orderings.
+    """
+    if rng is None:
+        seed = int(torch.randint(0, 2 ** 31, (1,)).item())
+        rng = _stdlib_random.Random(seed)
+    iters = {sn: iter(loader) for sn, loader in loaders.items()}
+    active = list(iters.keys())
+    while active:
+        sn = rng.choice(active) if len(active) > 1 else active[0]
+        try:
+            yield sn, next(iters[sn])
+        except StopIteration:
+            active.remove(sn)
 
 
 def bat_palette(palette='tab10'):
@@ -298,7 +336,7 @@ def generate_2d_rate_map(
     unit_spike_count: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
-    loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
+    loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
     num_of_bins: int = None, # number of bins for the generate rate map in each spatial dimension
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
     smooth_sigma: float = 1.0, # sigma for Gaussian smoothing
@@ -500,9 +538,8 @@ def plot_2d_rate_map(
     spike_count_pred: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
-    loc_bin_width: float = 0.1,  # Spatial bin width for both x and y dimensions (in location units)
+    loc_bin_width: float = 0.3,  # Spatial bin width for both x and y dimensions (in location units)
     dt: float = 0.1,  # Time interval between consecutive samples (in seconds)
-    colorbar_label: str = "Spikes/s", # label for the colorbar
 ):
     """
     For a specific "unit" and a specific "target_type", plot the 2d rate map for the recorded and predicted data
@@ -536,14 +573,14 @@ def plot_2d_rate_map(
     axs[0].set_title(f"Unit: {unit}; type: {target_type}; recorded")
     axs[0].set_xlabel("X position")
     axs[0].set_ylabel("Y position")
-    plt.colorbar(im0, ax=axs[0], label=colorbar_label)
+    plt.colorbar(im0, ax=axs[0], label="Spikes/s")
     im1 = axs[1].imshow(smoothed_rate_map_pred.T, origin='lower', vmin=vmin, vmax=vmax,
                         extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
                         aspect='auto', cmap='hot_r')
     axs[1].set_title("Predicted")
     axs[1].set_xlabel("X position")
     # axs[1].set_ylabel("Y position")
-    plt.colorbar(im1, ax=axs[1], label=colorbar_label)
+    plt.colorbar(im1, ax=axs[1], label="Spikes/s")
     plt.tight_layout()
 
 def plot_2d_trajectory_response(
@@ -555,7 +592,6 @@ def plot_2d_trajectory_response(
     spike_count_pred: np.ndarray,  # 1D array of spike counts for one neuron at each time point
     loc_xx_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
     loc_yy_lim: np.ndarray = None, # boudary of x dimensions, 2-element array 
-    colorbar_label: str = "Spike count", # label for the colorbar
 ):
     """
     2D trajectory with colors indicating neural responses along the path
@@ -581,14 +617,14 @@ def plot_2d_trajectory_response(
     axs[0].set_ylim(loc_yy_lim)
     axs[0].set_xlabel("X position")
     axs[0].set_ylabel("Y position")
-    plt.colorbar(line, ax=axs[0], label=colorbar_label)
+    plt.colorbar(line, ax=axs[0], label="Spike count")
     line = axs[1].add_collection(lc_pred)
     axs[1].set_title("Predicted")
     axs[1].set_xlabel("X position")
     axs[1].set_xlim(loc_xx_lim)
     axs[1].set_ylim(loc_yy_lim)
     # axs[1].set_ylabel("Y position")
-    plt.colorbar(line, ax=axs[1], label=colorbar_label)
+    plt.colorbar(line, ax=axs[1], label="Spike count")
     plt.tight_layout()
     return None
 
@@ -1604,6 +1640,278 @@ class OrthogonalityPermutationTest:
         plt.legend()
         plt.tight_layout()
 
+    @staticmethod
+    def _summary_statistic(dists_condensed, stat):
+        """Compute a scalar summary of a condensed cosine-distance vector.
+
+        cosine_similarity = 1 - cosine_distance, so a population is "less
+        orthogonal" when |cos sim| is large on average, or when the spread of
+        cos sim is wider than expected.
+        """
+        cos_sim = 1.0 - dists_condensed
+        if stat == "mean_abs_cos_sim":
+            return np.mean(np.abs(cos_sim), axis=-1)
+        if stat == "mean_cos_sim":
+            return np.mean(cos_sim, axis=-1)
+        if stat == "var_cos_sim":
+            return np.var(cos_sim, axis=-1)
+        raise ValueError(f"Unknown stat: {stat}")
+
+    def _compute_shuffle_weights_null(self):
+        """Build a shuffle_weights null over pairwise distances.
+
+        shuffle_neurons leaves the multiset of pairwise distances unchanged
+        (pdist is invariant to row permutations), so any whole-population
+        summary is degenerate under that null. This method always uses
+        shuffle_weights and caches the result on the instance.
+        """
+        if hasattr(self, "_null_dists_shuffle_weights"):
+            return self._null_dists_shuffle_weights
+
+        n_pairs = self.n * (self.n - 1) // 2
+        out = np.zeros((self.n_perm, n_pairs), dtype=np.float32)
+        for k in range(self.n_perm):
+            Xp = np.empty_like(self.Xs)
+            for i in range(self.n):
+                Xp[i] = self.rng.permutation(self.Xs[i])
+            out[k] = pdist(Xp, metric=self.metric)
+
+        self._null_dists_shuffle_weights = out
+        return out
+
+    def compute_distribution_pvalue(
+        self,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+    ):
+        """Test whether the observed pairwise cosine-similarity distribution
+        across all neurons in the session is *less orthogonal* than chance.
+
+        Parameters
+        ----------
+        stat : {"mean_abs_cos_sim", "mean_cos_sim", "var_cos_sim"}
+            Summary statistic computed over all neuron pairs:
+              - "mean_abs_cos_sim": mean |1 - d|. Higher = less orthogonal.
+              - "mean_cos_sim":     mean (1 - d). Tests systematic alignment bias.
+              - "var_cos_sim":      var (1 - d). Higher = wider spread than chance.
+        alternative : {"greater", "less", "two-sided"}
+            Direction of the test. Default "greater" answers
+            "is the observed statistic above the null?" — for mean |cos sim|
+            and var, that is the "less orthogonal than chance" direction.
+
+        Returns
+        -------
+        dict with keys: stat, alternative, observed, null, p_value.
+        Also cached on self as self.distribution_test_[stat].
+        """
+        if not hasattr(self, "dist_obs_condensed"):
+            self.compute_observed()
+        null_dists = self._compute_shuffle_weights_null()
+
+        observed = self._summary_statistic(self.dist_obs_condensed, stat)
+        null = self._summary_statistic(null_dists, stat)
+
+        if alternative == "greater":
+            p = (1 + np.sum(null >= observed)) / (1 + self.n_perm)
+        elif alternative == "less":
+            p = (1 + np.sum(null <= observed)) / (1 + self.n_perm)
+        elif alternative == "two-sided":
+            null_centered = null - np.mean(null)
+            obs_centered = observed - np.mean(null)
+            p = (1 + np.sum(np.abs(null_centered) >= np.abs(obs_centered))) / (1 + self.n_perm)
+        else:
+            raise ValueError(f"Unknown alternative: {alternative}")
+
+        result = {
+            "stat": stat,
+            "alternative": alternative,
+            "observed": float(observed),
+            "null": null,
+            "p_value": float(p),
+        }
+        if not hasattr(self, "distribution_test_"):
+            self.distribution_test_ = {}
+        self.distribution_test_[stat] = result
+        return result
+
+    def plot_null_vs_observed_distribution(
+        self,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+        bins=40,
+        ax=None,
+    ):
+        """Histogram the null distribution of a population-level summary
+        statistic with the observed value drawn as a vertical line.
+
+        Calls compute_distribution_pvalue() if results aren't cached.
+        """
+        cache = getattr(self, "distribution_test_", {})
+        if stat not in cache:
+            self.compute_distribution_pvalue(stat=stat, alternative=alternative)
+        res = self.distribution_test_[stat]
+
+        label_map = {
+            "mean_abs_cos_sim": r"$\langle |\cos\,\mathrm{sim}| \rangle$",
+            "mean_cos_sim":     r"$\langle \cos\,\mathrm{sim} \rangle$",
+            "var_cos_sim":      r"$\mathrm{Var}(\cos\,\mathrm{sim})$",
+        }
+        xlabel = label_map.get(stat, stat)
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(4, 3))
+        ax.hist(res["null"], bins=bins, density=True, alpha=0.7, color="gray")
+        ax.axvline(
+            res["observed"],
+            linestyle="--", linewidth=2, c="k",
+            label=f"Observed = {res['observed']:.4f}",
+        )
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Density")
+        ax.set_title(
+            f"Population orthogonality test ({stat})\n"
+            f"{self.session_name}: n={self.n} neurons, "
+            f"p = {res['p_value']:.3f} ({res['alternative']})"
+        )
+        ax.legend()
+        plt.tight_layout()
+        return ax
+
+    @classmethod
+    def run_across_sessions(
+        cls,
+        X,
+        df,
+        session_names=None,
+        *,
+        stat="mean_abs_cos_sim",
+        alternative="greater",
+        n_perm=1000,
+        random_state=0,
+        bat_col="bat",
+        extra_cols=(),
+    ):
+        """Run the population orthogonality test on each session and return
+        a tidy DataFrame in the same shape as Mantel-test outputs (one row
+        per session with 'r', 'p', 'perm_rs' columns).
+
+        The returned frame can be passed directly to plot_session_boxplot
+        below, or to a Mantel-style helper such as plot_mantel_boxplots,
+        producing one boxplot of pooled null draws across sessions with one
+        colored dot per session for the observed statistic.
+
+        Parameters
+        ----------
+        X : ndarray, (n_neurons, n_features)
+            Readout weights, aligned with df rows.
+        df : pandas.DataFrame
+            Must contain 'session_name'. If `bat_col` is present it is used
+            to populate a 'bat' column on the result for hue-based plotting.
+            Any column listed in `extra_cols` is forwarded as well (taken
+            from the first row of each session).
+        session_names : list[str] | None
+            Sessions to test. None = all unique session_names in df.
+        stat, alternative, n_perm, random_state :
+            Forwarded to compute_distribution_pvalue / __init__.
+        bat_col : str
+            Column to copy into the 'bat' field of the output (used as
+            hue when plotting).
+        extra_cols : iterable[str]
+            Additional df columns to attach per session.
+        """
+        if session_names is None:
+            session_names = df["session_name"].unique().tolist()
+
+        records = []
+        for s in session_names:
+            sess_mask = df["session_name"] == s
+            if int(sess_mask.sum()) < 2:
+                continue
+            tester = cls(
+                X=X, df=df, session_name=s,
+                n_perm=n_perm, random_state=random_state,
+                null_model="shuffle_weights",
+            )
+            res = tester.compute_distribution_pvalue(
+                stat=stat, alternative=alternative,
+            )
+            first_row = df.loc[sess_mask].iloc[0]
+            rec = dict(
+                comparison=f"orthogonality ({stat})",
+                session=s,
+                r=res["observed"],
+                p=res["p_value"],
+                perm_rs=res["null"],
+                n_neurons=tester.n,
+                n_pairs=tester.n * (tester.n - 1) // 2,
+                bat=first_row[bat_col] if bat_col in df.columns else None,
+            )
+            for c in extra_cols:
+                if c in df.columns:
+                    rec[c] = first_row[c]
+            records.append(rec)
+        return pd.DataFrame(records)
+
+    @staticmethod
+    def plot_session_boxplot(
+        results_df,
+        *,
+        comparison_col="comparison",
+        hue_col="bat",
+        ylabel=None,
+        zero_line=False,
+        ncols=4,
+    ):
+        """Mantel-style plot of run_across_sessions output: per comparison,
+        a grey boxplot of pooled null draws across sessions overlaid with
+        one strip-plot dot per session colored by `hue_col`. Stars
+        annotate sessions where p < {0.05, 0.01, 0.001}.
+        """
+        import math
+        import seaborn as sns
+
+        comparisons = list(results_df[comparison_col].unique())
+        n = len(comparisons)
+        ncols_actual = min(n, ncols)
+        nrows = math.ceil(n / ncols_actual)
+        fig, axes = plt.subplots(
+            nrows, ncols_actual,
+            figsize=(4 * ncols_actual, 4 * nrows),
+            squeeze=False,
+        )
+        for idx, comp in enumerate(comparisons):
+            ax = axes[idx // ncols_actual, idx % ncols_actual]
+            sub = results_df[results_df[comparison_col] == comp].reset_index(drop=True)
+            if len(sub) == 0:
+                ax.set_visible(False)
+                continue
+            all_nulls = np.concatenate(sub["perm_rs"].values)
+            sns.boxplot(y=all_nulls, color="0.85", width=0.4,
+                        whis=(0.5, 99.5), fliersize=0, ax=ax)
+            sns.stripplot(
+                data=sub, y="r",
+                hue=hue_col if hue_col in sub.columns else None,
+                ax=ax, size=8, jitter=0.1, zorder=5,
+                edgecolor="k", linewidth=0.5,
+            )
+            for _, row in sub.iterrows():
+                star = ("***" if row["p"] < 0.001 else
+                        "**"  if row["p"] < 0.01  else
+                        "*"   if row["p"] < 0.05  else "")
+                if star:
+                    ax.text(0.25, row["r"], star, ha="left", va="center", fontsize=8)
+            ax.set_ylabel(ylabel or "observed statistic")
+            ax.set_title(comp, fontsize=9)
+            if zero_line:
+                ax.axhline(0, color="k", linewidth=0.5, linestyle="--")
+            ax.set_xticks([])
+            if hue_col in sub.columns and ax.get_legend() is not None:
+                ax.legend(title=hue_col, fontsize=7, title_fontsize=7)
+        for idx in range(n, nrows * ncols_actual):
+            axes.flat[idx].set_visible(False)
+        plt.tight_layout()
+        return fig
+
 
 def list_pad_concatenate(spike_list):
     """
@@ -2077,6 +2385,7 @@ class BatRateMapSim:
 
     def get_all_Wasserstein(self, num_of_bins=20):
         """Computes Earth Mover's Distance similarity profiles."""
+        import ot  # optional dep (POT); imported lazily so the package imports without it
         spatial_wass = {'flight_function_types': {}}
         target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
         
@@ -2093,9 +2402,9 @@ class BatRateMapSim:
         grid_coords = np.array(np.meshgrid(np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), indexing='ij')).reshape(3, -1).T
         # Compute the pairwise Euclidean distance matrix between all 8000 bins (20x20x20)
         # This represents the actual "metric distance space" for the transport cost
-        import ot  # lazy: optional POT dependency
         M_cost = ot.dist(grid_coords, grid_coords, metric='euclidean')
         def wasserstein_metric(m1, m2):
+            import ot  # optional dep (POT); imported lazily so the package imports without it
             # If either map belongs to an inactive neuron for this cluster, return NaN
             if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
                 return np.nan
@@ -2114,8 +2423,8 @@ class BatRateMapSim:
             ft_str = str(ft)
             if np.sum(self.flight_types == ft_str) == 0: continue
             
-            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
-            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical', num_of_bins=num_of_bins)
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent', num_of_bins=num_of_bins)
             
             spatial_wass['flight_function_types'][ft] = {
                 'wass_physical': self._compute_pairwise_similarity(phys_maps, wasserstein_metric),
@@ -2123,7 +2432,7 @@ class BatRateMapSim:
             }
         return spatial_wass
 
-    def get_all_Jaccard(self):
+    def get_all_Jaccard(self, num_of_bins=20):
         """Computes Jaccard Intersection-over-Union similarity on thresholded place fields."""
         spatial_jac = {'flight_function_types': {}}
         target_types = [('Reward', 'Reward'), ('Reward', 'Perch'), ('Perch', 'Reward'), ('Perch', 'Perch'), ('Other',)]
@@ -2142,8 +2451,8 @@ class BatRateMapSim:
             ft_str = str(ft)
             if np.sum(self.flight_types == ft_str) == 0: continue
             
-            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical')
-            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent')
+            phys_maps = self._get_valid_cluster_maps(ft_str, 'physical', num_of_bins=num_of_bins)
+            lat_maps = self._get_valid_cluster_maps(ft_str, 'latent', num_of_bins=num_of_bins)
             
             spatial_jac['flight_function_types'][ft] = {
                 'jaccard_physical': self._compute_pairwise_similarity(phys_maps, jaccard_metric),
@@ -2234,6 +2543,7 @@ class BatRateMapSim:
         behavioral occupancy distributions,
         but destroys the spatial relationship to neural tuning.
         """
+        import ot  # optional dep (POT); imported lazily so the package imports without it
         ft_mask = (self.flight_types == ft_str)
         unique_clusters = np.unique(self.clusters[ft_mask])
         
@@ -2288,9 +2598,9 @@ class BatRateMapSim:
                 if len(maps_list) > 1:
                     # Re-using your exact Wasserstein distane logic
                     grid_coords = np.array(np.meshgrid(np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), np.arange(num_of_bins - 1), indexing='ij')).reshape(3, -1).T
-                    import ot  # lazy: optional POT dependency
                     M_cost = ot.dist(grid_coords, grid_coords, metric='euclidean')
                     def wasserstein_metric(m1, m2):
+                        import ot  # optional dep (POT); imported lazily so the package imports without it
                         if np.any(np.isnan(m1)) or np.any(np.isnan(m2)):
                             return np.nan
                         v1, v2 = m1.flatten(), m2.flatten()
@@ -3036,8 +3346,10 @@ class FlightDMDAnalyzer:
         start_indices = np.where(all_rel_time == 0.0)[0]
         flight_boundaries = np.append(start_indices, len(all_rel_time))
         
-        # Map conditions to human-readable strings
-        task_mapping = {0: "R_to_R", 1: "R_to_P", 2: "P_to_R"}
+        # Map conditions to human-readable strings. All five endpoint combinations are
+        # kept (perch->perch and unclassified 'Other' included) so the flight set can match
+        # the RSA figures; filter downstream if only the three main routes are wanted.
+        task_mapping = {0: "R_to_R", 1: "R_to_P", 2: "P_to_R", 3: "P_to_P", 4: "Other"}
         
         # Initialize structured nested dictionary output
         results = {
@@ -3075,8 +3387,10 @@ class FlightDMDAnalyzer:
                 cond_id = 1
             elif is_start_perch and is_end_reward:
                 cond_id = 2
+            elif is_start_perch and is_end_perch:
+                cond_id = 3
             else:
-                continue # Exclude non-target trajectories (e.g., perch->perch)
+                cond_id = 4  # neither endpoint near a reward or a perch
                 
             task_str = task_mapping[cond_id]
             flight_latents = all_latents[idx_start:idx_end, :]
@@ -3096,6 +3410,7 @@ class FlightDMDAnalyzer:
                     "trajectory_len": length,
                     "raw_data": flight_dmd.data,
                     "reconstructed_data": flight_dmd.reconstructed_data,
+                    "h": flight_dmd.h,
                     "eigenvalues": flight_dmd.eigenvalues,
                     "dmd_modes":flight_dmd.dmd_modes,
                     "frequencies": flight_dmd.frequencies,
@@ -3142,10 +3457,43 @@ class FlightDMDPostAnalysis:
         plt.tight_layout()
         return None
 
-    def analyze_spatial_subspaces(self, top_mode_index=0):
+    @staticmethod
+    def _rank_modes(eigenvalues, power, oscillatory_only=True, tol=1e-9):
+        """Mode indices ranked by power after collapsing complex-conjugate pairs.
+
+        A real oscillation appears TWICE in the eigendecomposition, as (lambda, conj(lambda)),
+        with identical power and an identical real part -- so ranking on the raw power index can
+        hand back the same spatial pattern twice (it did so for 88/207 flights here). One member
+        of each pair is kept. With ``oscillatory_only`` (default) purely real eigenvalues are
+        dropped too, since those are the stationary / non-oscillatory background; index 0 is then
+        the strongest genuine oscillation. Falls back to the raw power ranking if a flight has no
+        oscillatory mode at all.
         """
-        2. Computes and plots subspace alignment (similarity matrix) 
-        between the dominant spatial modes across all flights with task labels.
+        lam = np.asarray(eigenvalues)
+        order, taken = [], np.zeros(len(lam), bool)
+        for i in np.argsort(power)[::-1]:
+            if taken[i]:
+                continue
+            if oscillatory_only and abs(lam[i].imag) <= tol:
+                continue
+            taken[i] = True
+            if abs(lam[i].imag) > tol:                       # consume the conjugate twin
+                j = int(np.argmin(np.abs(lam - np.conj(lam[i]))))
+                if j != i and abs(lam[j] - np.conj(lam[i])) < 1e-6:
+                    taken[j] = True
+            order.append(int(i))
+        return order or [int(i) for i in np.argsort(power)[::-1]]
+
+    def spatial_subspace_matrix(self, top_mode_index=0, oscillatory_only=True):
+        """Flight-by-flight alignment of the dominant spatial DMD **mode**.
+
+        Each flight contributes one mode (real part, unit-normed), chosen by
+        :meth:`_rank_modes`: power ranking over conjugate-collapsed, oscillatory modes, so
+        ``top_mode_index=0`` is the strongest genuine oscillation rather than the stationary
+        background. The statistic is |cos| between every pair, a similarity in [0, 1].
+        Returns ``(similarity_matrix, labels)`` in the natural (unsorted) flight order,
+        with ``labels[i]`` the route of flight i. Pair with
+        :func:`within_across_route_similarity` to test for route structure.
         """
         all_modes = []
         labels = []
@@ -3154,17 +3502,33 @@ class FlightDMDPostAnalysis:
             for flight in self.env_data[task]:
                 modes = flight['dmd_modes']
                 power = flight['mode_power']
-                top_indices = np.argsort(power)[::-1][top_mode_index]
+                lam = flight['eigenvalues']
+                # Shift-stacking makes the mode vector h*n long, and an auto-selected h varies
+                # from flight to flight; keep only the leading un-stacked state block so every
+                # flight contributes the same n_features-long vector (this is also the block
+                # `mode_power` is measured on).
+                n_feat = flight['raw_data'].shape[0]
+                ranked = self._rank_modes(lam, power, oscillatory_only)
+                top_indices = ranked[min(top_mode_index, len(ranked) - 1)]
                 
-                primary_mode = np.real(modes[:, top_indices])
+                primary_mode = np.real(modes[:n_feat, top_indices])
                 primary_mode /= (np.linalg.norm(primary_mode) + 1e-12)
                 
                 all_modes.append(primary_mode)
                 labels.append(task)
                 
         all_modes = np.array(all_modes)
-        similarity_matrix = np.abs(all_modes @ all_modes.T)
-        
+        return np.abs(all_modes @ all_modes.T), np.asarray(labels)
+
+    def analyze_spatial_subspaces(self, top_mode_index=0, oscillatory_only=True):
+        """
+        2. Computes and plots subspace alignment (similarity matrix)
+        between the dominant spatial modes across all flights with task labels.
+
+        Returns ``(similarity_matrix, labels)`` (unsorted) so the caller can quantify it.
+        """
+        similarity_matrix, labels = self.spatial_subspace_matrix(top_mode_index, oscillatory_only)
+
         sort_idx = np.argsort(labels)
         sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
         sorted_labels = [labels[i] for i in sort_idx]
@@ -3194,17 +3558,21 @@ class FlightDMDPostAnalysis:
         
         plt.title(f"Spatial Subspace Alignment Map ({self.env.capitalize()})", pad=15, fontsize=12)
         plt.tight_layout()
-        return None
+        return similarity_matrix, labels
     
-    def analyze_temporal_subspaces(self, data_type='latent'):
-        """
-        Computes and plots the temporal subspace alignment map (similarity_matrix) based on the 
-        cosine similarity of power-weighted complex eigenvalue distributions.
+    def temporal_subspace_matrix(self, data_type='latent'):
+        """Flight-by-flight alignment of the **eigenvalue** distribution.
 
-        Parameters:
-        -----------
+        Each flight's eigenvalues are binned on the complex plane weighted by mode power,
+        flattened and unit-normed; the statistic is the cosine between every pair. Returns
+        ``(similarity_matrix, labels)`` in the natural (unsorted) flight order. This is the
+        temporal/spectral counterpart of :meth:`spatial_subspace_matrix`, which instead
+        compares the geometry of the dominant mode.
+
+        Parameters
+        ----------
         data_type : str
-            'latent' or 'neuronal'. If 'neuronal', the 0 Hz static baseline 
+            'latent' or 'neuronal'. If 'neuronal', the 0 Hz static baseline
             component is completely zeroed out to expose hidden rhythms.
         """
         temporal_profiles = []
@@ -3251,8 +3619,17 @@ class FlightDMDPostAnalysis:
         temporal_profiles = np.array(temporal_profiles) # Shape: (n_flights, n_bins)
         
         # Compute pairwise temporal profile cosine similarity
-        similarity_matrix = temporal_profiles @ temporal_profiles.T
-        
+        return temporal_profiles @ temporal_profiles.T, np.asarray(labels)
+
+    def analyze_temporal_subspaces(self, data_type='latent'):
+        """
+        Computes and plots the temporal subspace alignment map (similarity_matrix) based on the
+        cosine similarity of power-weighted complex eigenvalue distributions.
+
+        Returns ``(similarity_matrix, labels)`` (unsorted) so the caller can quantify it.
+        """
+        similarity_matrix, labels = self.temporal_subspace_matrix(data_type)
+
         # Here we use distance matrix, and then sort by task blocks to group matching flight conditions
         sort_idx = np.argsort(labels)
         sorted_matrix = similarity_matrix[sort_idx, :][:, sort_idx]
@@ -3280,7 +3657,7 @@ class FlightDMDPostAnalysis:
         
         plt.title(f"Temporal Subspace Alignment ({self.env.capitalize()})", pad=15, fontsize=12)
         plt.tight_layout()
-        return None
+        return similarity_matrix, labels
 
     def plot_spectral_density_profiles(self, max_freq=5.0, sigma=0.1):
         """
@@ -3372,6 +3749,42 @@ class FlightDMDPostAnalysis:
         plt.grid(True, linestyle=':', alpha=0.6)
         plt.tight_layout()
         return None
+
+
+def within_across_route_similarity(similarity_matrix, labels):
+    """Per-flight within-route vs across-route mean similarity from an RSA matrix.
+
+    Takes any flight-by-flight similarity matrix (e.g. from
+    :meth:`FlightDMDPostAnalysis.spatial_subspace_matrix` or
+    :meth:`FlightDMDPostAnalysis.temporal_subspace_matrix`) together with the per-flight
+    route labels, and reduces it to one row per flight: the mean similarity to the OTHER
+    flights of its own route (``within``) versus to flights of every other route
+    (``across``), and their difference (``delta``). The self-comparison on the diagonal is
+    excluded, so ``within`` is never inflated by a flight matching itself.
+
+    ``delta > 0`` means the dynamics are more alike within a route than across routes.
+    Test it against zero with a one-sample signed-rank test over flights, or compare
+    ``within`` against ``across`` with the paired test -- the two are equivalent.
+
+    Returns a DataFrame with columns ``flight, route, within, across, delta``.
+    """
+    labels = np.asarray(labels)
+    S = np.array(similarity_matrix, dtype=float, copy=True)
+    if S.ndim != 2 or S.shape[0] != S.shape[1] or S.shape[0] != len(labels):
+        raise ValueError(f'similarity_matrix {S.shape} incompatible with {len(labels)} labels')
+    np.fill_diagonal(S, np.nan)                       # drop the self-comparison
+    same = labels[:, None] == labels[None, :]
+    rows = []
+    for i in range(len(labels)):
+        w, a = S[i][same[i]], S[i][~same[i]]
+        rows.append(dict(
+            flight=i, route=labels[i],
+            within=float(np.nanmean(w)) if np.isfinite(w).any() else np.nan,
+            across=float(np.nanmean(a)) if np.isfinite(a).any() else np.nan))
+    out = pd.DataFrame(rows)
+    out['delta'] = out['within'] - out['across']
+    return out
+
 
 
 class FlightSharedStates():
@@ -3869,39 +4282,3 @@ def plot_bottleneck_single_neuron(session_name, all_session, detailed_session_da
 
     return None
 
-
-def round_robin_session_batches(loaders, rng=None):
-    """Yield `(session_name, batch)` from per-session DataLoaders, interleaved.
-
-    Each session contributes its own per-epoch worth of batches, but the order
-    of (session → batch) draws is uniformly random over the still-active set.
-    Compared to draining each session sequentially, this:
-      - keeps Adam's running m/v reflective of the joint multi-session
-        gradient distribution (no end-of-epoch momentum bias toward the last
-        session trained),
-      - avoids stale per-session readin parameters (`Bat_Transformer.readouts`,
-        `Bat_Transformer_Decoder.readins`, `PerceiverIOTrajectoryDecoder.neuron_embeds`),
-        since every session's parameter is re-touched throughout the epoch
-        alongside an up-to-date shared backbone.
-
-    Parameters
-    ----------
-    loaders : Mapping[str, DataLoader]
-        Per-session loaders. A one-key mapping (`{None: loader}`) degenerates
-        to plain in-order iteration of that single loader.
-    rng : random.Random | None
-        Seedable RNG for the session draws. If None, a fresh one is created
-        seeded from torch's current RNG state — so callers who set
-        `torch.manual_seed` upstream still get reproducible orderings.
-    """
-    if rng is None:
-        seed = int(torch.randint(0, 2 ** 31, (1,)).item())
-        rng = _stdlib_random.Random(seed)
-    iters = {sn: iter(loader) for sn, loader in loaders.items()}
-    active = list(iters.keys())
-    while active:
-        sn = rng.choice(active) if len(active) > 1 else active[0]
-        try:
-            yield sn, next(iters[sn])
-        except StopIteration:
-            active.remove(sn)
