@@ -458,14 +458,39 @@ def compute_target_proximity(positions, session_name=None,
     if perch_locs is None:
         perch_locs = PERCH_LOCS
     pos = np.asarray(positions)
-    dist_rew = np.min(np.linalg.norm(pos[:, None, :] - rew_locs[None, :, :], axis=-1), axis=1)
-    dist_perch = np.min(np.linalg.norm(pos[:, None, :] - perch_locs[None, :, :], axis=-1), axis=1)
+    d_rew = np.linalg.norm(pos[:, None, :] - rew_locs[None, :, :], axis=-1)
+    d_perch = np.linalg.norm(pos[:, None, :] - perch_locs[None, :, :], axis=-1)
+    dist_rew, dist_perch = d_rew.min(1), d_perch.min(1)
     return dict(
         dist_rew=dist_rew,
         dist_perch=dist_perch,
         at_rew=dist_rew < dist_thresh,
         at_perch=dist_perch < dist_thresh,
+        # WHICH target, not just how far: index into rew_locs / perch_locs of the
+        # nearest one (e.g. feeder 1 vs feeder 2 in the two-feeder indoor room).
+        rew_idx=d_rew.argmin(1),
+        perch_idx=d_perch.argmin(1),
     )
+
+
+def feeder_index(positions, session_name=None, rew_locs=None,
+                 dist_thresh=DIST_THRESH):
+    """Which reward feeder each of ``positions`` (N, 3) is at.
+
+    Returns an int array of row indices into that session's ``rew_locs`` (the
+    nearest feeder), with ``-1`` wherever the position is further than
+    ``dist_thresh`` from every feeder. Complements
+    :func:`plotting_helpers.endpoint_class`, which only says *reward vs perch*:
+    the indoor room (Datasets 1 & 3) has two feeders, and this separates them.
+    """
+    prox = compute_target_proximity(positions, session_name=session_name,
+                                    rew_locs=rew_locs, dist_thresh=dist_thresh)
+    return np.where(prox['at_rew'], prox['rew_idx'], -1)
+
+
+def n_feeders(session_name):
+    """Number of reward feeders in the room `session_name` was recorded in."""
+    return len(get_target_locs(session_name)[0])
 
 
 def plot_spatial_field(df, value_col='err_3d', value_label='3-D error (m)',
@@ -997,6 +1022,62 @@ def select_dual_field_cells(flights, n_neurons, dt, r_lim,
     return candidates[:n_top]
 
 
+def style_3d_grid_frame(ax):
+    """Keep a 3-D axis's panes + gridlines but drop every spine, tick and label.
+
+    The 'scale-bar' look used throughout the paper: the box/grid stays as a depth
+    cue, the numbers go away. Same treatment ``add_3d_scalebar(..., hide_frame=False)``
+    applies, factored out so panels that share a single scale bar can still show the
+    grid behind them."""
+    ax.set_xlabel(''); ax.set_ylabel(''); ax.set_zlabel('')
+    ax.tick_params(length=0)                 # no tick marks
+    for _a3 in (ax.xaxis, ax.yaxis, ax.zaxis):
+        _a3.set_ticklabels([])               # no tick labels (keep ticks -> keep grid)
+        if hasattr(_a3, 'line'):
+            _a3.line.set_visible(False)      # no axis line (spine)
+        _a3.pane.set_edgecolor('none')       # no pane border
+        _a3._axinfo['tick']['inward_factor'] = 0   # no tick marks (3-D)
+        _a3._axinfo['tick']['outward_factor'] = 0
+
+
+def hide_3d_plane(ax, plane='yz'):
+    """Remove one wall of a 3-D box entirely: its pane *and* the gridlines on it.
+
+    ``plane`` is 'yz' (the constant-x wall), 'xz' (constant y) or 'xy' (the floor).
+    Hiding the pane alone leaves the wall as a floating wireframe, because matplotlib
+    draws each axis's gridlines as three-point polylines that bend across two panes
+    (see ``axis3d.Axis.draw``). This also trims the half of every polyline that lies in
+    the removed plane, so the box reads as an open corner. Safe to call repeatedly."""
+    dim = {'yz': 0, 'xz': 1, 'xy': 2}[plane]
+    axes3 = (ax.xaxis, ax.yaxis, ax.zaxis)
+    axes3[dim].pane.set_visible(False)
+    for j, axis in enumerate(axes3):
+        if j == dim:
+            continue                          # this axis's grid never touches the plane
+        gl = axis.gridlines
+        if getattr(gl, '_trimmed_plane', None) is not None:
+            continue                          # already patched
+        _orig_set = gl.set_segments
+
+        def _set_segments(segments, _orig_set=_orig_set, _dim=dim):
+            # the middle vertex sits on the removed plane, so its coordinate along
+            # ``_dim`` identifies the wall; drop whichever end shares it.
+            out = []
+            for seg in segments:
+                seg = np.asarray(seg, float)
+                if len(seg) == 3:
+                    on = np.isclose(seg[:, _dim], seg[1, _dim])
+                    if on[0]:
+                        seg = seg[1:]
+                    elif on[2]:
+                        seg = seg[:2]
+                out.append(seg)
+            _orig_set(out)
+
+        gl.set_segments = _set_segments
+        gl._trimmed_plane = plane
+
+
 def add_3d_scalebar(ax, length=1.0, corner=(0, 0, 0), color='k', lw=2.5,
                     fontsize=15, gap=0.12, unit='m', y_nudge=(0.0, 0.0, 0.0), x_nudge=(0.0, 0.0, 0.0), hide_frame=True,
                     origin_shift=(0.0, 0.0, 0.0), alpha=1.0, z_nudge=(0.0, 0.0, 0.0), label_weight='normal'):
@@ -1030,15 +1111,7 @@ def add_3d_scalebar(ax, length=1.0, corner=(0, 0, 0), color='k', lw=2.5,
     if hide_frame:
         ax.set_axis_off()
     else:                                        # keep gridlines; drop spines, ticks, labels
-        ax.set_xlabel(''); ax.set_ylabel(''); ax.set_zlabel('')
-        ax.tick_params(length=0)                 # no tick marks
-        for _a3 in (ax.xaxis, ax.yaxis, ax.zaxis):
-            _a3.set_ticklabels([])               # no tick labels (keep ticks -> keep grid)
-            if hasattr(_a3, 'line'):
-                _a3.line.set_visible(False)      # no axis line (spine)
-            _a3.pane.set_edgecolor('none')       # no pane border
-            _a3._axinfo['tick']['inward_factor'] = 0   # no tick marks (3-D)
-            _a3._axinfo['tick']['outward_factor'] = 0
+        style_3d_grid_frame(ax)
 
 
 def plot_dual_field_cell(flights, neuron, clusters, dt, r_lim,
