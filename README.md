@@ -26,9 +26,20 @@ tag **`paper-figures-v1`** marks the version used for the paper.
    corresponding author on reasonable request. Set `data_root` in
    [`notebooks/machine_paths.py`](notebooks/machine_paths.py) to the folder that holds the
    `Dataset_*` sessions (and `UnitMatch/` for the sleep analyses).
-2. **Environment.** Python with `torch`, `numpy`, `scipy`, `pandas`, `scikit-learn`,
-   `matplotlib`, `seaborn`, `optuna`, `cebra`, `POT` and `statsmodels`. The package is used
-   from the repo directly, without installation. A GPU is needed only to retrain models.
+2. **Environment.** Python ≥ 3.10. From the repo root (install PyTorch first if you need a
+   particular CUDA build):
+
+   ```bash
+   pip install -e ".[figures]"
+   pip install --no-deps cebra==0.6.1
+   ```
+
+   `cebra` is installed separately because its metadata pins `numpy<2` on Windows; it runs
+   fine on NumPy 2.4. To reproduce the paper's exact environment (Python 3.13, PyTorch 2.7.1
+   + CUDA 12.6, NumPy 2.4), use `pip install -r requirements.txt` in place of the first
+   line. Other extras in [`pyproject.toml`](pyproject.toml): `interpret`, `motifs`,
+   `notebooks`, `all`. Installing is optional for the notebooks, which put the repo root
+   on `sys.path` themselves. A GPU is needed only to retrain models.
 3. **Run** from `notebooks/`: the *Shared setup* cells first, then any figure section.
    Models load from `notebooks/out/` when cached and are trained otherwise. Figures are
    written to `notebooks/out/figures/{pdf,png}/`.
@@ -70,6 +81,7 @@ is read from `notebooks/out/joint/joint_scheme_sweep.pkl`. The Extended Data Fig
 | `digitalbat/training/` | Trainers, including train-if-missing for the Twin |
 | `notebooks/figures.ipynb` | All paper figures |
 | `training/` | Long-running jobs for Fig. 1H and Extended Data Fig. 3 |
+| `pyproject.toml`, `requirements.txt` | Dependencies and optional extras; exact versions used for the paper |
 
 ## License
 
