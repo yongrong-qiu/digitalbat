@@ -1,4 +1,4 @@
-# digitalbat
+# A hippocampal digital Twin reveals latent structure in freely flying bats
 
 Code for **[A hippocampal digital Twin reveals latent structure in freely flying bats](paper/bat_intelligence_2026_bioRxiv.pdf)**
 (Lowet\*, Qiu\*, Forli, Kasuba, Lin, Tolias†, Yartsev†).
@@ -30,16 +30,11 @@ tag **`paper-figures-v1`** marks the version used for the paper.
    particular CUDA build):
 
    ```bash
-   pip install -e ".[figures]"
+   pip install -r requirements.txt
    pip install --no-deps cebra==0.6.1
    ```
 
-   `cebra` is installed separately because its metadata pins `numpy<2` on Windows; it runs
-   fine on NumPy 2.4. To reproduce the paper's exact environment (Python 3.13, PyTorch 2.7.1
-   + CUDA 12.6, NumPy 2.4), use `pip install -r requirements.txt` in place of the first
-   line. Other extras in [`pyproject.toml`](pyproject.toml): `interpret`, `motifs`,
-   `notebooks`, `all`. Installing is optional for the notebooks, which put the repo root
-   on `sys.path` themselves. A GPU is needed only to retrain models.
+   `cebra` is installed separately because its metadata pins `numpy<2` on Windows; it runs fine on NumPy 2.4. A GPU is needed only to retrain models.
 3. **Run** from `notebooks/`: the *Shared setup* cells first, then any figure section.
    Models load from `notebooks/out/` when cached and are trained otherwise. Figures are
    written to `notebooks/out/figures/{pdf,png}/`.
