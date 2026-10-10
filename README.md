@@ -1,6 +1,6 @@
 # A hippocampal digital Twin reveals latent structure in freely flying bats
 
-Code for **[A hippocampal digital Twin reveals latent structure in freely flying bats](paper/bat_intelligence_2026_bioRxiv.pdf)**
+Code for **A hippocampal digital Twin reveals latent structure in freely flying bats**
 (Lowet\*, Qiu\*, Forli, Kasuba, Lin, Tolias†, Yartsev†).
 
 We trained a multimodal transformer, the digital **Twin**, jointly on hippocampal activity and
