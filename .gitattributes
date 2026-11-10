@@ -1,0 +1,3 @@
+# Checkpoints, Optuna studies and caches under notebooks/out are binary: never let
+# core.autocrlf rewrite them. figures.ipynb keys its Fig. 3/4 caches on each checkpoint's md5.
+notebooks/out/** -text
