@@ -54,7 +54,8 @@ on that session. `MODELS` in the notebook chooses where the models (the Twin, tw
 naïve-Bayes decoder and CEBRA) come from:
 
 - **`'paper'`** (default without a GPU): the paper's models, trained on all 17 sessions and
-  committed under `notebooks/out/`. Nothing is trained, and **Fig. 3 reproduces the paper exactly**.
+  committed under `notebooks/out/`. Nothing is trained, and **Fig. 3A–L reproduce the paper
+  exactly**.
 - **`'retrain'`** (default with a CUDA GPU): retrains the Twin and the Fig. 1 baselines on that
   session. Please note that this produces different and underpowered Twin (and unified CEBRA) models compared to the full dataset. We include it here just to illustrate how training works. All published numbers run through `notebooks/figures.ipynb`.
 - **`'cached'`:** the single-session models that `'retrain'` produced on our GPU, committed in
@@ -88,14 +89,17 @@ and figures are saved to `notebooks/out/demo/figures/{pdf,png}/`.
   they match the paper exactly. That means 47 place cells, and a place-cell sequence preserved
   across paths (Spearman ρ = 0.909 between Path 1 training and held-out flights, 0.534 for Path 2,
   0.543 for Path 3; all *P* = 5.00 × 10⁻⁴).
-- **Exact with `'paper'`:** Fig. 3J–M, every statistic included (for example panel K's
+- **Exact with `'paper'`:** Fig. 3J–L, every statistic included (for example panel K's
   *P* = 4.4 × 10⁻⁹).
   - **J–K:** use the paper's Twin and the PCA basis the figure was drawn in
     (`notebooks/out/fig3_cache/latent_pca3.npz`, fit to all 17 sessions' test-flight latents).
-  - **M:** uses the matching 15-D basis (`latent_pca15.npz`).
-  - **L–M:** pool 15 sessions. The notebook recomputes this session's values, checks them against
-    the paper's committed results, and takes the other sessions from those results. L's values
-    agree to 10⁻¹⁴; M's agree to 10⁻⁵, the rounding of projecting onto a saved basis.
+  - **L:** pools 15 sessions. The notebook recomputes this session's values, checks them against
+    the paper's committed results (they agree to 10⁻¹⁴), and takes the other sessions from those
+    results.
+- **Panel M with `'paper'`:** built the same way as L, on the matching 15-D basis
+  (`latent_pca15.npz`). This session's values agree with the committed results to 10⁻⁵, the
+  rounding of projecting onto a saved basis. Like `figures.ipynb`, it matches the published
+  figure only to within shuffle variation (see [Reproducing the figures](#reproducing-the-figures)).
 - **Fig. 1B–F with `'paper'`:** this session's values from the paper's models. The paper's Fig. 1
   pools 17 sessions.
 - **Single-session versions** (`'retrain'`, `'cached'`): Fig. 1B–F and Fig. 3J–M come from models
@@ -118,7 +122,8 @@ and figures are saved to `notebooks/out/demo/figures/{pdf,png}/`.
 
 **What the public session cannot reproduce.** From this repository and the public session alone:
 
-- **Exact:** Fig. 3 (A–I in every mode; J–M with `'paper'`) and Extended Data Fig. 8.
+- **Exact:** Fig. 3 (A–I in every mode; J–L with `'paper'`) and Extended Data Fig. 8. Panel M
+  matches with `'paper'` to within shuffle variation.
 - **This session's values only:** Fig. 1B–F.
 - **Not reproducible:** Fig. 1H, Figs. 2 and 4, Extended Data Figs. 1–7, 9 and 10, and Table S1.
   These aggregate over all 17 sessions, or draw examples from sessions that are not public.
@@ -165,6 +170,12 @@ tag **`paper-figures-v1`** marks the version used for the paper.
    so a fresh clone reproduces every figure without retraining or recomputing. Anything missing
    from `notebooks/out/` is trained or recomputed. Figures are written to
    `notebooks/out/figures/{pdf,png}/`.
+
+Fig. 3M is the one panel that reproduces only to within shuffle variation. Its z-scores compare
+each neuron's rate-map stability with 100 random circular shifts of its spikes. The published
+panel comes from an earlier run whose shuffles cannot be regenerated, so the notebook draws new
+ones. The notebook's per-route median z-scores are −0.95, −0.23 and −0.27, against the published
+−0.99, −0.19 and −0.32, with the same session counts and significance.
 
 Each section of the notebook has a header, its data cells, one canvas cell that draws and
 saves the figure, and the figure legend from the paper.
