@@ -36,8 +36,12 @@ tag **`paper-figures-v1`** marks the version used for the paper.
 
    `cebra` is installed separately because its metadata pins `numpy<2` on Windows; it runs fine on NumPy 2.4. A GPU is needed only to retrain models.
 3. **Run** from `notebooks/`: the *Shared setup* cells first, then any figure section.
-   Models load from `notebooks/out/` when cached and are trained otherwise. Figures are
-   written to `notebooks/out/figures/{pdf,png}/`.
+   Every checkpoint, Optuna study and cache the notebook reads is committed under
+   `notebooks/out/` (about 230 MB), so a fresh clone reproduces every figure without
+   retraining or recomputing. Anything missing from `notebooks/out/` is trained or
+   recomputed. Figures are written to `notebooks/out/figures/{pdf,png}/`. On Windows,
+   clone to a short path such as `C:\src\digitalbat` (or enable long paths): some
+   checkpoint names are long.
 
 Each section of the notebook has a header, its data cells, one canvas cell that draws and
 saves the figure, and the figure legend from the paper.
