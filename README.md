@@ -92,9 +92,10 @@ and figures are saved to `notebooks/out/demo/figures/{pdf,png}/`.
   *P* = 4.4 × 10⁻⁹).
   - **J–K:** use the paper's Twin and the PCA basis the figure was drawn in
     (`notebooks/out/fig3_cache/latent_pca3.npz`, fit to all 17 sessions' test-flight latents).
+  - **M:** uses the matching 15-D basis (`latent_pca15.npz`).
   - **L–M:** pool 15 sessions. The notebook recomputes this session's values, checks them against
-    the paper's committed results (they agree to 10⁻¹⁴), and takes the other sessions from those
-    results.
+    the paper's committed results, and takes the other sessions from those results. L's values
+    agree to 10⁻¹⁴; M's agree to 10⁻⁵, the rounding of projecting onto a saved basis.
 - **Fig. 1B–F with `'paper'`:** this session's values from the paper's models. The paper's Fig. 1
   pools 17 sessions.
 - **Single-session versions** (`'retrain'`, `'cached'`): Fig. 1B–F and Fig. 3J–M come from models
