@@ -64,9 +64,10 @@ naïve-Bayes decoder and CEBRA) come from:
 The notebook prints which models a run uses. Everything after loading or training the models is
 computed in every mode.
 
-1. **Data.** Download the session from figshare
-   ([doi:10.6084/m9.figshare.34805709](https://doi.org/10.6084/m9.figshare.34805709)). The code
-   reads only these five files (81 MB of the download). The rest is included for completeness:
+1. **Data.** Download the session from figshare. The demo session will be public at [doi:10.6084/m9.figshare.34805709](https://doi.org/10.6084/m9.figshare.34805709) on publication; during peer review, editors and referees can download it through the link provided with the submission.
+
+   The code reads only these five files (81 MB of the download). The rest is included for
+   completeness:
 
    ```
    <DATA_DIR>/
